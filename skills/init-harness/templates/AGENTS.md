@@ -2,7 +2,7 @@
 
 > Quick links: [Architecture](docs/ARCHITECTURE.md) · [Abstractions](docs/ABSTRACTIONS.md) · [Vision](docs/VISION.md) · [Getting Started](docs/GETTING-STARTED.md) · [ADRs](docs/adr/README.md) · [Sentrux](docs/sentrux.md)
 >
-> *Playbook structure inspired by [tolaria](https://github.com/refactoringhq/tolaria); gate by [Sentrux](https://github.com/sentrux/sentrux).*
+> *Structural gate by [Sentrux](https://github.com/sentrux/sentrux).*
 
 Critical guardrails for this repository — read before writing code or opening a PR.
 

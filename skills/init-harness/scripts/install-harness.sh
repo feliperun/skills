@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# init-harness — installs the docs + agent harness scheme (tolaria style) into a repo.
+# init-harness — installs the docs + agent harness scheme into a repo.
 #
 # Usage:
 #   install-harness.sh [target-dir]     # default: cwd

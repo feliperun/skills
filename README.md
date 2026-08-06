@@ -30,8 +30,7 @@ skills/init-harness/scripts/install-harness.sh <repo>      # install
 
 The playbook in `skills/init-harness/templates/AGENTS.md` consolidates what is in
 use in [phai](https://github.com/feliperun/phai) and
-[cueme](https://github.com/feliperun/cueme). Structure inspired by
-[tolaria](https://github.com/refactoringhq/tolaria).
+[cueme](https://github.com/feliperun/cueme).
 
 ## Canonical instructions
 

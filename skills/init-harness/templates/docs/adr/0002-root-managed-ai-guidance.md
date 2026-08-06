@@ -8,10 +8,11 @@ date: {{DATE}}
 
 ## Context
 
-Multiple AI tools (Cursor, Claude Code, Gemini CLI, Copilot) expect project
-instructions at the repository root. Duplicated `CLAUDE.md`, `GEMINI.md`, etc.
-drift quickly. Tolaria established `AGENTS.md` as the single canonical playbook
-with tool-specific shims.
+Multiple AI tools (Cursor, Claude Code, Gemini CLI, Copilot) each expect their own
+instruction file at the repository root. Maintaining `CLAUDE.md`, `GEMINI.md`, and
+`CURSOR.md` as separate documents means every guardrail change has to land in each
+of them; in practice one gets updated and the rest drift, so different agents end
+up working under different rules in the same repo.
 
 ## Decision
 
@@ -21,8 +22,9 @@ Tool-specific files (`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`) are symlinks to
 
 ## Options considered
 
-- **AGENTS.md canonical + symlinks** (chosen): one source of truth; matches
-  modern agent conventions (tolaria ADR-0065).
+- **AGENTS.md canonical + symlinks** (chosen): one source of truth, and drift is
+  impossible by construction rather than by discipline; `AGENTS.md` is the name
+  the ecosystem is converging on.
 - **CLAUDE.md only**: works for Claude; other tools miss shared guardrails.
 - **Separate full files per tool**: guaranteed drift.
 

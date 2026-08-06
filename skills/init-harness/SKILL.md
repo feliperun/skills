@@ -1,12 +1,11 @@
 ---
 name: init-harness
-description: Installs the docs + agent harness scheme (tolaria style) into a repository - canonical AGENTS.md with CLAUDE.md/GEMINI.md/CURSOR.md symlinks, docs/ (VISION, ARCHITECTURE, ABSTRACTIONS, GETTING-STARTED), ADRs with template and index, Sentrux structural quality gate (.sentrux/rules.toml + baseline), CI, a create-adr slash command, and githooks. Use when the user says "install harness", "init-harness", "set up docs/ADR/sentrux", or wants to bootstrap engineering governance in a new repo.
+description: Installs the docs + agent harness scheme into a repository - canonical AGENTS.md with CLAUDE.md/GEMINI.md/CURSOR.md symlinks, docs/ (VISION, ARCHITECTURE, ABSTRACTIONS, GETTING-STARTED), ADRs with template and index, Sentrux structural quality gate (.sentrux/rules.toml + baseline), CI, a create-adr slash command, and githooks. Use when the user says "install harness", "init-harness", "set up docs/ADR/sentrux", or wants to bootstrap engineering governance in a new repo.
 ---
 
 # init-harness
 
-Bootstraps the **docs + agent harness scheme** in a repository. Structure inspired
-by [tolaria](https://github.com/refactoringhq/tolaria); structural gate by
+Bootstraps the **docs + agent harness scheme** in a repository. Structural gate by
 [Sentrux](https://github.com/sentrux/sentrux). The playbook consolidates what is in
 use in [phai](https://github.com/feliperun/phai) and
 [cueme](https://github.com/feliperun/cueme).
@@ -84,8 +83,6 @@ The installer:
 
 ## References
 
-- Structure: [tolaria](https://github.com/refactoringhq/tolaria) — ADR-0065
-  (root-managed AI guidance), ADR-0018/0064 (gates)
 - Gate: [Sentrux](https://github.com/sentrux/sentrux)
 - Applied in: [phai](https://github.com/feliperun/phai),
   [cueme](https://github.com/feliperun/cueme)

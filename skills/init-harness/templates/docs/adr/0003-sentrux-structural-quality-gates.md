@@ -13,10 +13,11 @@ regressions, but they are **blind to structure**: rising coupling, import
 cycles, complexity hotspots, and files quietly turning into god objects. These
 are exactly what makes a small, healthy codebase slow and fragile a year later.
 
-Tolaria solved this with [Sentrux](https://github.com/sentrux/sentrux),
-a structural-quality sensor that scores the dependency/call graph and ratchets
-against regression. We adopt the same pattern while the repo is small enough to
-set a clean baseline.
+[Sentrux](https://github.com/sentrux/sentrux) is a structural-quality sensor that
+scores the dependency/call graph and ratchets against regression. Adopting it now,
+while the repo is small, sets a clean baseline — retrofitting a gate onto an
+already-degraded codebase means either a baseline that locks in the damage or a
+backlog of refactors before the gate can go green.
 
 ## Decision
 

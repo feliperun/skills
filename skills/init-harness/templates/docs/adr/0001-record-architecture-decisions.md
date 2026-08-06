@@ -14,14 +14,16 @@ the system looks the way it does.
 
 ## Decision
 
-**Use Architecture Decision Records in `docs/adr/` following the tolaria
-playbook.** Each structural choice gets a numbered, immutable record; changes
-supersede prior ADRs instead of editing them.
+**Record every structural choice as an Architecture Decision Record in
+`docs/adr/`.** Each decision gets its own numbered, immutable file; a changed
+decision supersedes the prior ADR instead of editing it.
 
 ## Options considered
 
-- **ADR folder with frontmatter** (chosen): proven in tolaria; works for
-  humans and coding agents; index in `README.md`.
+- **ADR folder with frontmatter** (chosen): versioned alongside the code it
+  explains, so a decision and its implementation move together; the frontmatter
+  is machine-readable, which lets agents filter by status; the index lives in
+  `README.md`.
 - **Only a learnings doc**: lightweight but mixes incidents with irreversible
   architecture choices.
 - **Wiki / external docs**: fine for product, poor for version-controlled
