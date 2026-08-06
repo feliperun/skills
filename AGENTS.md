@@ -20,6 +20,25 @@ Write the minimum code that runs. No fluff, no gold-plating.
 - Study how established products solve the problem before designing a solution. Adopt
   their proven patterns and conventions rather than inventing an approach from scratch.
 
+## Repository rules
+
+- **`AGENTS.md` is the single source of guidance.** `CLAUDE.md`, `GEMINI.md`,
+  `CURSOR.md`, `AGENT.md` and `.github/copilot-instructions.md` are symlinks to it.
+  Never edit a symlink; never let one drift into a real file.
+- **`templates/` is portable, this file is not.** Anything under `templates/` is
+  copied into other repositories, so it must stay generic — placeholders
+  (`{{PROJECT}}`, `{{CHECK_SUITE}}`), no project-specific paths, no personal data.
+- **Never commit secrets.** Tokens, credentials, and service-account JSON stay in a
+  secret manager or a gitignored `.env`. The `pre-commit` hook scans the staged diff;
+  do not work around it.
+- **Nothing from a private or employer repository lands here** without an explicit
+  decision. This repo is intended to be public.
+- **Conventional Commits required.** `feat:`, `fix:`, `docs:`, `refactor:`, `test:`,
+  `chore:`. One logical change per commit.
+- **Never `--no-verify`.** If a hook blocks, fix the underlying issue.
+- **Shell scripts** run under `set -euo pipefail` and are idempotent — re-running
+  completes what is missing instead of duplicating or destroying.
+
 ## Production note
 
 Rule 1 is written for side projects. Against a live system it can lead an agent to

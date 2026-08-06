@@ -7,7 +7,8 @@ Serve como fonte única para os assistentes que uso e como backup versionado.
 
 | Caminho | Conteúdo |
 | --- | --- |
-| `AGENTS.md` | Instruções canônicas. Todos os outros arquivos de instrução são symlinks para ele. |
+| `AGENTS.md` | Instruções canônicas **deste** repo. Todos os outros arquivos de instrução são symlinks para ele. |
+| `templates/` | Playbook portável instalado em outros repos — `AGENTS.md`, githooks, slash commands. |
 | `skills/` | Skills (Claude Code / agent skills). |
 | `agents/` | Definições de subagents. |
 | `hooks/` | Hooks de sessão e de tool-use. |
