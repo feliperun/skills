@@ -1,22 +1,41 @@
 # harness
 
-Meu harness de agentes: instruções canônicas, skills, subagents, hooks e tools.
-Serve como fonte única para os assistentes que uso e como backup versionado.
+My agent harness: canonical instructions, skills, subagents, hooks, and tools.
+Single source for the assistants I use, and a versioned backup.
 
 ## Layout
 
-| Caminho | Conteúdo |
+| Path | Contents |
 | --- | --- |
-| `AGENTS.md` | Instruções canônicas **deste** repo. Todos os outros arquivos de instrução são symlinks para ele. |
-| `templates/` | Playbook portável instalado em outros repos — `AGENTS.md`, githooks, slash commands. |
+| `AGENTS.md` | Canonical instructions for **this** repo. Every other instruction file is a symlink to it. |
 | `skills/` | Skills (Claude Code / agent skills). |
-| `agents/` | Definições de subagents. |
-| `hooks/` | Hooks de sessão e de tool-use. |
-| `tools/` | CLIs e scripts auxiliares. |
+| `agents/` | Subagent definitions. |
+| `hooks/` | Session and tool-use hooks. |
+| `tools/` | Helper CLIs and scripts. |
 
-## Instruções canônicas
+## Skills
 
-`AGENTS.md` é o único arquivo editável. Estes apontam para ele:
+### `init-harness`
+
+Bootstraps engineering governance in a repository: a canonical `AGENTS.md` with
+symlinks, `docs/` (VISION, ARCHITECTURE, ABSTRACTIONS, GETTING-STARTED), ADRs with
+a template and an index, the [Sentrux](https://github.com/sentrux/sentrux)
+structural gate, CI, a `/create-adr` slash command, and githooks (secrets scan +
+Conventional Commits).
+
+```bash
+skills/init-harness/scripts/install-harness.sh --dry-run   # preview
+skills/init-harness/scripts/install-harness.sh <repo>      # install
+```
+
+The playbook in `skills/init-harness/templates/AGENTS.md` consolidates what is in
+use in [phai](https://github.com/feliperun/phai) and
+[cueme](https://github.com/feliperun/cueme). Structure inspired by
+[tolaria](https://github.com/refactoringhq/tolaria).
+
+## Canonical instructions
+
+`AGENTS.md` is the only editable file. These point to it:
 
 ```
 CLAUDE.md
@@ -26,8 +45,8 @@ AGENT.md
 .github/copilot-instructions.md
 ```
 
-Para adicionar outro assistente: `ln -sf AGENTS.md NOVO.md`.
+To add another assistant: `ln -sf AGENTS.md NEW.md`.
 
-## Licença
+## License
 
 [MIT](LICENSE).

@@ -25,9 +25,10 @@ Write the minimum code that runs. No fluff, no gold-plating.
 - **`AGENTS.md` is the single source of guidance.** `CLAUDE.md`, `GEMINI.md`,
   `CURSOR.md`, `AGENT.md` and `.github/copilot-instructions.md` are symlinks to it.
   Never edit a symlink; never let one drift into a real file.
-- **`templates/` is portable, this file is not.** Anything under `templates/` is
-  copied into other repositories, so it must stay generic — placeholders
-  (`{{PROJECT}}`, `{{CHECK_SUITE}}`), no project-specific paths, no personal data.
+- **Templates are portable, this file is not.** Anything under a skill's
+  `templates/` is copied into other repositories, so it must stay generic —
+  placeholders (`{{PROJECT}}`, `{{CHECK_SUITE}}`, `{{DATE}}`,
+  `{{SENTRUX_VERSION}}`), no project-specific paths, no personal data.
 - **Never commit secrets.** Tokens, credentials, and service-account JSON stay in a
   secret manager or a gitignored `.env`. The `pre-commit` hook scans the staged diff;
   do not work around it.

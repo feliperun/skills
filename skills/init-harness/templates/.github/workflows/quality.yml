@@ -1,0 +1,43 @@
+name: quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gate needs the merge base
+
+      # --- Stack toolchain (adjust to your project) -------------------------
+      # node:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+      - run: npm ci
+      # ----------------------------------------------------------------------
+
+      - name: Type + test
+        run: |
+          {{CHECK_SUITE}}
+
+      - name: Install Sentrux
+        env:
+          SENTRUX_VERSION: {{SENTRUX_VERSION}}
+        run: |
+          mkdir -p "$HOME/.sentrux/bin"
+          curl -fsSL "https://github.com/sentrux/sentrux/releases/download/${SENTRUX_VERSION}/sentrux-linux-x86_64" \
+            -o "$HOME/.sentrux/bin/sentrux"
+          chmod +x "$HOME/.sentrux/bin/sentrux"
+          echo "$HOME/.sentrux/bin" >> "$GITHUB_PATH"
+
+      - name: Sentrux check (absolute rules)
+        run: sentrux check .
+
+      - name: Sentrux gate (no regression)
+        if: github.event_name == 'pull_request'
+        run: sentrux gate .
