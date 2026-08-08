@@ -17,8 +17,9 @@ up working under different rules in the same repo.
 ## Decision
 
 **`AGENTS.md` at the repo root is the canonical AI + contributor guidance.
-Tool-specific files (`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`) are symlinks to
-`AGENTS.md`.** Update guidance in one place only.
+Tool-specific files (`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`, `AGENT.md`,
+`.github/copilot-instructions.md`) are symlinks to `AGENTS.md`.** Update guidance in
+one place only.
 
 ## Options considered
 

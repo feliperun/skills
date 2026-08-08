@@ -71,18 +71,23 @@ while IFS= read -r src; do
   say "  + $rel" "$G"; copied=$((copied+1))
 done < <(find "$TEMPLATES" -type f)
 
-# --- guidance symlinks: CLAUDE/GEMINI/CURSOR/AGENT → AGENTS.md ------------------
+# --- guidance symlinks → AGENTS.md --------------------------------------------
 say "\n② Guidance symlinks → AGENTS.md" "$B"
-for f in CLAUDE.md GEMINI.md CURSOR.md AGENT.md; do
+for f in CLAUDE.md GEMINI.md CURSOR.md AGENT.md .github/copilot-instructions.md; do
   link="$TARGET/$f"
-  if [ -L "$link" ] && [ "$(readlink "$link")" = "AGENTS.md" ]; then
+  # relative target: one ../ per directory level below the repo root
+  case "$f" in */*) dest="../AGENTS.md" ;; *) dest="AGENTS.md" ;; esac
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$dest" ]; then
     say "  = $f (ok)" "$D"; continue
   fi
   if [ -e "$link" ] && [ ! -L "$link" ] && [ "$FORCE" = 0 ]; then
     say "  ! $f exists (real file) — use --force to replace it with a symlink" "$Y"; continue
   fi
-  if [ "$DRY_RUN" = 0 ]; then ( cd "$TARGET" && rm -f "$f" && ln -s AGENTS.md "$f" ); fi
-  say "  + $f → AGENTS.md" "$G"
+  if [ "$DRY_RUN" = 0 ]; then
+    mkdir -p "$(dirname "$link")"
+    ( cd "$(dirname "$link")" && rm -f "$(basename "$f")" && ln -s "$dest" "$(basename "$f")" )
+  fi
+  say "  + $f → $dest" "$G"
 done
 
 # --- git hook via core.hooksPath --------------------------------------------

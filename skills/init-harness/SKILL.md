@@ -15,7 +15,7 @@ use in [phai](https://github.com/feliperun/phai) and
 | Artifact | Role |
 |----------|------|
 | `AGENTS.md` | Canonical playbook (guardrails, workflow, TDD, E2E, gates, ADRs, checklist) |
-| `CLAUDE.md` `GEMINI.md` `CURSOR.md` `AGENT.md` | **symlinks** → `AGENTS.md` (single source) |
+| `CLAUDE.md` `GEMINI.md` `CURSOR.md` `AGENT.md` `.github/copilot-instructions.md` | **symlinks** → `AGENTS.md` (single source) |
 | `docs/VISION.md` `ARCHITECTURE.md` `ABSTRACTIONS.md` `GETTING-STARTED.md` | base docs |
 | `docs/adr/` | ADRs with `README.md` (template + index + status lifecycle) |
 | `docs/adr/0001..0003` | meta-ADRs documenting the harness itself |
@@ -49,7 +49,8 @@ The installer:
    (`package.json`→node, `Cargo.toml`→rust, `pyproject.toml`→python) to fill in
    the check commands in `AGENTS.md` and CI.
 2. Copies the templates **without overwriting** existing files (use `--force`).
-3. Creates the `CLAUDE.md`/`GEMINI.md`/`CURSOR.md`/`AGENT.md` symlinks → `AGENTS.md`.
+3. Creates the `CLAUDE.md`/`GEMINI.md`/`CURSOR.md`/`AGENT.md`/
+   `.github/copilot-instructions.md` symlinks → `AGENTS.md`.
 4. If the `sentrux` CLI is installed, runs `sentrux gate --save .` to generate the
    real `baseline.json`; otherwise leaves a placeholder with instructions.
 5. Installs the hooks via `core.hooksPath` (never touches `.git/hooks` directly).
