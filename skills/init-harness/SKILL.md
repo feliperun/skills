@@ -14,7 +14,7 @@ use in [phai](https://github.com/feliperun/phai) and
 
 | Artifact | Role |
 |----------|------|
-| `AGENTS.md` | Canonical playbook (guardrails, workflow, TDD, E2E, gates, ADRs, checklist) |
+| `AGENTS.md` | Canonical playbook (minimum-code rules, repository rules, workflow, gates, gotchas) |
 | `CLAUDE.md` `GEMINI.md` `CURSOR.md` `AGENT.md` `.github/copilot-instructions.md` | **symlinks** → `AGENTS.md` (single source) |
 | `docs/VISION.md` `ARCHITECTURE.md` `ABSTRACTIONS.md` `GETTING-STARTED.md` | base docs |
 | `docs/adr/` | ADRs with `README.md` (template + index + status lifecycle) |
@@ -27,11 +27,30 @@ use in [phai](https://github.com/feliperun/phai) and
 | `githooks/pre-commit` | local hook: secrets scan + sentrux check/gate |
 | `githooks/commit-msg` | validates Conventional Commits |
 
+## Before running: ask which compatibility rule applies
+
+Rule 1 of the generated `AGENTS.md` ships in two variants, and the choice changes how
+every future agent treats published contracts. **Always ask the user before running
+the installer** — do not pick a default silently:
+
+| Variant | Rule 1 | Fits |
+|---------|--------|------|
+| `--greenfield` (default) | *Do not preserve backward compatibility.* Obsolete paths are removed, not wrapped in compatibility layers. | New projects with no published consumers. Keeps a greenfield codebase free of dead weight. |
+| `--stable` | Published surfaces (public API, CLI contract, persisted format, integrations) stay compatible; breaking one needs a migration path and a `feat!:` / `BREAKING CHANGE:` commit. Unpublished internals are still removed freely. | Anything with real consumers, a released package, or production data. |
+
+Ask with a two-option question ("greenfield: break freely" vs. "stable: preserve
+published contracts"), then pass the matching flag. The installer prints the selected
+variant before writing.
+
 ## Usage
 
 ```bash
 # from the target repo directory (or pass the path):
 ~/.agents/skills/init-harness/scripts/install-harness.sh [target-dir]
+
+# compatibility rule (ask the user first — see above):
+install-harness.sh --greenfield     # break freely (default)
+install-harness.sh --stable         # preserve published contracts
 
 # preview without writing:
 install-harness.sh --dry-run
@@ -47,7 +66,8 @@ The installer:
 
 1. Detects the **project name** (repo basename) and the **stack**
    (`package.json`→node, `Cargo.toml`→rust, `pyproject.toml`→python) to fill in
-   the check commands in `AGENTS.md` and CI.
+   the check commands in `AGENTS.md` and CI, and resolves rule 1 from the selected
+   variant.
 2. Copies the templates **without overwriting** existing files (use `--force`).
 3. Creates the `CLAUDE.md`/`GEMINI.md`/`CURSOR.md`/`AGENT.md`/
    `.github/copilot-instructions.md` symlinks → `AGENTS.md`.

@@ -7,6 +7,8 @@
 #   install-harness.sh --dry-run        # preview without writing
 #   install-harness.sh --force          # overwrite existing files
 #   install-harness.sh --no-hooks       # skip git hook installation
+#   install-harness.sh --stable         # compatibility-preserving rule 1
+#   install-harness.sh --greenfield     # break-freely rule 1 (default)
 #
 set -euo pipefail
 
@@ -14,12 +16,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="$SCRIPT_DIR/../templates"
 SENTRUX_VERSION_DEFAULT="v0.5.7"
 
-DRY_RUN=0; FORCE=0; NO_HOOKS=0; TARGET=""
+DRY_RUN=0; FORCE=0; NO_HOOKS=0; TARGET=""; VARIANT="greenfield"
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --force)   FORCE=1 ;;
     --no-hooks) NO_HOOKS=1 ;;
+    --stable)     VARIANT="stable" ;;
+    --greenfield) VARIANT="greenfield" ;;
     -*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *) TARGET="$arg" ;;
   esac
@@ -47,13 +51,19 @@ else CHECK_SUITE="echo 'TODO: define the check suite (typecheck + test)'"; fi
 say "\n🏗  init-harness → $PROJECT${DRY_RUN:+}" "$C"
 say "   target: $TARGET" "$D"
 say "   stack check: $CHECK_SUITE" "$D"
+say "   compatibility rule: $VARIANT" "$D"
 say "   sentrux: $SENTRUX_VERSION$( [ $DRY_RUN = 1 ] && echo '  (dry-run)')\n" "$D"
 
 # escape & and \ for the sed replacement side
 esc(){ printf '%s' "$1" | sed -e 's/[&\\]/\\&/g'; }
+# drop the unselected <!-- variant:NAME:start/end --> block, then the surviving markers
+DROP="$( [ "$VARIANT" = stable ] && echo greenfield || echo stable )"
+variant(){ sed -e "/<!-- variant:$DROP:start -->/,/<!-- variant:$DROP:end -->/d" \
+               -e "/<!-- variant:$VARIANT:start -->/d" \
+               -e "/<!-- variant:$VARIANT:end -->/d"; }
 subst(){ sed -e "s|{{PROJECT}}|$(esc "$PROJECT")|g" -e "s|{{DATE}}|$(esc "$DATE")|g" \
              -e "s|{{SENTRUX_VERSION}}|$(esc "$SENTRUX_VERSION")|g" \
-             -e "s|{{CHECK_SUITE}}|$(esc "$CHECK_SUITE")|g"; }
+             -e "s|{{CHECK_SUITE}}|$(esc "$CHECK_SUITE")|g" | variant; }
 
 # --- copy templates (never overwriting, unless --force) -----------------------
 copied=0; skipped=0
