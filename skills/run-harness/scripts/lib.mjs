@@ -120,6 +120,8 @@ export function validateContract(raw, contractPath) {
   }
   assertAcyclic(nodes);
 
+  const warnings = nodes.flatMap((node, index) => commandCoverageWarnings(node, index));
+
   return {
     ...raw,
     cwd,
@@ -131,7 +133,48 @@ export function validateContract(raw, contractPath) {
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
     timeoutSec: positiveNumber(raw.timeoutSec ?? 1_800, "contract.timeoutSec"),
+    maxInputTokens: raw.maxInputTokens === undefined
+      ? undefined
+      : positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
+    warnings,
   };
+}
+
+/** Warns when a concrete command in the node prompt is not reflected in any
+ * Definition of Done item. Across real runs, "a required command was not run"
+ * was the single most common gate rejection — the DoD is what lets the judge
+ * catch the omission mechanically. */
+function commandCoverageWarnings(node, index) {
+  if (!Array.isArray(node.definitionOfDone) || node.definitionOfDone.length === 0) return [];
+  const dodText = node.definitionOfDone.join("\n");
+  const warnings = [];
+  for (const line of node.prompt.split(/\r?\n/u)) {
+    const target = extractCommandTarget(line);
+    if (target && !dodText.includes(target)) {
+      warnings.push(`nodes[${index}] (${node.id}): command target "${target}" is not mentioned in any Definition of Done item`);
+    }
+  }
+  return warnings;
+}
+
+/** Extracts the checkable part of a command line: the cargo test module, the
+ * vitest/playwright spec path, the node script path, or the npm/pnpm script
+ * name. Returns null for lines that are not recognized commands. */
+function extractCommandTarget(line) {
+  const trimmed = line.trim();
+  const patterns = [
+    [/^cargo test\b/u, /cargo test(?:\s+\S+)*\s+([a-z_]+::[a-z_:]+)/u],
+    [/^pnpm exec vitest run\b/u, /vitest run\s+(\S+)/u],
+    [/^(?:pnpm exec )?playwright test\b/u, /playwright test\s+(\S+)/u],
+    [/^node\s+/u, /^node\s+(\S+\.(?:mjs|js))/u],
+    [/^(?:pnpm|npm) run\s+/u, /^(?:pnpm|npm) run\s+(\S+)/u],
+  ];
+  for (const [trigger, extract] of patterns) {
+    if (!trigger.test(trimmed)) continue;
+    const match = extract.exec(trimmed);
+    return match?.[1] ?? null;
+  }
+  return null;
 }
 
 export function routeRuntime(contract, node, role = "worker") {
@@ -298,7 +341,7 @@ export function renderReport(runDir) {
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10];
+  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 36];
   const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
   const lines = [
     `# run ${basename(runDir)}`,
@@ -306,7 +349,7 @@ export function renderReport(runDir) {
     `${nodes.length} nodes · ${summary}`,
     "",
     "```",
-    row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE"]),
+    row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE", "NOTE"]),
     row(widths.map((width) => "-".repeat(width))),
   ];
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
@@ -324,6 +367,7 @@ export function renderReport(runDir) {
       compactTokens(usage.inputTokens),
       compactTokens(usage.outputTokens),
       compactTokens(usage.cacheReadInputTokens),
+      nodeNote(node),
     ]));
   }
   lines.push("```", "");
@@ -332,6 +376,43 @@ export function renderReport(runDir) {
     `cache ${compactTokens(totals.cacheReadInputTokens)}`,
   );
   return `${lines.join("\n")}\n`;
+}
+
+/** The most informative one-line note about a node: the judge's summary when
+ * a gate ran, the worker's own closing report otherwise, then the error. */
+export function nodeNote(node) {
+  if (node.gate?.summary) return node.gate.summary;
+  if (node.error?.message) return node.error.message;
+  if (node.blockedBy?.length) return `blocked by ${node.blockedBy.join(", ")}`;
+  return excerpt(node.result) ?? node.phase ?? "-";
+}
+
+/** One-line, whitespace-collapsed excerpt of a worker report. */
+export function excerpt(text) {
+  if (typeof text !== "string") return null;
+  const clean = text.replace(/[ -]+/gu, " ").replace(/\s+/gu, " ").trim();
+  if (!clean) return null;
+  return clean.length > 120 ? `${clean.slice(0, 119)}…` : clean;
+}
+
+/** Fix-node ready blocks: the gate findings of every exhausted node, verbatim
+ * enough to paste into a targeted repair contract. */
+export function renderFindings(runDir) {
+  const nodeDir = join(runDir, "nodes");
+  const nodes = readdirSync(nodeDir)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => JSON.parse(readFileSync(join(nodeDir, name), "utf8")));
+  const sections = [];
+  for (const node of nodes) {
+    const findings = node.gate?.findings;
+    if (node.status !== "exhausted" || !findings?.length) continue;
+    const listed = findings
+      .map((finding) => `- [${finding.severity}] ${finding.description}\n  Evidence: ${finding.evidence}`)
+      .join("\n");
+    sections.push(`## ${node.id}\n\nGate verdict: ${node.gate.verdict} (${node.gate.maxSeverity}). ${node.gate.summary}\n\n${listed}`);
+  }
+  return sections.length ? `${sections.join("\n\n")}\n` : "no exhausted gate findings to act on\n";
 }
 
 function compactTokens(value) {

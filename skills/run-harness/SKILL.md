@@ -33,11 +33,30 @@ Run a plan outside the main context while keeping the current session as the con
    node <skill-dir>/scripts/harness.mjs validate <contract.json>
    ```
 
+   Validation also emits warnings: a concrete command in a node prompt that no
+   Definition of Done item mentions (the most common gate rejection in
+   practice), so add every command to the DoD.
+
 8. Start `run` detached so the controller survives this session and keeps the session responsive. `--detach` forks the controller into its own process group, prints its pid and run directory, and exits:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs run --detach <contract.json>
    ```
+
+   `run` warns when a node id is already `done` in another run of the same
+   repository — copying a whole graph that re-runs finished work is a real
+   mistake; generate follow-up contracts by pruning done nodes.
+
+   For unattended guarantees, arm the watchdog alongside the run:
+
+   ```bash
+   node <skill-dir>/scripts/harness.mjs watch --detach <run-dir> [--interval 30]
+   ```
+
+   The watcher polls the run directory and, whenever the controller process is
+   gone while the run is not terminal, spawns `resume --detach` itself. It
+   exits when every node is terminal. One watcher per run; a short lock
+   prevents two watchers from double-resuming.
 
    Without `--detach`, the controller is a child of the invoking session and dies with it, stranding any running node as an orphan until a later `resume`. Use `resume --detach <run-dir>` to restart an interrupted run the same way.
 9. Report the run directory immediately. Do not read worker logs during normal orchestration.
@@ -54,9 +73,24 @@ Run a plan outside the main context while keeping the current session as the con
    ```
 
    Each node's totals include its worker and judge invocations; a node ends
-   carrying its last runtime. `events.jsonl` records every transition with
-   attempt, runtime, error code, and gate verdict/summary for streaming
-   monitors — consume it instead of poll-scraping `STATUS.md`.
+   carrying its last runtime. The NOTE column surfaces each worker's own
+   closing summary (or the judge's gate summary) — workers already report to
+   the judge; the report is where the orchestrator sees it. The controller
+   prints the same report when the run ends. `events.jsonl` records every
+   transition with attempt, runtime, error code, and gate verdict/summary for
+   streaming monitors — consume it instead of poll-scraping `STATUS.md`.
+
+   When a gated node exhausts its revision budget, print the judge's findings
+   ready for a targeted fix node:
+
+   ```bash
+   node <skill-dir>/scripts/harness.mjs findings <target-repo>/.runs/<run-id>
+   ```
+
+   A node that exhausts on `wall_clock_timeout` was killed mid-work, not
+   judged insufficient: `resume` doubles its wall-clock budget and persists
+   the adjustment. Set `maxInputTokens` on the contract to stop the controller
+   from scheduling new nodes once the cumulative input-token budget is spent.
 
 12. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
 13. If the run process dies, resume it instead of starting a new one:

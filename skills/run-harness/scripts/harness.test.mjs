@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   JUDGE_SCHEMA,
   normalizeProviderResult,
   providerCommand,
+  renderFindings,
   renderReport,
   renderStatus,
   routeRuntime,
@@ -571,6 +572,151 @@ test("preflight fails a runtime the provider rejects", async () => {
   const checks = await withFakeCodex(directory, "worker-fail", () => preflightContract(path));
   assert.equal(checks[0].ok, false);
   assert.match(checks[0].detail, /deliberate failure/u);
+});
+
+test("resume doubles the wall-clock budget of a node that exhausted it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-double-"));
+  const path = writeContract(directory, fixture({ id: "double-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  writeFileSync(nodePath, JSON.stringify({
+    ...state,
+    status: "exhausted",
+    error: { code: "wall_clock_timeout", message: "worker ran longer than 1800s" },
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  assert.equal(resumed.states.get("build").status, "done");
+  const stored = JSON.parse(readFileSync(join(runDir, "contract.json"), "utf8"));
+  assert.equal(stored.nodes[0].timeoutSec, 3600, "budget persisted so later resumes keep it");
+});
+
+test("findings renders exhausted gate findings ready for a fix node", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-findings-"));
+  const path = writeContract(directory, fixture({
+    id: "findings-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      prompt: "Implement it",
+      gate: { failOn: ["critical"], maxRevisions: 0 },
+    }],
+  }));
+  const previous = process.env.HARNESS_CODEX_BIN;
+  process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "critical");
+  try {
+    const result = await runContract(path);
+    const rendered = renderFindings(result.runDir);
+    assert.match(rendered, /## build/u);
+    assert.match(rendered, /\[critical\] broken/u);
+    assert.match(rendered, /Evidence: test failed/u);
+  } finally {
+    if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
+    else process.env.HARNESS_CODEX_BIN = previous;
+  }
+});
+
+test("maxInputTokens blocks pending nodes once the budget is spent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-token-budget-"));
+  const path = writeContract(directory, fixture({
+    id: "budget-run",
+    maxInputTokens: 5,
+    pollIntervalMs: 10,
+    nodes: [
+      { id: "first", type: "backend", prompt: "Implement it", gate: false },
+      { id: "second", type: "backend", prompt: "Implement it too", dependsOn: ["first"], gate: false },
+    ],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(result.ok, false);
+  assert.equal(result.states.get("first").status, "done");
+  const blocked = result.states.get("second");
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.error.code, "budget_exceeded");
+});
+
+test("a finished run prints the token report", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-auto-report-"));
+  const path = writeContract(directory, fixture({ pollIntervalMs: 10 }));
+  const writes = [];
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    writes.push(String(chunk));
+    return true;
+  };
+  try {
+    await withFakeCodex(directory, "pass", () => runContract(path));
+  } finally {
+    process.stdout.write = original;
+  }
+  assert.ok(writes.some((line) => line.includes("totals · in 10")), "auto-report table");
+  assert.ok(writes.some((line) => line.includes("worker complete")), "node note surfaces the worker summary");
+});
+
+test("validate warns when a prompt command is absent from the Definition of Done", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-cmd-warn-"));
+  const value = fixture();
+  value.nodes[0].prompt = "Implement it\n\n## Commands\n\n```sh\npnpm exec vitest run tests/fixtures/x.test.ts\n```";
+  value.nodes[0].definitionOfDone = ["It works"];
+  const path = writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path)), path);
+  assert.ok(contract.warnings.some((warning) => warning.includes("tests/fixtures/x.test.ts")));
+  const clean = fixture();
+  clean.nodes[0].prompt = "Implement it\n\n```sh\npnpm exec vitest run tests/fixtures/y.test.ts\n```";
+  clean.nodes[0].definitionOfDone = ["tests/fixtures/y.test.ts passes"];
+  const cleanPath = writeContract(directory, clean);
+  assert.equal(validateContract(JSON.parse(readFileSync(cleanPath)), cleanPath).warnings.length, 0);
+});
+
+test("run warns when a node id is already done in another run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-rerun-guard-"));
+  const firstPath = writeContract(directory, fixture({ id: "first-run", pollIntervalMs: 10 }));
+  await withFakeCodex(directory, "pass", () => runContract(firstPath));
+
+  const secondPath = writeContract(directory, fixture({ id: "second-run", pollIntervalMs: 10 }));
+  const result = await withFakeCodex(directory, "pass", () =>
+    spawnSync(process.execPath, [fileURLToPath(new URL("./harness.mjs", import.meta.url)), "run", secondPath], {
+      encoding: "utf8",
+    }),
+  );
+  assert.match(result.stdout, /\[warn\] node build is already done in run first-run/u);
+});
+
+test("watch resumes a run whose controller died", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-watch-"));
+  const path = writeContract(directory, fixture({ id: "watch-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
+  // Simulate a controller that died mid-work: the node claims running but the
+  // recorded pid is gone.
+  orphan(runDir, "build");
+  const reaped = spawnSync(process.execPath, ["-e", ""]);
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: reaped.pid, startedAt: "earlier" }));
+
+  // The watcher's resumed controller inherits the watcher's environment, so
+  // the fake provider must stay installed for the whole watch lifetime.
+  const previous = process.env.HARNESS_CODEX_BIN;
+  process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "pass");
+  const watcher = spawn(
+    process.execPath,
+    [fileURLToPath(new URL("./harness.mjs", import.meta.url)), "watch", runDir, "--interval", "0.05"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  try {
+    let stdout = "";
+    watcher.stdout.on("data", (chunk) => { stdout += chunk; });
+    const finished = await waitForValue(
+      () => (stdout.includes("resumed") && stdout.includes("finished") ? "done" : null),
+      20_000,
+    );
+    assert.equal(finished, "done", stdout);
+    assert.equal(readStatus(join(runDir, "nodes", "build.json")), "done");
+  } finally {
+    if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
+    else process.env.HARNESS_CODEX_BIN = previous;
+    watcher.kill("SIGTERM");
+  }
 });
 
 test("blocks downstream nodes after a failed dependency", async () => {

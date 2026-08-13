@@ -99,7 +99,14 @@ ambient sandbox.
 `stallTimeoutSec` limits silence from stdout and stderr. `timeoutSec` caps a
 single provider invocation and may be overridden per node, so a slow worker
 never spends the judge's budget; a node is therefore bounded by
-`(1 + maxRevisions) × 2 × timeoutSec`.
+`(1 + maxRevisions) × 2 × timeoutSec`. Size it by node weight: profile-wide or
+multi-browser nodes need more than the default; a node that exhausts its
+wall-clock budget is restarted by `resume` with a doubled budget (persisted in
+the run's stored contract).
+
+`maxInputTokens` (optional) stops the controller from scheduling new nodes
+once the cumulative input tokens across all nodes reach the budget; running
+nodes finish, pending ones become `blocked` with `budget_exceeded`.
 
 Both limits are measured on a monotonic clock that does not advance while the
 host is suspended. A closed laptop lid pauses a run instead of killing whichever

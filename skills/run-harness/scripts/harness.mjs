@@ -10,23 +10,27 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   JUDGE_SCHEMA,
   TERMINAL,
+  excerpt,
   judgePrompt,
   lastOutputAt,
   normalizeProviderResult,
   parseJudge,
   providerCommand,
+  renderFindings,
   renderReport,
   renderStatus,
   retryPrompt,
   routeRuntime,
+  runProcessAlive,
   validateContract,
 } from "./lib.mjs";
 
@@ -70,7 +74,7 @@ export async function runContract(contractPath) {
 export async function resumeRun(runDirPath) {
   const runDir = resolve(runDirPath);
   const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  let contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
 
   const states = new Map();
   for (const node of contract.nodes) {
@@ -79,6 +83,27 @@ export async function resumeRun(runDirPath) {
     // fresh read must not be able to exhaust a node by defaulting to a cap.
     if (typeof state.revisions !== "number") state.revisions = 0;
     states.set(node.id, state);
+  }
+  // A node that exhausted its wall-clock budget was killed mid-work, not
+  // judged insufficient: restarting it with the same clock would repeat the
+  // failure. Double its budget on resume and persist the adjustment so every
+  // later resume keeps it.
+  const doubled = contract.nodes.some((node) => {
+    const state = states.get(node.id);
+    return state.status === "exhausted" && state.error?.code === "wall_clock_timeout";
+  });
+  if (doubled) {
+    contract = {
+      ...contract,
+      nodes: contract.nodes.map((node) => {
+        const state = states.get(node.id);
+        if (state.status !== "exhausted" || state.error?.code !== "wall_clock_timeout") return node;
+        const budgetSec = (node.timeoutSec ?? contract.timeoutSec) * 2;
+        process.stdout.write(`[resume] ${node.id} wall-clock budget doubled to ${budgetSec}s\n`);
+        return { ...node, timeoutSec: budgetSec };
+      }),
+    };
+    writeJsonAtomic(join(runDir, "contract.json"), serializableContract(contract));
   }
   for (const node of contract.nodes) {
     const state = states.get(node.id);
@@ -127,6 +152,7 @@ async function driveRun(contract, runDir, states) {
     finalizeClosedJobs(contract, runDir, states, running);
     detectStalls(contract, runDir, running);
     blockDependents(contract, runDir, states);
+    enforceTokenBudget(contract, runDir, states);
 
     const slots = contract.maxParallel - running.size;
     if (slots > 0) {
@@ -157,7 +183,30 @@ async function driveRun(contract, runDir, states) {
   render(runDir);
   const failed = [...states.values()].filter((state) => state.status !== "done");
   process.stdout.write(`[run] ${contract.id} ${failed.length ? "failed" : "done"} · ${runDir}\n`);
+  if ([...states.values()].some((state) => state.usage)) process.stdout.write(renderReport(runDir));
   return { runDir, states, ok: failed.length === 0 };
+}
+
+/** Stops scheduling new nodes once the contract's token budget is spent.
+ * Nodes already running keep their already-paid provider calls. */
+function enforceTokenBudget(contract, runDir, states) {
+  if (contract.maxInputTokens === undefined) return;
+  const spent = [...states.values()].reduce(
+    (total, state) => total + (state.usage?.inputTokens ?? 0),
+    0,
+  );
+  if (spent < contract.maxInputTokens) return;
+  for (const node of contract.nodes) {
+    const state = states.get(node.id);
+    if (state.status !== "pending") continue;
+    transition(runDir, state, "blocked", {
+      phase: "budget",
+      error: {
+        code: "budget_exceeded",
+        message: `total input tokens (${spent}) reached the ${contract.maxInputTokens} budget`,
+      },
+    });
+  }
 }
 
 function startWorker(contract, node, state, runDir, running, prompt) {
@@ -385,7 +434,10 @@ function transition(runDir, state, status, patch = {}) {
   if (state.gate?.summary) event.summary = state.gate.summary;
   if (state.revisions) event.revisions = state.revisions;
   appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
-  if (TERMINAL.has(status)) process.stdout.write(`[node] ${state.id} ${status}${state.error ? ` · ${state.error.message}` : ""}\n`);
+  if (TERMINAL.has(status)) {
+    const note = state.gate?.summary ?? excerpt(state.result) ?? state.error?.message;
+    process.stdout.write(`[node] ${state.id} ${status}${note ? ` · ${note}` : ""}\n`);
+  }
 }
 
 function writeNode(runDir, state) {
@@ -523,7 +575,73 @@ function writeJsonAtomic(path, value) {
 function serializableContract(contract) {
   const copy = structuredClone(contract);
   for (const node of copy.nodes) delete node.promptFile;
+  delete copy.warnings;
   return copy;
+}
+
+/** Guards against copying a graph that re-runs already-done work: warns when
+ * any node id of this contract is `done` in another run of the same cwd. */
+function reusedDoneWarnings(contract) {
+  const warnings = [];
+  const runsDir = join(contract.cwd, ".runs");
+  if (!existsSync(runsDir)) return warnings;
+  const ownRunDir = join(runsDir, contract.id);
+  for (const name of readdirSync(runsDir)) {
+    const nodeDir = join(runsDir, name, "nodes");
+    if (join(runsDir, name) === ownRunDir || !existsSync(nodeDir)) continue;
+    for (const node of contract.nodes) {
+      const statePath = join(nodeDir, `${node.id}.json`);
+      if (!existsSync(statePath)) continue;
+      try {
+        const status = JSON.parse(readFileSync(statePath, "utf8")).status;
+        if (status === "done") warnings.push(`node ${node.id} is already done in run ${name}`);
+      } catch {
+        // A half-written node file is not evidence of anything.
+      }
+    }
+  }
+  return warnings;
+}
+
+/** External watchdog: watches a run directory and resumes it whenever the
+ * controller dies while the run is not terminal. Exits when the run ends. */
+async function watchRun(runDir, intervalSec) {
+  if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
+  for (;;) {
+    const nodeDir = join(runDir, "nodes");
+    const nodes = readdirSync(nodeDir)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => JSON.parse(readFileSync(join(nodeDir, name), "utf8")));
+    if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
+      const done = nodes.filter((node) => node.status === "done").length;
+      process.stdout.write(`[watch] ${basename(runDir)} finished · ${done}/${nodes.length} done\n`);
+      return;
+    }
+    if (runProcessAlive(runDir) === false) {
+      // The lock keeps two watchers from resuming the same run at once; it is
+      // held only until the new controller is confirmed alive.
+      const lock = join(runDir, ".watch-resume");
+      try {
+        mkdirSync(lock);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        await delay(intervalSec * 1_000);
+        continue;
+      }
+      try {
+        const child = detachSelf("resume", runDir);
+        process.stdout.write(`[watch] controller gone · resumed · pid ${child.pid}\n`);
+        const deadline = Date.now() + 30_000;
+        while (!runProcessAlive(runDir) && Date.now() < deadline) await delay(500);
+        if (!runProcessAlive(runDir)) process.stdout.write("[watch] resume did not come alive within 30s\n");
+      } finally {
+        try {
+          rmdirSync(lock);
+        } catch {}
+      }
+    }
+    await delay(intervalSec * 1_000);
+  }
 }
 
 function stopProcess(child) {
@@ -559,7 +677,12 @@ function detachSelf(command, target) {
 
 async function main(argv) {
   const detached = argv.includes("--detach");
-  const positional = argv.filter((argument) => argument !== "--detach");
+  const intervalIndex = argv.indexOf("--interval");
+  const intervalSec = intervalIndex !== -1 ? positiveInterval(argv[intervalIndex + 1]) : 30;
+  const positional = argv.filter((argument, index) => {
+    if (argument === "--detach") return false;
+    return intervalIndex === -1 || (index !== intervalIndex && index !== intervalIndex + 1);
+  });
   const [command, target] = positional;
   if (command === "run" && target) {
     if (detached) {
@@ -567,9 +690,13 @@ async function main(argv) {
       const contract = validateContract(JSON.parse(readFileSync(absolute, "utf8")), absolute);
       const runDir = join(contract.cwd, ".runs", contract.id);
       if (existsSync(runDir)) throw new Error(`run already exists: ${runDir}`);
+      for (const warning of reusedDoneWarnings(contract)) process.stdout.write(`[warn] ${warning}\n`);
       const child = detachSelf("run", target);
       process.stdout.write(`[run] ${contract.id} detached · pid ${child.pid} · ${runDir}\n`);
       return;
+    }
+    for (const warning of reusedDoneWarnings(validateContract(JSON.parse(readFileSync(resolve(target), "utf8")), resolve(target)))) {
+      process.stdout.write(`[warn] ${warning}\n`);
     }
     const result = await runContract(target);
     if (!result.ok) process.exitCode = 1;
@@ -585,6 +712,23 @@ async function main(argv) {
     }
     const result = await resumeRun(target);
     if (!result.ok) process.exitCode = 1;
+    return;
+  }
+  if (command === "watch" && target) {
+    const runDir = resolve(target);
+    if (detached) {
+      const args = [fileURLToPath(import.meta.url), "watch", runDir, "--interval", String(intervalSec)];
+      const child = spawn(process.execPath, args, {
+        cwd: process.cwd(),
+        env: process.env,
+        detached: process.platform !== "win32",
+        stdio: "ignore",
+      });
+      child.unref();
+      process.stdout.write(`[watch] detached · pid ${child.pid} · ${runDir}\n`);
+      return;
+    }
+    await watchRun(runDir, intervalSec);
     return;
   }
   if (command === "preflight" && target) {
@@ -606,16 +750,27 @@ async function main(argv) {
     process.stdout.write(renderReport(resolve(target)));
     return;
   }
+  if (command === "findings" && target) {
+    process.stdout.write(renderFindings(resolve(target)));
+    return;
+  }
   if (command === "validate" && target) {
     const path = resolve(target);
-    validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-    process.stdout.write("valid\n");
+    const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+    process.stdout.write(`valid${contract.warnings.length ? ` (${contract.warnings.length} warning${contract.warnings.length === 1 ? "" : "s"})` : ""}\n`);
+    for (const warning of contract.warnings) process.stdout.write(`[warn] ${warning}\n`);
     return;
   }
   process.stderr.write(
-    "usage: harness.mjs <run|validate|preflight> <contract.json> | <status|report|resume> <run-dir> | run|resume --detach <target>\n",
+    "usage: harness.mjs <run|validate|preflight> <contract.json> | <status|report|findings|resume|watch> <run-dir> | run|resume|watch --detach <target> [--interval <sec>]\n",
   );
   process.exitCode = 2;
+}
+
+function positiveInterval(value) {
+  const interval = Number(value);
+  if (!Number.isFinite(interval) || interval <= 0) throw new TypeError("--interval must be a positive number of seconds");
+  return interval;
 }
 
 const isMain = process.argv[1] && sameFile(process.argv[1], import.meta.url);
