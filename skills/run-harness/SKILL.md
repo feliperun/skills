@@ -47,8 +47,19 @@ Run a plan outside the main context while keeping the current session as the con
    node <skill-dir>/scripts/harness.mjs status <target-repo>/.runs/<run-id>
    ```
 
-11. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
-12. If the run process dies, resume it instead of starting a new one:
+11. When a run finishes (or at any point) and cost or effort matters, aggregate per-node attempts, revisions, runtimes, and tokens:
+
+   ```bash
+   node <skill-dir>/scripts/harness.mjs report <target-repo>/.runs/<run-id>
+   ```
+
+   Each node's totals include its worker and judge invocations; a node ends
+   carrying its last runtime. `events.jsonl` records every transition with
+   attempt, runtime, error code, and gate verdict/summary for streaming
+   monitors — consume it instead of poll-scraping `STATUS.md`.
+
+12. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
+13. If the run process dies, resume it instead of starting a new one:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs resume --detach <target-repo>/.runs/<run-id>

@@ -23,6 +23,7 @@ import {
   normalizeProviderResult,
   parseJudge,
   providerCommand,
+  renderReport,
   renderStatus,
   retryPrompt,
   routeRuntime,
@@ -376,10 +377,14 @@ function transition(runDir, state, status, patch = {}) {
   const from = state.status;
   Object.assign(state, patch, { status, updatedAt: new Date().toISOString() });
   writeNode(runDir, state);
-  appendFileSync(
-    join(runDir, "events.jsonl"),
-    `${JSON.stringify({ at: state.updatedAt, node: state.id, from, to: status, phase: state.phase })}\n`,
-  );
+  const event = { at: state.updatedAt, node: state.id, from, to: status, phase: state.phase };
+  if (state.attempt) event.attempt = state.attempt;
+  if (state.runtime?.id) event.runtime = state.runtime.id;
+  if (state.error?.code) event.error = state.error.code;
+  if (state.gate?.verdict) event.verdict = state.gate.verdict;
+  if (state.gate?.summary) event.summary = state.gate.summary;
+  if (state.revisions) event.revisions = state.revisions;
+  appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
   if (TERMINAL.has(status)) process.stdout.write(`[node] ${state.id} ${status}${state.error ? ` · ${state.error.message}` : ""}\n`);
 }
 
@@ -438,9 +443,7 @@ export async function preflightContract(contractPath) {
       runtimes.set(judge.id, judge);
     }
   }
-  const checks = [];
-  for (const runtime of runtimes.values()) checks.push(await probeRuntime(contract, runtime));
-  return checks;
+  return Promise.all([...runtimes.values()].map((runtime) => probeRuntime(contract, runtime)));
 }
 
 function probeRuntime(contract, runtime) {
@@ -599,6 +602,10 @@ async function main(argv) {
     process.stdout.write(status);
     return;
   }
+  if (command === "report" && target) {
+    process.stdout.write(renderReport(resolve(target)));
+    return;
+  }
   if (command === "validate" && target) {
     const path = resolve(target);
     validateContract(JSON.parse(readFileSync(path, "utf8")), path);
@@ -606,7 +613,7 @@ async function main(argv) {
     return;
   }
   process.stderr.write(
-    "usage: harness.mjs <run|validate|preflight> <contract.json> | <status|resume> <run-dir> | run|resume --detach <target>\n",
+    "usage: harness.mjs <run|validate|preflight> <contract.json> | <status|report|resume> <run-dir> | run|resume --detach <target>\n",
   );
   process.exitCode = 2;
 }

@@ -289,6 +289,58 @@ export function renderStatus(runDir) {
   return `${lines.join("\n")}\n`;
 }
 
+export function renderReport(runDir) {
+  const nodeDir = join(runDir, "nodes");
+  const nodes = readdirSync(nodeDir)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => JSON.parse(readFileSync(join(nodeDir, name), "utf8")));
+  const counts = new Map();
+  for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
+  const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
+  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10];
+  const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
+  const lines = [
+    `# run ${basename(runDir)}`,
+    "",
+    `${nodes.length} nodes · ${summary}`,
+    "",
+    "```",
+    row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE"]),
+    row(widths.map((width) => "-".repeat(width))),
+  ];
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
+  for (const node of nodes) {
+    const usage = node.usage ?? {};
+    for (const key of Object.keys(totals)) totals[key] += usage[key] ?? 0;
+    const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
+    lines.push(row([
+      MARK[node.status] ?? "[?]",
+      node.id,
+      node.status,
+      node.attempt ?? 0,
+      node.revisions ?? 0,
+      runtime,
+      compactTokens(usage.inputTokens),
+      compactTokens(usage.outputTokens),
+      compactTokens(usage.cacheReadInputTokens),
+    ]));
+  }
+  lines.push("```", "");
+  lines.push(
+    `totals · in ${compactTokens(totals.inputTokens)} · out ${compactTokens(totals.outputTokens)} · ` +
+    `cache ${compactTokens(totals.cacheReadInputTokens)}`,
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+function compactTokens(value) {
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+}
+
 /** Returns null when the run predates process tracking, otherwise whether its controller is alive. */
 export function runProcessAlive(runDir) {
   let pid;

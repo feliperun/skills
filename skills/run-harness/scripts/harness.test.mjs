@@ -9,6 +9,7 @@ import {
   JUDGE_SCHEMA,
   normalizeProviderResult,
   providerCommand,
+  renderReport,
   renderStatus,
   routeRuntime,
   validateContract,
@@ -489,6 +490,52 @@ test("status separates a live running node from an orphaned one", async () => {
   const reaped = spawnSync(process.execPath, ["-e", ""]);
   writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: reaped.pid, startedAt: "earlier" }));
   assert.match(renderStatus(runDir), /build still claims to be running/u);
+});
+
+test("report aggregates per-node status, attempts, revisions, and tokens", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-report-"));
+  const path = writeContract(directory, fixture({
+    id: "report-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: { failOn: ["critical"] } }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const report = renderReport(runDir);
+  assert.match(report, /1 nodes · 1 done/u);
+  // The node ends on its judge runtime, and tokens sum worker plus judge.
+  assert.match(report, /build\s+done\s+1\s+0\s+codex\/gpt-5\.6-sol/u);
+  assert.match(report, /totals · in 20 · out 4 · cache -/u);
+});
+
+test("events record attempt, runtime, and gate verdict", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-events-"));
+  const path = writeContract(directory, fixture({
+    id: "events-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      prompt: "Implement it",
+      gate: { failOn: ["critical"], maxRevisions: 0 },
+    }],
+  }));
+  const previous = process.env.HARNESS_CODEX_BIN;
+  process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "critical");
+  try {
+    const result = await runContract(path);
+    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    const started = events.find((event) => event.to === "running" && event.phase === "worker");
+    assert.equal(started.attempt, 1);
+    assert.equal(started.runtime, "luna");
+    const rejected = events.find((event) => event.to === "exhausted");
+    assert.equal(rejected.verdict, "fail");
+    assert.equal(rejected.error, "revision_cap");
+    assert.equal(rejected.phase, "judge");
+  } finally {
+    if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
+    else process.env.HARNESS_CODEX_BIN = previous;
+  }
 });
 
 test("preflight probes every routed worker and judge runtime", async () => {
