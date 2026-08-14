@@ -5,6 +5,7 @@
 ```json
 {
   "id": "feature-42",
+  "campaignId": "feature-42",
   "goal": "Deliver feature 42 with tests",
   "cwd": "../target-repo",
   "maxParallel": 1,
@@ -58,7 +59,7 @@
     {
       "id": "implementation",
       "type": "backend",
-      "promptFile": "prompts/implementation.md",
+      "taskPacketFile": "packets/implementation.json",
       "dependsOn": [],
       "timeoutSec": 1800,
       "definitionOfDone": [
@@ -75,7 +76,52 @@
 }
 ```
 
-Paths are relative to the contract file. `cwd` is the worker's repository. A node must contain exactly one useful prompt source: `prompt` for short tasks or `promptFile` for normal tasks.
+Paths are relative to the contract file. `cwd` is the worker's repository. A node must contain exactly one of `taskPacket` (inline JSON) or `taskPacketFile` (a path relative to the contract). The legacy `prompt` and `promptFile` fields are rejected.
+
+## Task packets
+
+A task packet is a JSON object with every field required:
+
+```json
+{
+  "mode": "execution",
+  "objective": "One concrete outcome",
+  "instructions": ["Exact behavior to implement"],
+  "readFiles": ["src/feature.ts"],
+  "writeFiles": ["src/feature.ts"],
+  "symbols": ["runContract"],
+  "decisions": ["Decision already made; do not reopen"],
+  "nonGoals": ["Explicitly excluded work"],
+  "verification": ["node --test test/feature.test.mjs"]
+}
+```
+
+`mode` is `execution` or `discovery`. `objective`, `instructions`, and
+`verification` must be non-empty; the other fields are arrays and may be empty
+where sensible. Execution packets require non-empty `readFiles` and
+`writeFiles`. Read paths are relative to `cwd`, cannot escape it, and must exist
+at validation time. Write paths are also relative and may name new files.
+Discovery packets are read-only: `writeFiles` must be empty, and the generated
+prompt requires the worker to return an execution packet rather than edit the
+repository. When a discovery packet supplies no `readFiles`, it is the explicit
+exception to closed inspection and may read the repository read-only only as
+needed to produce that execution packet; otherwise it is closed to the listed
+files.
+
+Validation rejects the old `prompt`/`promptFile` fields, malformed packets,
+unknown fields, escaping paths, and missing execution read files. The harness
+renders a deterministic worker prompt from the packet. Execution prompts state
+that the context is closed, limit inspection/edits to the listed paths, and
+require `BLOCKED_CONTEXT: <missing file or fact>` instead of repository-wide
+exploration. Judges receive the same closed evidence set: inspect only
+`writeFiles`, run only the listed `verification`, and do no repository-wide
+discovery.
+
+The stored `contract.json` inlines the packet and drops both `taskPacketFile`
+and the generated prompt, so `resume` regenerates the same prompt from the
+packet. Packets are snapshots, not hashed or sealed in this version; regenerate
+the contract when a scoped file changes, and treat the stored contract as the
+durable execution record.
 
 ## Runtime resolution
 
@@ -179,9 +225,10 @@ STATUS.md
 
 Use `STATUS.md` for normal status queries. Read logs only to diagnose an actionable failure. A provider or judge failure preserves the latest worker report in node state so completed work remains inspectable.
 
-The stored `contract.json` inlines every prompt, so a run directory is a
-complete resumable record. A repeated phase never overwrites an earlier log; it
-takes the next `.r<n>` generation.
+The stored `contract.json` inlines every task packet and drops generated
+prompts and `taskPacketFile`, so a run directory is a complete resumable
+record. A repeated phase never overwrites an earlier log; it takes the next
+`.r<n>` generation.
 
 `run.json` holds the controlling process id. `STATUS.md` uses it to separate a
 node that is genuinely working from one whose controller died, and names the
@@ -218,3 +265,30 @@ phase, which is the expensive one.
 The stored `contract.json` round-trips through validation on resume: the
 internal disabled-gate shape `{"enabled": false}` stays disabled, so a node
 without a gate is never silently re-gated by a resume.
+
+## Campaigns
+
+Every contract requires `campaignId`. Campaign state lives at
+`.runs/campaigns/<campaign-id>/` and can link multiple runs. Commands stay under
+the harness CLI:
+
+```bash
+node <skill-dir>/scripts/harness.mjs campaign init <campaign-id> --goal "Goal"
+node <skill-dir>/scripts/harness.mjs campaign attach <campaign-id> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
+node <skill-dir>/scripts/harness.mjs campaign note <campaign-id> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
+node <skill-dir>/scripts/harness.mjs campaign show <campaign-id>
+```
+
+Artifacts:
+
+```text
+campaign.json
+journal.jsonl
+HANDOFF.md
+```
+
+- `journal.jsonl` is the append-only, fsynced narrative state; `nodes/*.json` remains authoritative for run/node transitions.
+- `HANDOFF.md` is an atomic, bounded projection of recent user intents, active decisions, constraints, outcomes, next action, open questions, linked runs, and session/transcript lineage. Entry count is capped and the final file is capped at 16 KiB; the full journal is always preserved.
+- `campaign.json` keeps an ordered, idempotent `linkedRunIds` list; `resume` does not append duplicate `run.registered` journal events.
+- Handoff rendering refreshes at initialization, run registration, state transitions, explicit `status`, and terminal completion — not on every idle poll.
+- Crash recovery can only replay state written to the journal or a transcript/hook/wrapper. State that never reached any durable sink cannot be recovered.

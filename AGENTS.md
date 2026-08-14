@@ -40,6 +40,14 @@ Write the minimum code that runs. No fluff, no gold-plating.
 - **Shell scripts** run under `set -euo pipefail` and are idempotent — re-running
   completes what is missing instead of duplicating or destroying.
 
+## Harness protocol
+
+When using `run-harness`, the orchestrator owns repository discovery. Read the
+campaign `HANDOFF.md`, attach the current session, and record concise material
+events before delegating. Give every execution worker a closed task packet with
+exact read files, write files, decisions, non-goals, and verification commands.
+Only an explicit read-only discovery node may explore beyond a supplied packet.
+
 ## Production note
 
 Rule 1 is written for side projects. Against a live system it can lead an agent to

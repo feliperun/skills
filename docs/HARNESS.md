@@ -36,7 +36,7 @@ HARNESS_CLI="$HOME/.codex/skills/run-harness/scripts/harness.mjs"
 
 1. Escreva ou aprove um plano.
 2. Quebre o plano em nós pequenos, verificáveis e com dependências explícitas.
-3. Crie um contrato JSON e os prompts de cada nó.
+3. Inspecione o repositório uma vez, crie o contrato JSON e um task packet fechado para cada nó.
 4. Valide o contrato antes de gastar tokens.
 5. Execute o run em background.
 6. Consulte o progresso por `/btw` ou pelo comando `status`.
@@ -47,21 +47,22 @@ Estrutura sugerida no repositório alvo:
 ```text
 .harness/
   feature-42.json
-  prompts/
-    frontend.md
-    backend.md
-    migration.md
+  packets/
+    frontend.json
+    backend.json
+    migration.json
 .runs/                  # gerado e ignorado pelo Git
 ```
 
 Como o contrato está dentro de `.harness/`, use `"cwd": ".."` para apontar os
-workers à raiz do repositório. Caminhos de `promptFile` são relativos ao contrato.
+workers à raiz do repositório. Caminhos de `taskPacketFile` são relativos ao contrato.
 
 ## 3. Exemplo completo
 
 ```json
 {
   "id": "feature-42",
+  "campaignId": "feature-42",
   "goal": "Implementar a feature 42 com testes e revisão independente",
   "cwd": "..",
   "maxParallel": 1,
@@ -110,7 +111,7 @@ workers à raiz do repositório. Caminhos de `promptFile` são relativos ao cont
     {
       "id": "frontend",
       "type": "frontend",
-      "promptFile": "prompts/frontend.md",
+      "taskPacketFile": "packets/frontend.json",
       "dependsOn": [],
       "definitionOfDone": [
         "A interface implementa os estados descritos na spec",
@@ -125,7 +126,7 @@ workers à raiz do repositório. Caminhos de `promptFile` são relativos ao cont
     {
       "id": "backend",
       "type": "backend",
-      "promptFile": "prompts/backend.md",
+      "taskPacketFile": "packets/backend.json",
       "dependsOn": [],
       "definitionOfDone": [
         "O comportamento solicitado está implementado",
@@ -140,7 +141,7 @@ workers à raiz do repositório. Caminhos de `promptFile` são relativos ao cont
     {
       "id": "migration",
       "type": "mechanic",
-      "promptFile": "prompts/migration.md",
+      "taskPacketFile": "packets/migration.json",
       "dependsOn": ["backend"],
       "definitionOfDone": [
         "A transformação é determinística",
@@ -170,23 +171,70 @@ que a máquina esteve suspensa.
 ## 4. Como escrever um bom nó
 
 Um nó deve caber em uma única responsabilidade e terminar com uma verificação
-objetiva. Prefira um prompt por arquivo para tarefas reais.
+objetiva. Prefira um task packet por arquivo para tarefas reais.
 
-Exemplo de `prompts/backend.md`:
+Exemplo de `packets/backend.json`:
 
-```markdown
-Implemente a validação de idempotência descrita em docs/SPEC.md.
-
-Escopo:
-- src/idempotency/
-- tests/idempotency/
-
-Execute os testes relevantes e informe o resultado real. Não altere APIs fora
-desse módulo. Não faça commit, push, merge ou deploy.
+```json
+{
+  "mode": "execution",
+  "objective": "Implementar a validação de idempotência descrita em docs/SPEC.md",
+  "instructions": [
+    "Implementar apenas em src/idempotency/",
+    "Adicionar cobertura em tests/idempotency/",
+    "Reportar o resultado real dos testes"
+  ],
+  "readFiles": ["docs/SPEC.md", "src/idempotency/existing.ts"],
+  "writeFiles": ["src/idempotency/validator.ts", "tests/idempotency/validator.test.ts"],
+  "symbols": ["ExistingIdempotency"],
+  "decisions": ["Não alterar APIs fora do módulo"],
+  "nonGoals": ["Commit, push, merge ou deploy"],
+  "verification": ["node --test tests/idempotency/validator.test.ts"]
+}
 ```
 
-Use `prompt` diretamente no JSON apenas para tarefas muito curtas. O contrato
-aceita exatamente um entre `prompt` e `promptFile`.
+O packet de execução é fechado: o worker só inspeciona `readFiles`, só edita
+`writeFiles` e só executa `verification`. Se faltar um arquivo ou fato, deve
+parar com `BLOCKED_CONTEXT: <arquivo ou fato ausente>` em vez de explorar o
+repositório novamente. O juiz recebe o mesmo conjunto fechado: inspeciona apenas
+os `writeFiles`, executa apenas a verificação listada e não faz descoberta
+repositório-afora.
+
+Use `taskPacket` inline no JSON apenas para tarefas muito curtas. O contrato
+aceita exatamente um entre `taskPacket` e `taskPacketFile`; os campos
+`prompt`/`promptFile` não existem mais.
+
+Um nó de descoberta é a exceção: use `"mode": "discovery"` somente quando o
+orquestrador realmente não conseguiu produzir um packet de execução. Ele é
+read-only, não edita o repositório e deve retornar um novo packet de execução.
+Se `readFiles` estiver vazio, essa é a única exceção à inspeção fechada: o
+worker pode inspecionar o repositório somente em modo leitura para produzir o
+packet; com `readFiles` preenchido, continua limitado aos arquivos listados.
+
+### Campanha e custo de tokens
+
+Toda execução pertence a uma campanha (`campaignId` obrigatório). Inicialize a
+memória durável uma vez e use-a entre execuções:
+
+```bash
+"$HARNESS_CLI" campaign init feature-42 --goal "Implementar a feature 42"
+"$HARNESS_CLI" campaign attach feature-42 --tool codex --session-id <id> --no-transcript
+"$HARNESS_CLI" campaign note feature-42 --session-id <id> --kind decision --decision-id d1 --text "Usar packets fechados"
+"$HARNESS_CLI" campaign show feature-42
+```
+
+Isso cria `.runs/campaigns/feature-42/` com `campaign.json`, `journal.jsonl`
+apendável e sincronizado em disco, e `HANDOFF.md`. Vários runs podem ser
+vinculados à mesma campanha; o handoff reúne intenções recentes do usuário,
+decisões, restrições, resultados, próximo passo e linhagem de sessões em uma
+projeção limitada a 16 KiB, mas o journal completo é preservado.
+Estado que não foi gravado no journal nem em transcript/hook/wrapper não pode
+ser recuperado após um crash.
+
+O tradeoff de tokens é intencional: o orquestrador paga uma única inspeção do
+repositório e a registra em packets fechados. Esse custo é amortizado entre
+workers, juízes e retries; sem o packet, cada processo filho repetiria a
+descoberta e queimaria contexto e latência.
 
 ## 5. Roteamento de modelos
 
@@ -216,7 +264,7 @@ catálogo e referencie-o no nó:
       "id": "investigation",
       "type": "backend",
       "runtime": "terra",
-      "promptFile": "prompts/investigation.md"
+      "taskPacketFile": "packets/investigation.json"
     }
   ]
 }
@@ -317,11 +365,11 @@ ninguém leia o resultado: é exatamente esse caso que o `resume` recupera.
 | `pending` | Aguarda dependências ou vaga de execução | Nenhuma |
 | `running` | Worker ou judge está executando | Acompanhar por status |
 | `done` | Trabalho aceito, inclusive pelo gate | Nenhuma |
-| `no-op` | Worker terminou sem resultado | Revisar prompt e escopo |
+| `no-op` | Worker terminou sem resultado | Revisar task packet e escopo |
 | `blocked` | Permissão ou dependência impediu o nó | Resolver a causa indicada |
 | `failed` | Provider, comando ou saída falhou | Ler erro; abrir log se necessário |
 | `exhausted` | Estourou tempo total ou revisões | Redividir o nó ou ajustar o limite |
-| `stalled` | Não houve saída dentro da janela | Verificar provider, rede e prompt |
+| `stalled` | Não houve saída dentro da janela | Verificar provider, rede e task packet |
 | `canceled` | Execução foi interrompida | Criar novo run se quiser repetir |
 
 Um dependente só executa quando todas as dependências terminam como `done`. Se
@@ -374,8 +422,8 @@ disjuntos. Dependências continuam sendo respeitadas mesmo com paralelismo.
 ```
 
 - `STATUS.md`: visão normal para o operador e para `/btw`.
-- `contract.json`: contrato com todos os prompts embutidos, o que torna o
-  diretório um registro completo e retomável.
+- `contract.json`: contrato com todos os task packets embutidos e sem o prompt
+  gerado internamente, o que torna o diretório um registro completo e retomável.
 - `run.json`: PID do processo controlador, usado para detectar órfãos.
 - `nodes/*.json`: estado canônico de cada nó.
 - `events.jsonl`: transições de estado.

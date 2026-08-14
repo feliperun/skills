@@ -50,6 +50,12 @@ custom providers such as DeepSeek through Codex, detects stalled workers, and
 runs bounded structured quality gates. Progress is read from `.runs/<id>/STATUS.md`;
 worker logs stay out of the main context.
 
+Every node now receives a closed task packet (`taskPacket`/`taskPacketFile`), so
+the orchestrator performs repository discovery once and workers/judges inspect
+only the listed paths. Runs also join a durable campaign with an append-only
+journal and a bounded `HANDOFF.md`, keeping handoff state across runs, crashes,
+and resumes.
+
 `preflight` probes every routed runtime with a real read-only call before any
 state exists, because a valid credential does not mean the provider serves that
 model. `run --detach` forks the controller into its own process group so it

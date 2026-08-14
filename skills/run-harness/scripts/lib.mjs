@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { loadTaskPacket, renderWorkerPrompt } from "./task-packet.mjs";
 
 export const TERMINAL = new Set([
   "done",
@@ -52,6 +53,7 @@ export function validateContract(raw, contractPath) {
     throw new TypeError("contract must be a JSON object");
   }
   requireId(raw.id, "contract.id");
+  requireId(raw.campaignId, "contract.campaignId");
   requireString(raw.goal, "contract.goal");
 
   const contractDir = dirname(resolve(contractPath));
@@ -100,7 +102,8 @@ export function validateContract(raw, contractPath) {
     if (!Array.isArray(dependsOn) || dependsOn.some((id) => typeof id !== "string")) {
       throw new TypeError(`nodes[${index}].dependsOn must be an array of ids`);
     }
-    const prompt = loadPrompt(node, contractDir, index);
+    const taskPacket = loadTaskPacket(node, contractDir, cwd, index);
+    const prompt = renderWorkerPrompt(taskPacket, node.id);
     const definitionOfDone = node.definitionOfDone ?? [];
     if (!Array.isArray(definitionOfDone) || definitionOfDone.some((item) => typeof item !== "string")) {
       throw new TypeError(`nodes[${index}].definitionOfDone must be an array of strings`);
@@ -109,7 +112,7 @@ export function validateContract(raw, contractPath) {
     const timeoutSec = node.timeoutSec === undefined
       ? undefined
       : positiveNumber(node.timeoutSec, `nodes[${index}].timeoutSec`);
-    return { ...node, dependsOn, definitionOfDone, prompt, gate, timeoutSec };
+    return { ...node, dependsOn, definitionOfDone, taskPacket, prompt, gate, timeoutSec };
   });
 
   for (const node of nodes) {
@@ -293,8 +296,18 @@ export function judgePrompt(node, workerResult) {
   const criteria = node.definitionOfDone.length
     ? node.definitionOfDone.map((item) => `- ${item}`).join("\n")
     : "- The requested work is complete, correct, tested, and limited to scope.";
-  return `Review node ${node.id} independently. Inspect the working tree and run relevant tests.\n\n` +
-    `Original task:\n${node.prompt}\n\nDefinition of Done:\n${criteria}\n\n` +
+  const taskInstructions = node.taskPacket.instructions.length
+    ? node.taskPacket.instructions.map((item, index) => `${index + 1}. ${item}`).join("\n")
+    : "(none)";
+  const writeFiles = node.taskPacket.writeFiles.length
+    ? node.taskPacket.writeFiles.map((path) => `- ${path}`).join("\n")
+    : "- (none)";
+  const verification = node.taskPacket.verification.length
+    ? node.taskPacket.verification.map((command) => `- ${command}`).join("\n")
+    : "- (none)";
+  return `Review node ${node.id} independently. The review context is closed: inspect only the write files below, run only the verification commands below, and do not perform repository-wide discovery.\n\n` +
+    `Write files:\n${writeFiles}\n\nVerification:\n${verification}\n\n` +
+    `Task brief:\n${node.taskPacket.objective}\n\nInstructions:\n${taskInstructions}\n\nDefinition of Done:\n${criteria}\n\n` +
     `Worker report:\n${workerResult || "(empty)"}\n\n` +
     "Return only the JSON object required by the output schema. Evidence must be concrete. " +
     "Use verdict pass only when findings is empty and maxSeverity is none. " +
@@ -306,7 +319,7 @@ export function retryPrompt(node, verdict) {
   const findings = verdict.findings
     .map((finding) => `- [${finding.severity}] ${finding.description} Evidence: ${finding.evidence}`)
     .join("\n");
-  return `${node.prompt}\n\nA quality gate rejected the previous attempt. Fix the current working tree in place.\n` +
+  return `${node.prompt}\n\nA quality gate rejected the previous attempt. Fix the current working tree in place inside the closed context above.\n` +
     `Gate summary: ${verdict.summary}\n${findings}`;
 }
 
@@ -516,19 +529,6 @@ function validateGate(gate, runtimes, index) {
   };
 }
 
-function loadPrompt(node, contractDir, index) {
-  const hasPrompt = typeof node.prompt === "string" && Boolean(node.prompt);
-  const hasPromptFile = typeof node.promptFile === "string" && Boolean(node.promptFile);
-  if (hasPrompt === hasPromptFile) {
-    throw new TypeError(`nodes[${index}] needs exactly one of prompt or promptFile`);
-  }
-  if (hasPrompt) return node.prompt;
-  if (hasPromptFile) {
-    return readFileSync(resolve(contractDir, node.promptFile), "utf8");
-  }
-  throw new TypeError(`nodes[${index}] needs exactly one of prompt or promptFile`);
-}
-
 function assertAcyclic(nodes) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const visiting = new Set();
@@ -681,6 +681,9 @@ function requireRuntime(runtimes, id, label) {
 function requireId(value, label) {
   if (typeof value !== "string" || !/^[A-Za-z0-9._-]+$/u.test(value)) {
     throw new TypeError(`${label} must contain only letters, numbers, dot, underscore, or dash`);
+  }
+  if (value === "." || value === "..") {
+    throw new TypeError(`${label} must not be "." or ".."`);
   }
 }
 

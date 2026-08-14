@@ -33,6 +33,13 @@ import {
   runProcessAlive,
   validateContract,
 } from "./lib.mjs";
+import {
+  registerRun,
+  renderHandoff,
+  renderRunHandoff,
+  resolveCampaign,
+} from "./campaign.mjs";
+import { campaignCli } from "./campaign-cli.mjs";
 
 export async function runContract(contractPath) {
   const absoluteContractPath = resolve(contractPath);
@@ -43,10 +50,15 @@ export async function runContract(contractPath) {
   const runDir = join(contract.cwd, ".runs", contract.id);
   if (existsSync(runDir)) throw new Error(`run already exists: ${runDir}`);
 
+  const runsDir = join(contract.cwd, ".runs");
+  const campaign = resolveCampaign(runsDir, contract.campaignId);
+
   mkdirSync(join(runDir, "nodes"), { recursive: true });
   mkdirSync(join(runDir, "logs"), { recursive: true });
   writeJsonAtomic(join(runDir, "contract.json"), serializableContract(contract));
   writeJsonAtomic(join(runDir, "judge.schema.json"), JUDGE_SCHEMA);
+  registerRun(campaign.path, contract.id);
+  renderHandoff(campaign.path, runsDir);
 
   const states = new Map();
   for (const node of contract.nodes) {
@@ -68,13 +80,16 @@ export async function runContract(contractPath) {
     states.set(node.id, state);
     writeNode(runDir, state);
   }
-  return driveRun(contract, runDir, states);
+  return driveRun(contract, runDir, states, campaign);
 }
 
 export async function resumeRun(runDirPath) {
   const runDir = resolve(runDirPath);
   const contractPath = join(runDir, "contract.json");
   let contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  const runsDir = join(runDir, "..");
+  const campaign = resolveCampaign(runsDir, contract.campaignId);
+  registerRun(campaign.path, contract.id);
 
   const states = new Map();
   for (const node of contract.nodes) {
@@ -122,15 +137,25 @@ export async function resumeRun(runDirPath) {
     }
     transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] });
   }
-  return driveRun(contract, runDir, states);
+  return driveRun(contract, runDir, states, campaign);
 }
 
-async function driveRun(contract, runDir, states) {
+async function driveRun(contract, runDir, states, campaign) {
+  const runsDir = join(contract.cwd, ".runs");
   writeFileSync(
     join(runDir, "run.json"),
     `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2)}\n`,
   );
   render(runDir);
+  renderHandoff(campaign.path, runsDir);
+
+  let handoffFingerprint = statesFingerprint(states);
+  const renderHandoffIfChanged = () => {
+    const fingerprint = statesFingerprint(states);
+    if (fingerprint === handoffFingerprint) return;
+    handoffFingerprint = fingerprint;
+    renderHandoff(campaign.path, runsDir);
+  };
 
   const running = new Map();
   let canceled = false;
@@ -173,6 +198,7 @@ async function driveRun(contract, runDir, states) {
     }
 
     render(runDir);
+    renderHandoffIfChanged();
     if ([...states.values()].some((state) => !TERMINAL.has(state.status))) {
       await delay(contract.pollIntervalMs);
     }
@@ -181,10 +207,17 @@ async function driveRun(contract, runDir, states) {
   process.removeListener("SIGINT", cancel);
   process.removeListener("SIGTERM", cancel);
   render(runDir);
+  renderHandoff(campaign.path, runsDir);
   const failed = [...states.values()].filter((state) => state.status !== "done");
   process.stdout.write(`[run] ${contract.id} ${failed.length ? "failed" : "done"} · ${runDir}\n`);
   if ([...states.values()].some((state) => state.usage)) process.stdout.write(renderReport(runDir));
   return { runDir, states, ok: failed.length === 0 };
+}
+
+function statesFingerprint(states) {
+  return [...states.values()]
+    .map((state) => `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}`)
+    .join("|");
 }
 
 /** Stops scheduling new nodes once the contract's token budget is spent.
@@ -574,7 +607,11 @@ function writeJsonAtomic(path, value) {
 
 function serializableContract(contract) {
   const copy = structuredClone(contract);
-  for (const node of copy.nodes) delete node.promptFile;
+  for (const node of copy.nodes) {
+    delete node.promptFile;
+    delete node.taskPacketFile;
+    delete node.prompt;
+  }
   delete copy.warnings;
   return copy;
 }
@@ -608,10 +645,7 @@ function reusedDoneWarnings(contract) {
 async function watchRun(runDir, intervalSec) {
   if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
   for (;;) {
-    const nodeDir = join(runDir, "nodes");
-    const nodes = readdirSync(nodeDir)
-      .filter((name) => name.endsWith(".json"))
-      .map((name) => JSON.parse(readFileSync(join(nodeDir, name), "utf8")));
+    const nodes = readRunNodes(runDir);
     if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
       const done = nodes.filter((node) => node.status === "done").length;
       process.stdout.write(`[watch] ${basename(runDir)} finished · ${done}/${nodes.length} done\n`);
@@ -632,8 +666,20 @@ async function watchRun(runDir, intervalSec) {
         const child = detachSelf("resume", runDir);
         process.stdout.write(`[watch] controller gone · resumed · pid ${child.pid}\n`);
         const deadline = Date.now() + 30_000;
-        while (!runProcessAlive(runDir) && Date.now() < deadline) await delay(500);
-        if (!runProcessAlive(runDir)) process.stdout.write("[watch] resume did not come alive within 30s\n");
+        let confirmed = false;
+        while (Date.now() < deadline) {
+          const current = readRunNodes(runDir);
+          if (current.length && current.every((node) => TERMINAL.has(node.status))) {
+            confirmed = true;
+            break;
+          }
+          if (runProcessAlive(runDir)) {
+            confirmed = true;
+            break;
+          }
+          await delay(500);
+        }
+        if (!confirmed) process.stdout.write("[watch] resume did not come alive within 30s\n");
       } finally {
         try {
           rmdirSync(lock);
@@ -642,6 +688,13 @@ async function watchRun(runDir, intervalSec) {
     }
     await delay(intervalSec * 1_000);
   }
+}
+
+function readRunNodes(runDir) {
+  const nodeDir = join(runDir, "nodes");
+  return readdirSync(nodeDir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(nodeDir, name), "utf8")));
 }
 
 function stopProcess(child) {
@@ -676,6 +729,10 @@ function detachSelf(command, target) {
 }
 
 async function main(argv) {
+  if (argv[0] === "campaign") {
+    campaignCli(argv.slice(1));
+    return;
+  }
   const detached = argv.includes("--detach");
   const intervalIndex = argv.indexOf("--interval");
   const intervalSec = intervalIndex !== -1 ? positiveInterval(argv[intervalIndex + 1]) : 30;
@@ -743,6 +800,7 @@ async function main(argv) {
     const runDir = resolve(target);
     const status = renderStatus(runDir);
     writeFileSync(join(runDir, "STATUS.md"), status);
+    renderRunHandoff(runDir);
     process.stdout.write(status);
     return;
   }
@@ -762,7 +820,7 @@ async function main(argv) {
     return;
   }
   process.stderr.write(
-    "usage: harness.mjs <run|validate|preflight> <contract.json> | <status|report|findings|resume|watch> <run-dir> | run|resume|watch --detach <target> [--interval <sec>]\n",
+    "usage: harness.mjs campaign <init|attach|note|show> <campaign-id> ... | <run|validate|preflight> <contract.json> | <status|report|findings|resume|watch> <run-dir> | run|resume|watch --detach <target> [--interval <sec>]\n",
   );
   process.exitCode = 2;
 }

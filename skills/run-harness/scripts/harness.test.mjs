@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   JUDGE_SCHEMA,
+  judgePrompt,
   normalizeProviderResult,
   providerCommand,
   renderFindings,
@@ -16,6 +17,18 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { preflightContract, runContract, resumeRun } from "./harness.mjs";
+import {
+  appendJournal,
+  campaignDir,
+  HANDOFF_BYTES,
+  HANDOFF_LIMIT,
+  initializeCampaign,
+  readJournal,
+  registerRun,
+  renderHandoff,
+  resolveCampaign,
+  validateJournalEntry,
+} from "./campaign.mjs";
 
 function orphan(runDir, nodeId, patch = {}) {
   const path = join(runDir, "nodes", `${nodeId}.json`);
@@ -55,6 +68,7 @@ async function withFakeAgy(directory, body) {
 function fixture(overrides = {}) {
   return {
     id: "test-run",
+    campaignId: "test-campaign",
     goal: "Prove the runner works",
     cwd: ".",
     runtimeDefaults: { worker: "luna", judge: "sol" },
@@ -73,7 +87,22 @@ function fixture(overrides = {}) {
       { match: { type: "frontend" }, runtime: "opus" },
       { match: { type: "mechanic" }, runtime: "flash" },
     ],
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: false }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+    ...overrides,
+  };
+}
+
+function packet(overrides = {}) {
+  return {
+    mode: "execution",
+    objective: "Implement it",
+    instructions: ["Implement the requested behavior"],
+    readFiles: ["contract.json"],
+    writeFiles: ["README.md"],
+    symbols: [],
+    decisions: [],
+    nonGoals: [],
+    verification: ["node --test skills/run-harness/scripts/harness.test.mjs"],
     ...overrides,
   };
 }
@@ -81,6 +110,12 @@ function fixture(overrides = {}) {
 function writeContract(directory, value) {
   const path = join(directory, "contract.json");
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  const cwd = join(directory, value.cwd ?? ".");
+  const runsDir = join(cwd, ".runs");
+  const pathForCampaign = campaignDir(runsDir, value.campaignId);
+  if (!existsSync(pathForCampaign)) {
+    initializeCampaign(runsDir, { campaignId: value.campaignId, goal: value.goal });
+  }
   return path;
 }
 
@@ -92,7 +127,7 @@ const mode = ${JSON.stringify(mode)};
 console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
 if (mode === "slow") {
   // The worker eats most of the node budget; the judge must still get its own.
-  const wait = prompt.startsWith("Review node") ? 1200 : 3000;
+  const wait = prompt.startsWith("Review node") ? 2000 : 3500;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
 }
 if (mode === "silent") setTimeout(() => {}, 60_000);
@@ -262,8 +297,8 @@ test("rejects dependency cycles", () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-cycle-"));
   const path = writeContract(directory, fixture({
     nodes: [
-      { id: "a", type: "backend", prompt: "a", dependsOn: ["b"] },
-      { id: "b", type: "backend", prompt: "b", dependsOn: ["a"] },
+      { id: "a", type: "backend", taskPacket: packet({ objective: "a" }), dependsOn: ["b"] },
+      { id: "b", type: "backend", taskPacket: packet({ objective: "b" }), dependsOn: ["a"] },
     ],
   }));
   assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /dependency cycle/u);
@@ -283,7 +318,7 @@ test("run --detach leaves a controller that outlives the invoker and completes t
   const directory = mkdtempSync(join(tmpdir(), "harness-detach-"));
   const contractPath = writeContract(directory, fixture({
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: false }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const contract = validateContract(JSON.parse(readFileSync(contractPath)), contractPath);
   const runDir = join(contract.cwd, ".runs", contract.id);
@@ -325,7 +360,7 @@ test("resume --detach restarts a failed node through a detached controller", asy
   const directory = mkdtempSync(join(tmpdir(), "harness-detach-resume-"));
   const contractPath = writeContract(directory, fixture({
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: false }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const contract = validateContract(JSON.parse(readFileSync(contractPath)), contractPath);
   const runDir = join(contract.cwd, ".runs", contract.id);
@@ -367,7 +402,7 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
     nodes: [{
       id: "build",
       type: "backend",
-      prompt: "Implement it",
+      taskPacket: packet(),
       definitionOfDone: ["It works"],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
@@ -389,11 +424,13 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
 test("marks a silent provider stalled", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-stall-"));
   mkdirSync(join(directory, "work"));
+  writeFileSync(join(directory, "work", "README.md"), "read me");
   const path = writeContract(directory, fixture({
     id: "stall-run",
     cwd: "work",
     pollIntervalMs: 10,
     stallTimeoutSec: 0.05,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"] }), gate: false }],
   }));
   const previous = process.env.HARNESS_CODEX_BIN;
   process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "silent");
@@ -412,7 +449,7 @@ test("preserves the worker report when the judge provider fails", async () => {
   const path = writeContract(directory, fixture({
     id: "judge-fail-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
   }));
   const previous = process.env.HARNESS_CODEX_BIN;
   process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "judge-fail");
@@ -453,11 +490,11 @@ test("spends the wall-clock budget per phase, not per node", async () => {
   const path = writeContract(directory, fixture({
     id: "phase-budget-run",
     pollIntervalMs: 10,
-    timeoutSec: 4,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: { failOn: ["critical"] } }],
+    timeoutSec: 5,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   }));
-  // The worker takes 3s of a 4s budget. A node-wide clock leaves the judge 1s
-  // for work that needs 1.2s and kills a healthy reviewer.
+  // The worker takes 3.5s of a 5s budget. A node-wide clock leaves the judge
+  // 1.5s for work that needs 2s and kills a healthy reviewer.
   const result = await withFakeCodex(directory, "slow", () => runContract(path));
   const state = result.states.get("build");
   assert.equal(state.status, "done", state.error?.message);
@@ -472,7 +509,7 @@ test("bounds gate retries and reports exhausted", async () => {
     nodes: [{
       id: "build",
       type: "backend",
-      prompt: "Implement it",
+      taskPacket: packet(),
       gate: { failOn: ["critical"], maxRevisions: 1 },
     }],
   }));
@@ -508,7 +545,7 @@ test("resume re-judges an adopted worker result for a gated node", async () => {
   const path = writeContract(directory, fixture({
     id: "resume-gate-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
@@ -551,7 +588,7 @@ test("gate revisions are not consumed by attempts burned in restarts", async () 
     nodes: [{
       id: "build",
       type: "backend",
-      prompt: "Implement it",
+      taskPacket: packet(),
       definitionOfDone: ["It works"],
       gate: { failOn: ["critical"], maxRevisions: 1 },
     }],
@@ -574,8 +611,7 @@ test("status separates a live running node from an orphaned one", async () => {
 
   assert.match(renderStatus(runDir), /Nothing needs you right now/u);
 
-  const reaped = spawnSync(process.execPath, ["-e", ""]);
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: reaped.pid, startedAt: "earlier" }));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: 2_147_483_647, startedAt: "earlier" }));
   assert.match(renderStatus(runDir), /build still claims to be running/u);
 });
 
@@ -584,7 +620,7 @@ test("report aggregates per-node status, attempts, revisions, and tokens", async
   const path = writeContract(directory, fixture({
     id: "report-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   const report = renderReport(runDir);
@@ -602,7 +638,7 @@ test("events record attempt, runtime, and gate verdict", async () => {
     nodes: [{
       id: "build",
       type: "backend",
-      prompt: "Implement it",
+      taskPacket: packet(),
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
@@ -628,7 +664,7 @@ test("events record attempt, runtime, and gate verdict", async () => {
 test("preflight probes every routed worker and judge runtime", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-preflight-"));
   const path = writeContract(directory, fixture({
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   }));
   const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
   assert.deepEqual(checks.map((check) => check.id).sort(), ["luna", "sol"]);
@@ -639,7 +675,7 @@ test("preflight runs an agy runtime through its native stream protocol", async (
   const directory = mkdtempSync(join(tmpdir(), "harness-preflight-agy-"));
   const path = writeContract(directory, fixture({
     runtimeDefaults: { worker: "agy", judge: "sol" },
-    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: false }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const checks = await withFakeAgy(directory, () => preflightContract(path));
   assert.deepEqual(checks.map((check) => check.id), ["agy"]);
@@ -649,7 +685,7 @@ test("preflight runs an agy runtime through its native stream protocol", async (
 test("preflight reports a missing credential by variable name only", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-preflight-key-"));
   const path = writeContract(directory, fixture({
-    nodes: [{ id: "build", type: "mechanic", prompt: "Implement it", gate: false }],
+    nodes: [{ id: "build", type: "mechanic", taskPacket: packet(), gate: false }],
   }));
   const previous = process.env.DEEPSEEK_API_KEY;
   delete process.env.DEEPSEEK_API_KEY;
@@ -697,7 +733,7 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
     nodes: [{
       id: "build",
       type: "backend",
-      prompt: "Implement it",
+      taskPacket: packet(),
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
@@ -722,8 +758,8 @@ test("maxInputTokens blocks pending nodes once the budget is spent", async () =>
     maxInputTokens: 5,
     pollIntervalMs: 10,
     nodes: [
-      { id: "first", type: "backend", prompt: "Implement it", gate: false },
-      { id: "second", type: "backend", prompt: "Implement it too", dependsOn: ["first"], gate: false },
+      { id: "first", type: "backend", taskPacket: packet(), gate: false },
+      { id: "second", type: "backend", taskPacket: packet({ objective: "Implement it too" }), dependsOn: ["first"], gate: false },
     ],
   }));
   const result = await withFakeCodex(directory, "pass", () => runContract(path));
@@ -752,16 +788,16 @@ test("a finished run prints the token report", async () => {
   assert.ok(writes.some((line) => line.includes("worker complete")), "node note surfaces the worker summary");
 });
 
-test("validate warns when a prompt command is absent from the Definition of Done", () => {
+test("validate warns when a task packet verification command is absent from the Definition of Done", () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-cmd-warn-"));
   const value = fixture();
-  value.nodes[0].prompt = "Implement it\n\n## Commands\n\n```sh\npnpm exec vitest run tests/fixtures/x.test.ts\n```";
+  value.nodes[0].taskPacket = packet({ verification: ["pnpm exec vitest run tests/fixtures/x.test.ts"] });
   value.nodes[0].definitionOfDone = ["It works"];
   const path = writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path)), path);
   assert.ok(contract.warnings.some((warning) => warning.includes("tests/fixtures/x.test.ts")));
   const clean = fixture();
-  clean.nodes[0].prompt = "Implement it\n\n```sh\npnpm exec vitest run tests/fixtures/y.test.ts\n```";
+  clean.nodes[0].taskPacket = packet({ verification: ["pnpm exec vitest run tests/fixtures/y.test.ts"] });
   clean.nodes[0].definitionOfDone = ["tests/fixtures/y.test.ts passes"];
   const cleanPath = writeContract(directory, clean);
   assert.equal(validateContract(JSON.parse(readFileSync(cleanPath)), cleanPath).warnings.length, 0);
@@ -788,8 +824,7 @@ test("watch resumes a run whose controller died", async () => {
   // Simulate a controller that died mid-work: the node claims running but the
   // recorded pid is gone.
   orphan(runDir, "build");
-  const reaped = spawnSync(process.execPath, ["-e", ""]);
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: reaped.pid, startedAt: "earlier" }));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: 2_147_483_647, startedAt: "earlier" }));
 
   // The watcher's resumed controller inherits the watcher's environment, so
   // the fake provider must stay installed for the whole watch lifetime.
@@ -822,8 +857,8 @@ test("blocks downstream nodes after a failed dependency", async () => {
     id: "dependency-run",
     pollIntervalMs: 10,
     nodes: [
-      { id: "first", type: "backend", prompt: "Fail", gate: false },
-      { id: "second", type: "backend", prompt: "Never run", dependsOn: ["first"], gate: false },
+      { id: "first", type: "backend", taskPacket: packet({ objective: "Fail" }), gate: false },
+      { id: "second", type: "backend", taskPacket: packet({ objective: "Never run" }), dependsOn: ["first"], gate: false },
     ],
   }));
   const previous = process.env.HARNESS_CODEX_BIN;
@@ -836,4 +871,336 @@ test("blocks downstream nodes after a failed dependency", async () => {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
   }
+});
+
+test("validate requires a campaignId", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-id-"));
+  const value = fixture();
+  delete value.campaignId;
+  const path = join(directory, "contract.json");
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /campaignId/u);
+
+  for (const campaignId of [".", ".."]) {
+    const invalid = fixture({ campaignId });
+    writeFileSync(path, `${JSON.stringify(invalid, null, 2)}\n`);
+    assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /campaignId/u);
+  }
+});
+
+test("validate rejects legacy prompt and promptFile fields", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-legacy-prompt-"));
+  const value = fixture();
+  value.nodes[0].prompt = "legacy prompt";
+  const promptPath = writeContract(directory, value);
+  assert.throws(() => validateContract(JSON.parse(readFileSync(promptPath)), promptPath), /must not use prompt or promptFile/u);
+
+  const fileValue = fixture();
+  fileValue.nodes[0].promptFile = "legacy.md";
+  const filePath = writeContract(directory, fileValue);
+  assert.throws(() => validateContract(JSON.parse(readFileSync(filePath)), filePath), /must not use prompt or promptFile/u);
+});
+
+test("validate loads taskPacketFile and renders a closed execution prompt", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-file-"));
+  writeFileSync(join(directory, "packet.json"), `${JSON.stringify(packet())}\n`);
+  const value = fixture();
+  value.nodes[0] = { id: "build", type: "backend", taskPacketFile: "packet.json", gate: false };
+  const path = writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path)), path);
+  assert.equal(contract.nodes[0].taskPacket.mode, "execution");
+  assert.match(contract.nodes[0].prompt, /Closed context/u);
+  assert.match(contract.nodes[0].prompt, /BLOCKED_CONTEXT/u);
+});
+
+test("validate rejects malformed, escaping, and missing-read-file task packets", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-invalid-"));
+  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-outside-"));
+  writeFileSync(join(outside, "secret.txt"), "secret");
+  symlinkSync(join(outside, "secret.txt"), join(directory, "outside-link"));
+  const cases = [
+    [packet({ readFiles: ["../outside"] }), /escapes cwd/u],
+    [packet({ writeFiles: ["../outside"] }), /escapes cwd/u],
+    [packet({ readFiles: ["outside-link"] }), /escapes cwd/u],
+    [packet({ writeFiles: ["outside-link"] }), /escapes cwd/u],
+    [packet({ writeFiles: ["."] }), /must name a file/u],
+    [packet({ readFiles: ["missing.txt"] }), /does not exist/u],
+    [packet({ mode: "discovery", writeFiles: ["README.md"] }), /must be empty for a discovery packet/u],
+    [packet({ mode: "execution", readFiles: [] }), /readFiles must not be empty/u],
+    [packet({ mode: "execution", writeFiles: [] }), /writeFiles must not be empty/u],
+  ];
+  for (const [taskPacket, expected] of cases) {
+    const value = fixture({ nodes: [{ id: "build", type: "backend", taskPacket, gate: false }] });
+    const path = writeContract(directory, value);
+    assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), expected);
+  }
+});
+
+test("validate rejects new write paths beneath an outward symlink", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-parent-"));
+  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-target-"));
+  symlinkSync(outside, join(directory, "outside-dir"));
+  const value = fixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ writeFiles: ["outside-dir/new.txt"] }), gate: false }],
+  });
+  const path = writeContract(directory, value);
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path)), path),
+    /escapes cwd/u,
+  );
+});
+
+test("validate rejects a symlink followed by dotdot escaping cwd", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-dotdot-"));
+  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-dotdot-target-"));
+  mkdirSync(join(outside, "sub"), { recursive: true });
+  writeFileSync(join(directory, "secret.txt"), "inside secret");
+  writeFileSync(join(outside, "secret.txt"), "outside secret");
+  symlinkSync(join(outside, "sub"), join(directory, "link"));
+  const value = fixture({
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ readFiles: ["link/../secret.txt"] }),
+      gate: false,
+    }],
+  });
+  const path = writeContract(directory, value);
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path)), path),
+    /escapes cwd/u,
+  );
+});
+
+test("judge prompt exposes only the write-file evidence boundary", () => {
+  const node = {
+    id: "build",
+    type: "backend",
+    taskPacket: packet(),
+    definitionOfDone: ["It works"],
+  };
+  const prompt = judgePrompt(node, "worker complete");
+  assert.match(prompt, /Write files:\n- README\.md/u);
+  assert.doesNotMatch(prompt, /Read files/u);
+  assert.doesNotMatch(prompt, /contract\.json/u);
+});
+
+test("discovery packets render as read-only discovery work", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-discovery-packet-"));
+  const value = fixture({
+    nodes: [{
+      id: "discover",
+      type: "backend",
+      taskPacket: packet({ mode: "discovery", readFiles: [], writeFiles: [], objective: "Find the entrypoint" }),
+      gate: false,
+    }],
+  });
+  const path = writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path)), path);
+  assert.match(contract.nodes[0].prompt, /read-only/u);
+  assert.match(contract.nodes[0].prompt, /Return one JSON task packet/u);
+});
+
+test("stored contract inlines the task packet and drops the generated prompt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-stored-packet-"));
+  const path = writeContract(directory, fixture({ id: "stored-packet-run", pollIntervalMs: 10 }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  const stored = JSON.parse(readFileSync(join(result.runDir, "contract.json"), "utf8"));
+  assert.equal(stored.nodes[0].taskPacket.mode, "execution");
+  assert.equal(stored.nodes[0].prompt, undefined);
+  assert.equal(stored.nodes[0].taskPacketFile, undefined);
+  const revalidated = validateContract(stored, join(result.runDir, "contract.json"));
+  assert.match(revalidated.nodes[0].prompt, /Closed context/u);
+});
+
+test("initializes a campaign with an empty bounded handoff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-init-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "launch", goal: "Ship the durable handoff" });
+  assert.equal(created.campaign.goal, "Ship the durable handoff");
+  assert.equal(readJournal(created.path)[0].type, "campaign.initialized");
+  const handoff = renderHandoff(created.path, runsDir);
+  assert.match(handoff, /# campaign launch handoff/u);
+  assert.match(handoff, /Ship the durable handoff/u);
+  assert.match(handoff, /No linked runs yet/u);
+});
+
+test("rejects dot and dotdot campaign ids", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-dot-id-"));
+  const runsDir = join(directory, ".runs");
+  for (const campaignId of [".", ".."]) {
+    assert.throws(() => campaignDir(runsDir, campaignId), /campaignId/u);
+    assert.throws(
+      () => initializeCampaign(runsDir, { campaignId, goal: "Prove bounded campaign paths" }),
+      /campaignId/u,
+    );
+    assert.throws(() => resolveCampaign(runsDir, campaignId), /campaignId/u);
+  }
+  assert.equal(existsSync(join(runsDir, "campaigns")), false);
+});
+
+test("session lineage records transcripts and explicit unavailability", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-session-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "sessions", goal: "Prove lineage" });
+  appendJournal(created.path, {
+    type: "session.attached",
+    at: new Date().toISOString(),
+    sessionId: "codex-1",
+    tool: "codex",
+    transcript: join(directory, "codex-1.jsonl"),
+    transcriptUnavailable: false,
+    format: "jsonl",
+    cursor: "42",
+  });
+  appendJournal(created.path, {
+    type: "session.attached",
+    at: new Date().toISOString(),
+    sessionId: "claude-1",
+    tool: "claude",
+    transcript: null,
+    transcriptUnavailable: true,
+    format: null,
+    cursor: null,
+  });
+  appendJournal(created.path, {
+    type: "intent",
+    at: new Date().toISOString(),
+    sessionId: "codex-1",
+    text: "Continue without reading the full transcript",
+  });
+  const handoff = renderHandoff(created.path, runsDir);
+  assert.match(handoff, /Updated: \d{4}-\d{2}-\d{2}T/u);
+  assert.match(handoff, /codex codex-1 · transcript: .*codex-1\.jsonl · format: jsonl · cursor: 42/u);
+  assert.match(handoff, /claude claude-1 · transcript: unavailable · format: - · cursor: -/u);
+  assert.match(handoff, /Recent user intents[\s\S]*Continue without reading the full transcript/u);
+});
+
+test("decision supersession removes replaced decisions from the handoff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-supersede-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "decisions", goal: "Prove supersession" });
+  const at = new Date().toISOString();
+  appendJournal(created.path, { type: "decision", at, sessionId: "codex-1", decisionId: "d1", text: "Use JSONL" });
+  appendJournal(created.path, { type: "decision", at, sessionId: "codex-1", decisionId: "d2", text: "Use Markdown handoff" });
+  appendJournal(created.path, { type: "supersede", at, sessionId: "codex-1", supersedes: "d1", text: "Replaced by d2" });
+  const handoff = renderHandoff(created.path, runsDir);
+  assert.match(handoff, /\[d2\] Use Markdown handoff/u);
+  assert.doesNotMatch(handoff, /\[d1\] Use JSONL/u);
+});
+
+test("handoff projection is bounded to the latest entries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-bounded-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "bounded", goal: "Prove bounded projection" });
+  for (let index = 0; index < HANDOFF_LIMIT + 5; index += 1) {
+    appendJournal(created.path, {
+      type: "constraint",
+      at: new Date().toISOString(),
+      sessionId: "codex-1",
+      text: `constraint-${String(index).padStart(3, "0")}`,
+    });
+  }
+  const handoff = renderHandoff(created.path, runsDir);
+  assert.doesNotMatch(handoff, /constraint-000/u);
+  assert.match(handoff, /constraint-024/u);
+  assert.ok(Buffer.byteLength(handoff, "utf8") <= HANDOFF_BYTES);
+});
+
+test("run registration links the run and handoff reflects fresh node status", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-run-"));
+  const path = writeContract(directory, fixture({
+    id: "linked-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const contract = validateContract(JSON.parse(readFileSync(path)), path);
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(result.ok, true);
+  const runsDir = join(directory, ".runs");
+  const campaign = resolveCampaign(runsDir, "test-campaign");
+  assert.deepEqual(campaign.campaign.linkedRunIds, ["linked-run"]);
+  const handoff = renderHandoff(campaign.path, runsDir);
+  assert.match(handoff, /## Linked runs/u);
+  assert.match(handoff, /- linked-run: 1 nodes · 1 done/u);
+});
+
+test("run registration is idempotent across resume", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-idempotent-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "idempotent", goal: "Prove idempotent registration" });
+  registerRun(created.path, "same-run");
+  registerRun(created.path, "same-run");
+  assert.deepEqual(resolveCampaign(runsDir, "idempotent").campaign.linkedRunIds, ["same-run"]);
+  assert.equal(readJournal(created.path).filter((entry) => entry.type === "run.registered").length, 1);
+});
+
+test("rejects malformed journal events before append", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-invalid-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "invalid", goal: "Prove validation" });
+  assert.throws(
+    () => validateJournalEntry({ type: "intent", sessionId: "codex-1", text: "missing timestamp" }),
+    /entry\.at/u,
+  );
+  assert.throws(
+    () => appendJournal(created.path, { type: "intent", sessionId: "codex-1", text: "missing timestamp" }),
+    /entry\.at/u,
+  );
+  assert.throws(
+    () => appendJournal(created.path, { type: "intent", at: new Date().toISOString(), sessionId: "codex-1", text: "" }),
+    /entry\.text/u,
+  );
+  assert.throws(
+    () => appendJournal(created.path, { type: "session.attached", at: new Date().toISOString(), sessionId: "codex-1", tool: "codex", transcript: "relative.jsonl", transcriptUnavailable: false, format: "jsonl", cursor: null }),
+    /absolute path/u,
+  );
+});
+
+test("refuses ambiguous campaign discovery", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-ambiguous-"));
+  const runsDir = join(directory, ".runs");
+  initializeCampaign(runsDir, { campaignId: "alpha", goal: "First" });
+  initializeCampaign(runsDir, { campaignId: "beta", goal: "Second" });
+  assert.throws(() => resolveCampaign(runsDir), /multiple campaigns found/u);
+  assert.equal(resolveCampaign(runsDir, "beta").campaign.id, "beta");
+});
+
+test("campaign CLI initializes, attaches, records via stdin, and shows the handoff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-cli-"));
+  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const init = spawnSync(process.execPath, [harness, "campaign", "init", "cli", "--cwd", directory, "--goal", "Ship CLI"], { encoding: "utf8" });
+  assert.equal(init.status, 0, init.stderr);
+  assert.match(init.stdout, /cli initialized/u);
+
+  const attach = spawnSync(process.execPath, [
+    harness, "campaign", "attach", "cli", "--cwd", directory,
+    "--tool", "codex", "--session-id", "codex-1", "--transcript", join(directory, "transcript.jsonl"),
+    "--format", "jsonl", "--cursor", "12",
+  ], { encoding: "utf8" });
+  assert.equal(attach.status, 0, attach.stderr);
+
+  const record = spawnSync(process.execPath, [
+    harness, "campaign", "note", "cli", "--cwd", directory,
+    "--session-id", "codex-1", "--kind", "decision", "--decision-id", "d1", "--text", "-",
+  ], { encoding: "utf8", input: "Use a bounded handoff" });
+  assert.equal(record.status, 0, record.stderr);
+
+  const show = spawnSync(process.execPath, [harness, "campaign", "show", "cli", "--cwd", directory], { encoding: "utf8" });
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /Use a bounded handoff/u);
+  assert.match(show.stdout, /codex codex-1/u);
+});
+
+test("campaign CLI refuses a malformed checkpoint", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-cli-invalid-"));
+  const runsDir = join(directory, ".runs");
+  initializeCampaign(runsDir, { campaignId: "cli-invalid", goal: "Prove CLI validation" });
+  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [
+    harness, "campaign", "note", "cli-invalid", "--cwd", directory,
+    "--session-id", "codex-1", "--kind", "bogus", "--text", "bad",
+  ], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--kind must be/u);
 });

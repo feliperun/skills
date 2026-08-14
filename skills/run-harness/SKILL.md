@@ -10,10 +10,18 @@ Run a plan outside the main context while keeping the current session as the con
 ## Workflow
 
 1. Read [references/contract.md](references/contract.md).
-2. Inspect the target repository and turn the approved plan into one JSON contract. Keep nodes independently verifiable and give each node an explicit Definition of Done.
-3. Ensure the target repository ignores `.runs/`; add that single entry to its `.gitignore` if needed.
-4. Default to `maxParallel: 1`. Raise it only when concurrent nodes write to disjoint paths; worktree isolation is not implemented in v0.
-5. Preflight before spending model tokens. Give package-installing or networked nodes an explicit `sandbox`; do not rely on the caller's ambient permissions.
+2. Establish the durable campaign before inspecting or launching work. Discover
+   the active campaign; when more than one exists, stop instead of guessing.
+   Initialize a new one only for a new objective, read its `HANDOFF.md`, and
+   immediately attach the current orchestrator session with tool, session ID,
+   transcript path and format, or explicit `--no-transcript`. Record every
+   material user intent, decision, constraint, outcome, next action, and open
+   question as a concise campaign event. This is mandatory handoff state, not
+   optional documentation.
+3. Inspect the target repository exactly once, then turn the approved plan into one JSON contract. Author one closed task packet per node instead of leaving workers to discover the repository themselves. Workers do not own repository discovery; the orchestrator owns it once and amortizes that inspection across workers, judges, and retries. Use an explicit `mode: "discovery"` node only when you genuinely cannot produce an execution packet yet.
+4. Ensure the target repository ignores `.runs/`; add that single entry to its `.gitignore` if needed.
+5. Default to `maxParallel: 1`. Raise it only when concurrent nodes write to disjoint paths; worktree isolation is not implemented in v0.
+6. Preflight before spending model tokens. Give package-installing or networked nodes an explicit `sandbox`; do not rely on the caller's ambient permissions.
 
    ```bash
    node <skill-dir>/scripts/harness.mjs preflight <contract.json>
@@ -23,21 +31,26 @@ Run a plan outside the main context while keeping the current session as the con
    creates no run state. Probe the exact model each node will use: a valid
    credential does not imply the provider serves that model, and a provider can
    reject one model of a family while serving another.
-6. Keep one independently testable checkpoint per node. Split research, implementation, and quality work at real gate boundaries; a phase-sized prompt can accumulate an expensive context before the first judge runs.
-   For review nodes, provide a closed evidence set and explicitly forbid fresh
-   external inspection when the task does not require it. Repeated permission
-   denials waste context and do not strengthen the verdict.
-7. Validate the contract:
+7. Keep one independently testable checkpoint per node. Split research, implementation, and quality work at real gate boundaries; a phase-sized prompt can accumulate an expensive context before the first judge runs.
+   Keep execution packets closed: list exact `readFiles`, `writeFiles`, and
+   `verification` commands. Workers and judges must inspect only those paths and
+   must report `BLOCKED_CONTEXT: ...` instead of performing fresh repository
+   exploration. Repeated permission denials waste context and do not strengthen
+   the verdict. A discovery node with an empty `readFiles` list is the only
+   exception: it is read-only and may inspect the repository only to produce an
+   execution packet.
+8. Validate the contract:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs validate <contract.json>
    ```
 
-   Validation also emits warnings: a concrete command in a node prompt that no
+   Validation also emits warnings: a concrete command in a task packet
+   verification list that no
    Definition of Done item mentions (the most common gate rejection in
    practice), so add every command to the DoD.
 
-8. Start `run` detached so the controller survives this session and keeps the session responsive. `--detach` forks the controller into its own process group, prints its pid and run directory, and exits:
+9. Start `run` detached so the controller survives this session and keeps the session responsive. `--detach` forks the controller into its own process group, prints its pid and run directory, and exits:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs run --detach <contract.json>
@@ -59,14 +72,14 @@ Run a plan outside the main context while keeping the current session as the con
    prevents two watchers from double-resuming.
 
    Without `--detach`, the controller is a child of the invoking session and dies with it, stranding any running node as an orphan until a later `resume`. Use `resume --detach <run-dir>` to restart an interrupted run the same way.
-9. Report the run directory immediately. Do not read worker logs during normal orchestration.
-10. When the user asks for status, including through `/btw`, render and read the snapshot:
+10. Report the run directory immediately. Do not read worker logs during normal orchestration.
+11. When the user asks for status, including through `/btw`, render and read the snapshot:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs status <target-repo>/.runs/<run-id>
    ```
 
-11. When a run finishes (or at any point) and cost or effort matters, aggregate per-node attempts, revisions, runtimes, and tokens:
+12. When a run finishes (or at any point) and cost or effort matters, aggregate per-node attempts, revisions, runtimes, and tokens:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs report <target-repo>/.runs/<run-id>
@@ -92,8 +105,8 @@ Run a plan outside the main context while keeping the current session as the con
    the adjustment. Set `maxInputTokens` on the contract to stop the controller
    from scheduling new nodes once the cumulative input-token budget is spent.
 
-12. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
-13. If the run process dies, resume it instead of starting a new one:
+13. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
+14. If the run process dies, resume it instead of starting a new one:
 
    ```bash
    node <skill-dir>/scripts/harness.mjs resume --detach <target-repo>/.runs/<run-id>
