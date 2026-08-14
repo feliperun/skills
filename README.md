@@ -15,16 +15,6 @@ Single source for the assistants I use, and a versioned backup.
 
 ## Skills
 
-### `humanize`
-
-Rewrites authored prose to strip the structural fingerprints of LLM writing. It
-attacks construction decisions — thematic determinacy, causal linearity, embodied
-emotion, vague reference, low variance — rather than lexical surface, because
-span-level surface rewriting only drops narrative-feature detection by 1.6 points.
-Based on Russell et al., "StoryScope: Investigating idiosyncrasies in AI fiction"
-(COLM 2026, arXiv:2604.03136). Not for regulated docs or specs, where thematic
-unity and linearity are requirements.
-
 ### `init-harness`
 
 Bootstraps engineering governance in a repository: a canonical `AGENTS.md` with
