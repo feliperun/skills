@@ -220,6 +220,23 @@ test("surfaces agy result errors", () => {
   assert.equal(result.error.message, "model unavailable");
 });
 
+test("selects structured JSON from an agy response with progress prose", () => {
+  const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
+  const stream = JSON.stringify({
+    event: "result",
+    result: {
+      conversation_id: "conversation",
+      status: "SUCCESS",
+      response: `Waiting for checks...\n${verdict}\n`,
+      usage: {},
+    },
+  });
+  assert.equal(
+    normalizeProviderResult("agy", stream, 0, null, { preferStructured: true }).result,
+    verdict,
+  );
+});
+
 test("selects the last valid JSON block for a Codex judge", () => {
   const verdict = JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "advisory", findings: [
     { severity: "minor", description: "cleanup", evidence: "line 1" },

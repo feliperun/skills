@@ -246,7 +246,7 @@ export function normalizeProviderResult(driver, stdout, exitCode, signal, option
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
   const events = parseJsonLines(stdout, driver);
   if (driver === "claude") return normalizeClaude(events, exitCode);
-  if (driver === "agy") return normalizeAgy(events, exitCode);
+  if (driver === "agy") return normalizeAgy(events, exitCode, options.preferStructured ?? false);
   return normalizeCodex(events, exitCode, options.preferStructured ?? false);
 }
 
@@ -561,13 +561,14 @@ function normalizeClaude(events, exitCode) {
   };
 }
 
-function normalizeAgy(events, exitCode) {
+function normalizeAgy(events, exitCode, preferStructured) {
   const resultEvent = events.findLast((event) => event.event === "result")?.result;
   if (!resultEvent) return failed("incomplete_stream", "agy emitted no result event");
-  const result = typeof resultEvent.response === "string" ? resultEvent.response : null;
+  const response = typeof resultEvent.response === "string" ? resultEvent.response : null;
   if (resultEvent.status !== "SUCCESS" || exitCode !== 0) {
     return failed("provider_error", resultEvent.error || `agy exited with code ${exitCode}`);
   }
+  const result = preferStructured ? extractJson(response) ?? response : response;
   return {
     status: result?.trim() ? "done" : "no-op",
     result,
@@ -608,6 +609,14 @@ function extractJson(value) {
     JSON.parse(trimmed);
     return trimmed;
   } catch {}
+  const lines = trimmed.split(/\r?\n/u);
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const candidate = lines.slice(index).join("\n").trim();
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {}
+  }
   const blocks = [...value.matchAll(/```json\s*([\s\S]*?)```/giu)];
   for (const block of blocks.reverse()) {
     const candidate = block[1].trim();
