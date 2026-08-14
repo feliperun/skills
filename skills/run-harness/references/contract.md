@@ -10,7 +10,7 @@
   "cwd": "../target-repo",
   "maxParallel": 1,
   "stallTimeoutSec": 300,
-  "timeoutSec": 1800,
+  "timeoutSec": 2400,
   "runtimeDefaults": {
     "worker": "luna",
     "judge": "sol"
@@ -61,7 +61,7 @@
       "type": "backend",
       "taskPacketFile": "packets/implementation.json",
       "dependsOn": [],
-      "timeoutSec": 1800,
+      "timeoutSec": 2400,
       "definitionOfDone": [
         "The requested behavior is implemented",
         "Relevant automated tests pass",
@@ -153,8 +153,9 @@ ambient sandbox.
 `stallTimeoutSec` limits silence from stdout and stderr. `timeoutSec` caps a
 single provider invocation and may be overridden per node, so a slow worker
 never spends the judge's budget; a node is therefore bounded by
-`(1 + maxRevisions) × 2 × timeoutSec`. Size it by node weight: profile-wide or
-multi-browser nodes need more than the default; a node that exhausts its
+`(1 + maxRevisions) × 2 × timeoutSec`. The default is 2400 seconds (40
+minutes); set 4800 seconds explicitly for profile-wide or multi-browser nodes.
+A node that exhausts its
 wall-clock budget is restarted by `resume` with a doubled budget (persisted in
 the run's stored contract).
 

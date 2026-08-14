@@ -716,13 +716,13 @@ test("resume doubles the wall-clock budget of a node that exhausted it", async (
   writeFileSync(nodePath, JSON.stringify({
     ...state,
     status: "exhausted",
-    error: { code: "wall_clock_timeout", message: "worker ran longer than 1800s" },
+    error: { code: "wall_clock_timeout", message: "worker ran longer than 2400s" },
   }, null, 2));
 
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
   assert.equal(resumed.states.get("build").status, "done");
   const stored = JSON.parse(readFileSync(join(runDir, "contract.json"), "utf8"));
-  assert.equal(stored.nodes[0].timeoutSec, 3600, "budget persisted so later resumes keep it");
+  assert.equal(stored.nodes[0].timeoutSec, 4800, "budget persisted so later resumes keep it");
 });
 
 test("findings renders exhausted gate findings ready for a fix node", async () => {

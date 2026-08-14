@@ -135,7 +135,7 @@ export function validateContract(raw, contractPath) {
     maxParallel: positiveInteger(raw.maxParallel ?? 1, "contract.maxParallel"),
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
-    timeoutSec: positiveNumber(raw.timeoutSec ?? 1_800, "contract.timeoutSec"),
+    timeoutSec: positiveNumber(raw.timeoutSec ?? 2_400, "contract.timeoutSec"),
     maxInputTokens: raw.maxInputTokens === undefined
       ? undefined
       : positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),

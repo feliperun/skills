@@ -100,6 +100,11 @@ Run a plan outside the main context while keeping the current session as the con
    node <skill-dir>/scripts/harness.mjs findings <target-repo>/.runs/<run-id>
    ```
 
+   After two gate rejections or any gate exhaustion, do not keep retrying and
+   do not copy the whole graph. Create one follow-up fix node with the finding
+   verbatim, its design constraint, and its exact paths; prune already-done
+   nodes from the follow-up contract.
+
    A node that exhausts on `wall_clock_timeout` was killed mid-work, not
    judged insufficient: `resume` doubles its wall-clock budget and persists
    the adjustment. Set `maxInputTokens` on the contract to stop the controller
@@ -155,8 +160,9 @@ that artifact is present. Do not schedule descendants. v0 has no first-class
 harness terminal state separately.
 
 `timeoutSec` bounds one provider invocation, so a worker that consumes most of
-its budget still leaves the judge a full one. Both limits ignore time the host
-spends suspended.
+its budget still leaves the judge a full one. Use the 40-minute default for
+small/medium nodes and set 80 minutes explicitly for profile-wide or
+browser-heavy work. Both limits ignore time the host spends suspended.
 
 Choose `stallTimeoutSec` for the runtime and phase, not from one global habit.
 Long-form reasoning and final document composition may emit no provider event
@@ -167,6 +173,8 @@ bounded, self-contained retry is preferable to repeating upstream research.
 ## Safety
 
 - Keep secrets in environment variables. Put only environment variable names in contracts.
+- During a live run, work only on disjoint paths and stage explicit paths.
+  The harness does not isolate its workers in git worktrees.
 - Use Claude's `bypassPermissions` only in a repository-scoped, recoverable environment with no production write access. Otherwise keep `acceptEdits` and let denied operations become `blocked`.
 - Refuse to overwrite an existing run directory. Choose a new run id instead.
 - Treat `STATUS.md` and node JSON as state; treat logs as diagnostic artifacts.
