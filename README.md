@@ -1,61 +1,61 @@
 # harness
 
-Repositório de skills para executar trabalho de agentes com contexto pequeno,
-estado recuperável e revisão independente.
+Reusable skills for agent work with a small control-plane context, recoverable
+state, and independent review.
 
-## Problemas que resolve
+## Problems it solves
 
-- Subagentes que gastam contexto explorando o mesmo repositório repetidamente.
-- Uma sessão que cai, troca de harness ou fica sem créditos e perde decisões.
-- Runs longos sem status confiável, orçamento, recuperação ou histórico de gate.
-- Workers e juízes que usam o mesmo modelo e repetem o mesmo viés.
+- Subagents repeatedly spending context rediscovering the same repository.
+- A session crashing, changing harnesses, or running out of credits and losing decisions.
+- Long runs without reliable status, budgets, recovery, or gate history.
+- Workers and judges sharing a model and therefore repeating the same bias.
 
-O `run-harness` mantém o orquestrador como plano de controle: ele explora o
-repositório uma vez, grava essa descoberta em task packets fechados e delega só
-o contexto necessário. Estado, logs e status ficam no repositório alvo, em
-`.runs/`, nunca na conversa principal.
+`run-harness` keeps the orchestrator as the control plane: it explores the
+repository once, records that discovery in closed task packets, and delegates
+only the context each node needs. State, logs, and status live in the target
+repository under `.runs/`, never in the main conversation.
 
 ```text
-orquestrador ──> campanha / HANDOFF.md ──> contrato DAG + task packets
+orchestrator ──> campaign / HANDOFF.md ──> DAG contract + task packets
                                                 │
-                              workers ──> gate independente ──> .runs/<id>/STATUS.md
+                              workers ──> independent gate ──> .runs/<id>/STATUS.md
 ```
 
 ## Quickstart
 
-No repositório que receberá a implementação, ignore `.runs/` e escolha um id
-de campanha que represente o objetivo, não uma sessão individual.
+In the repository that will receive the implementation, ignore `.runs/` and
+choose a campaign ID for the objective, not for an individual session.
 
 ```bash
-HARNESS=/caminho/para/harness/skills/run-harness/scripts/harness.mjs
-TARGET=/caminho/para/repo-alvo
+HARNESS=/path/to/harness/skills/run-harness/scripts/harness.mjs
+TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"
-node "$HARNESS" campaign init feature-42 --cwd "$TARGET" --goal "Entregar feature 42"
+node "$HARNESS" campaign init feature-42 --cwd "$TARGET" --goal "Deliver feature 42"
 node "$HARNESS" campaign attach feature-42 --cwd "$TARGET" \
-  --tool codex --session-id <id-da-sessao> --no-transcript
+  --tool codex --session-id <session-id> --no-transcript
 ```
 
-Inspecione o alvo uma única vez. Em seguida crie `.harness/feature-42.json` e
-os packets que ele referencia. Um packet de execução tem escopo explícito:
+Inspect the target once. Then create `.harness/feature-42.json` and the packets
+it references. An execution packet has an explicit scope:
 
 ```json
 {
   "mode": "execution",
-  "objective": "Adicionar a validação de idempotência",
-  "instructions": ["Implementar somente o comportamento descrito"],
+  "objective": "Add idempotency validation",
+  "instructions": ["Implement only the described behavior"],
   "readFiles": ["docs/SPEC.md", "src/idempotency.ts"],
   "writeFiles": ["src/idempotency.ts", "test/idempotency.test.ts"],
   "symbols": ["validateIdempotency"],
-  "decisions": ["Não alterar a API pública"],
-  "nonGoals": ["Commit, deploy ou descoberta adicional"],
+  "decisions": ["Do not change the public API"],
+  "nonGoals": ["Commit, deploy, or additional discovery"],
   "verification": ["node --test test/idempotency.test.ts"]
 }
 ```
 
-O contrato define a campanha, runtimes, grafo e Definition of Done. A referência
-completa está em [contract.md](skills/run-harness/references/contract.md).
-Antes de gastar tokens, valide as rotas e faça preflight:
+The contract defines the campaign, runtimes, graph, and Definition of Done. Its
+complete reference is in [contract.md](skills/run-harness/references/contract.md).
+Validate routing and run preflight before spending tokens:
 
 ```bash
 node "$HARNESS" validate "$TARGET/.harness/feature-42.json"
@@ -63,79 +63,79 @@ node "$HARNESS" preflight "$TARGET/.harness/feature-42.json"
 node "$HARNESS" run --detach "$TARGET/.harness/feature-42.json"
 ```
 
-## Como operar um run
+## Operating a run
 
-| Objetivo | Comando |
+| Goal | Command |
 | --- | --- |
-| Ver handoff antes de retomar | `campaign show <campanha> --cwd <repo>` |
-| Registrar uma decisão ou resultado | `campaign note <campanha> --session-id <id> --kind <tipo> --text <texto>` |
-| Anexar uma nova sessão | `campaign attach <campanha> --tool <tool> --session-id <id> --transcript <path> --format <formato>` |
-| Validar contrato | `validate <contract.json>` |
-| Verificar credenciais e modelos | `preflight <contract.json>` |
-| Iniciar sem prender a sessão | `run --detach <contract.json>` |
-| Ler o estado atual | `status <run-dir>` |
-| Ver tentativas e tokens | `report <run-dir>` |
-| Preparar um reparo após gate esgotado | `findings <run-dir>` |
-| Retomar run interrompido | `resume --detach <run-dir>` |
-| Vigiar e retomar controlador morto | `watch --detach <run-dir>` |
+| Read the handoff before resuming | `campaign show <campaign> --cwd <repo>` |
+| Record a decision or outcome | `campaign note <campaign> --session-id <id> --kind <kind> --text <text>` |
+| Attach a new session | `campaign attach <campaign> --tool <tool> --session-id <id> --transcript <path> --format <format>` |
+| Validate a contract | `validate <contract.json>` |
+| Check credentials and models | `preflight <contract.json>` |
+| Start without blocking the session | `run --detach <contract.json>` |
+| Read current state | `status <run-dir>` |
+| View attempts and tokens | `report <run-dir>` |
+| Prepare a repair after gate exhaustion | `findings <run-dir>` |
+| Resume an interrupted run | `resume --detach <run-dir>` |
+| Watch and restart a dead controller | `watch --detach <run-dir>` |
 
-Todos os comandos acima são subcomandos de `node "$HARNESS"`. A campanha
-mantém `campaign.json`, um `journal.jsonl` append-only e um `HANDOFF.md` limitado
-a 16 KiB. Ao trocar de Codex, Claude Code, Cursor ou cloud harness, leia o
-handoff, anexe a nova sessão e continue; só abra o transcript original quando
-precisar de detalhe que não foi resumido.
+Every command above is a subcommand of `node "$HARNESS"`. A campaign contains
+`campaign.json`, an append-only `journal.jsonl`, and a `HANDOFF.md` limited to
+16 KiB. When moving between Codex, Claude Code, Cursor, or a cloud harness,
+read the handoff, attach the new session, and continue. Open the original
+transcript only when you need detail that was not summarized.
 
-## Papéis dos agentes
+## Agent roles
 
-| Papel | Responsabilidade |
+| Role | Responsibility |
 | --- | --- |
-| Orquestrador | Lê o handoff, explora o repositório uma vez, cria packets, escolhe runtimes e decide próximos passos. |
-| Worker | Executa um nó dentro de `readFiles`, `writeFiles` e `verification`; reporta `BLOCKED_CONTEXT` quando falta contexto. |
-| Judge | Inspeciona só os arquivos de saída e a verificação declarada; devolve um veredito JSON independente. |
-| Watcher | Detecta um controlador morto e dispara `resume --detach`; não substitui o orquestrador. |
+| Orchestrator | Reads the handoff, explores the repository once, creates packets, chooses runtimes, and decides next steps. |
+| Worker | Executes a node inside `readFiles`, `writeFiles`, and `verification`; reports `BLOCKED_CONTEXT` when context is missing. |
+| Judge | Inspects only output files and declared verification; returns an independent JSON verdict. |
+| Watcher | Detects a dead controller and invokes `resume --detach`; it does not replace the orchestrator. |
 
-O worker não é dono de descoberta. Um nó `mode: "discovery"` read-only é a
-única exceção e deve produzir um packet de execução para o próximo nó.
+A worker does not own discovery. A read-only `mode: "discovery"` node is the
+only exception and must produce an execution packet for the next node.
 
-## Runtimes e modelos suportados
+## Supported runtimes and models
 
-O harness suporta três drivers e roteia tudo declarativamente pelo contrato.
-Os nomes abaixo são configurações testadas; um driver também pode receber outro
-modelo compatível.
+The harness supports three drivers and routes everything declaratively through
+the contract. The names below are tested configurations; a driver can also
+receive another compatible model.
 
-| Driver | Modelos/configurações | Uso recomendado |
+| Driver | Models/configuration | Recommended use |
 | --- | --- | --- |
-| `codex` | GPT-5.6 Luna, Terra, Sol | Implementação limitada, tarefas gerais e review independente. |
-| `claude` | Opus | Trabalho de frontend ou apresentação quando o ganho justifica custo e startup. |
-| `codex` + provider customizado | DeepSeek V4 Flash e V4 Pro | Flash para trabalho mecânico bem especificado; Pro quando um worker ou judge mais profundo justificar o custo. |
-| `agy` | Modelos aceitos pelo CLI `agy` (ex.: Gemini Flash) | Runtimes já disponíveis nesse driver. |
+| `codex` | GPT-5.6 Luna, Terra, Sol | Bounded implementation, general tasks, and independent review. |
+| `claude` | Opus | Frontend or presentation work when the benefit justifies startup and cache cost. |
+| `codex` + custom provider | DeepSeek V4 Flash and V4 Pro | Flash for tightly specified mechanical work; Pro when a deeper worker or judge justifies the cost. |
+| `agy` | Models accepted by the `agy` CLI, such as Gemini Flash | Runtimes already available through that driver. |
 
-Para DeepSeek, a configuração do provider é declarada em `runtimes[].config` e
-o harness a passa como overrides `-c`; não use profiles. `preflight` é obrigatório
-para confirmar que a credencial serve o modelo escolhido.
+For DeepSeek, declare the provider configuration in `runtimes[].config`; the
+harness sends it as `-c` overrides. Do not use profiles. `preflight` is required
+to confirm that the credential serves the selected model.
 
-## Política operacional
+## Operating policy
 
-- O timeout padrão é 40 minutos (`2400` segundos). Declare `4800` segundos por
-  nó para trabalho profile-wide ou browser-heavy; não deixe a escolha implícita.
-- Após duas rejeições de gate ou um estado `exhausted`, use `findings` e crie um
-  fix node de propósito único. Não copie o grafo inteiro nem continue retry cego.
-- Faça `report` ao fim de todo run. O total de tokens e revisões mostra padrões
-  de custo antes de eles virarem hábito.
-- Enquanto um run vive, trabalhe apenas em paths disjuntos e faça staging
-  seletivo. O harness não isola worktrees concorrentes.
+- The default timeout is 40 minutes (`2400` seconds). Set `4800` seconds per
+  node for profile-wide or browser-heavy work; never leave that choice implicit.
+- After two gate rejections or an `exhausted` state, use `findings` and create a
+  single-purpose fix node. Do not copy the whole graph or keep retrying blindly.
+- Run `report` after every terminal run. Token and revision totals reveal cost
+  patterns before they become habit.
+- While a run is live, work only on disjoint paths and stage explicitly. The
+  harness does not isolate concurrent worktrees.
 
-## Outras skills
+## Other skills
 
-`init-harness` instala governança básica em outro repositório: `AGENTS.md`
-canônico, symlinks para outros harnesses, documentação inicial, ADRs, Sentrux,
-CI e hooks. Consulte [SKILL.md](skills/init-harness/SKILL.md) antes de usá-la.
+`init-harness` bootstraps repository governance: canonical `AGENTS.md`, symlinks
+for other harnesses, initial documentation, ADRs, Sentrux, CI, and hooks. Read
+[SKILL.md](skills/init-harness/SKILL.md) before using it.
 
-## Convenções deste repositório
+## Repository conventions
 
-[AGENTS.md](AGENTS.md) é a orientação canônica; `CLAUDE.md`, `GEMINI.md`,
-`CURSOR.md`, `AGENT.md` e `.github/copilot-instructions.md` são symlinks e não
-devem ser editados diretamente. Estado de runs é local e ignorado pelo Git.
+[AGENTS.md](AGENTS.md) is the canonical guidance. `CLAUDE.md`, `GEMINI.md`,
+`CURSOR.md`, `AGENT.md`, and `.github/copilot-instructions.md` are symlinks and
+must not be edited directly. Run state is local and ignored by Git.
 
 ## License
 
