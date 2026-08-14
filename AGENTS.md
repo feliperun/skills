@@ -62,8 +62,3 @@ When this file governs anything in production:
 - Never grant an agent operating under this file unsupervised write or delete access
   to a production database.
 
----
-
-Adapted from [Marcos Hernanz](https://x.com/MarcosHernanz/status/2083954734487212511).
-`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`, `AGENT.md` and `.github/copilot-instructions.md`
-are symlinks to this file — edit `AGENTS.md` only.
