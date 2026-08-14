@@ -21,6 +21,10 @@
       "reasoning": "high",
       "permissionMode": "acceptEdits"
     },
+    "agy-flash": {
+      "driver": "agy",
+      "model": "gemini-3.7-flash-low"
+    },
     "luna": {
       "driver": "codex",
       "model": "gpt-5.6-luna",
@@ -83,7 +87,11 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
 
-`driver` is `claude` or `codex`. A Codex runtime may provide arbitrary `config` entries; the adapter serializes each one as a `-c key=value` override. Store environment variable names, never secret values.
+`driver` is `claude`, `codex`, or `agy`. An agy runtime uses the installed `agy`
+CLI (or `HARNESS_AGY_BIN`) and may set `printTimeout`; omit `reasoning` for models
+that do not accept `--effort`. A Codex runtime may provide arbitrary `config`
+entries; the adapter serializes each one as a `-c key=value` override. Store
+environment variable names, never secret values.
 
 A Codex runtime may set `sandbox` to `read-only`, `workspace-write`, or
 `danger-full-access`; the default is `workspace-write`. Select the least

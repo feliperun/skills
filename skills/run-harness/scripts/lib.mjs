@@ -209,6 +209,28 @@ export function providerCommand(runtime, prompt, options = {}) {
     return { executable: process.env.HARNESS_CLAUDE_BIN ?? "claude", args };
   }
 
+  if (runtime.driver === "agy") {
+    // Every flag uses `--flag=value`. `--print` takes the prompt as its value,
+    // so space-separated form makes the Go flag parser swallow the next flag.
+    const args = [
+      `--model=${runtime.model}`,
+      "--output-format=stream-json",
+      "--dangerously-skip-permissions",
+      // agy's own print timeout defaults to 5m and would fire long before the
+      // harness timeoutSec on any real node. Keep it far out of the way and let
+      // the harness stay the single authority on how long a turn may run.
+      `--print-timeout=${runtime.printTimeout ?? "24h"}`,
+    ];
+    // agy exposes low|medium|high only; the contract's xhigh/max clamp to high.
+    if (runtime.reasoning) {
+      const effort = ["xhigh", "max"].includes(runtime.reasoning) ? "high" : runtime.reasoning;
+      args.push(`--effort=${effort}`);
+    }
+    if (options.schema) args.push(`--json-schema=${JSON.stringify(options.schema)}`);
+    args.push(`--print=${prompt}`);
+    return { executable: process.env.HARNESS_AGY_BIN ?? "agy", args };
+  }
+
   const args = ["exec", "--json", "--sandbox", runtime.sandbox ?? "workspace-write"];
   for (const [key, value] of Object.entries(runtime.config ?? {})) {
     args.push("-c", `${key}=${toml(value)}`);
@@ -224,6 +246,7 @@ export function normalizeProviderResult(driver, stdout, exitCode, signal, option
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
   const events = parseJsonLines(stdout, driver);
   if (driver === "claude") return normalizeClaude(events, exitCode);
+  if (driver === "agy") return normalizeAgy(events, exitCode);
   return normalizeCodex(events, exitCode, options.preferStructured ?? false);
 }
 
@@ -457,8 +480,8 @@ function validateRuntime(id, runtime) {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
     throw new TypeError(`runtime ${id} must be an object`);
   }
-  if (!new Set(["claude", "codex"]).has(runtime.driver)) {
-    throw new TypeError(`runtime ${id}.driver must be claude or codex`);
+  if (!new Set(["claude", "codex", "agy"]).has(runtime.driver)) {
+    throw new TypeError(`runtime ${id}.driver must be claude, codex, or agy`);
   }
   requireString(runtime.model, `runtime ${id}.model`);
   if (
@@ -534,6 +557,23 @@ function normalizeClaude(events, exitCode) {
     continuationId: resultEvent.session_id ?? null,
     usage: canonicalUsage(resultEvent.usage),
     costUsd: finite(resultEvent.total_cost_usd),
+    error: null,
+  };
+}
+
+function normalizeAgy(events, exitCode) {
+  const resultEvent = events.findLast((event) => event.event === "result")?.result;
+  if (!resultEvent) return failed("incomplete_stream", "agy emitted no result event");
+  const result = typeof resultEvent.response === "string" ? resultEvent.response : null;
+  if (resultEvent.status !== "SUCCESS" || exitCode !== 0) {
+    return failed("provider_error", resultEvent.error || `agy exited with code ${exitCode}`);
+  }
+  return {
+    status: result?.trim() ? "done" : "no-op",
+    result,
+    continuationId: resultEvent.conversation_id || null,
+    usage: canonicalUsage(resultEvent.usage),
+    costUsd: null,
     error: null,
   };
 }
@@ -615,7 +655,9 @@ function canonicalUsage(usage = {}) {
   return {
     inputTokens: finite(usage?.input_tokens),
     outputTokens: finite(usage?.output_tokens),
-    cacheReadInputTokens: finite(usage?.cache_read_input_tokens ?? usage?.cached_input_tokens),
+    cacheReadInputTokens: finite(
+      usage?.cache_read_input_tokens ?? usage?.cached_input_tokens ?? usage?.cache_read_tokens,
+    ),
   };
 }
 

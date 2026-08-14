@@ -41,6 +41,17 @@ async function withFakeCodex(directory, mode, body) {
   }
 }
 
+async function withFakeAgy(directory, body) {
+  const previous = process.env.HARNESS_AGY_BIN;
+  process.env.HARNESS_AGY_BIN = fakeAgy(directory);
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.HARNESS_AGY_BIN;
+    else process.env.HARNESS_AGY_BIN = previous;
+  }
+}
+
 function fixture(overrides = {}) {
   return {
     id: "test-run",
@@ -51,6 +62,7 @@ function fixture(overrides = {}) {
       luna: { driver: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
       sol: { driver: "codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
       opus: { driver: "claude", model: "opus", reasoning: "high" },
+      agy: { driver: "agy", model: "gemini-3.7-flash-low" },
       flash: {
         driver: "codex",
         model: "deepseek-v4-flash",
@@ -102,6 +114,21 @@ else if (prompt.includes("FAIL_WORKER") || (mode === "worker-fail" && !prompt.st
   return path;
 }
 
+function fakeAgy(directory) {
+  const path = join(directory, "fake-agy.mjs");
+  writeFileSync(path, `#!/usr/bin/env node
+console.log(JSON.stringify({event:"init",conversation_id:"fake-conversation"}));
+console.log(JSON.stringify({event:"result",result:{
+  conversation_id:"fake-conversation",
+  status:"SUCCESS",
+  response:"READY",
+  usage:{input_tokens:4,output_tokens:1,cache_read_tokens:2}
+}}));
+`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
 test("routes explicit, matching, and default runtimes", () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-route-"));
   const path = writeContract(directory, fixture());
@@ -122,6 +149,20 @@ test("builds custom provider config as command-line overrides", () => {
   assert.ok(!command.args.includes("--profile"));
 });
 
+test("builds agy commands with unambiguous equals-form flags", () => {
+  const command = providerCommand(
+    { driver: "agy", model: "gemini-3.7-flash-low", reasoning: "xhigh", printTimeout: "30m" },
+    "task with spaces",
+    { schema: JUDGE_SCHEMA },
+  );
+  assert.equal(command.executable, "agy");
+  assert.ok(command.args.includes("--model=gemini-3.7-flash-low"));
+  assert.ok(command.args.includes("--effort=high"));
+  assert.ok(command.args.includes("--print-timeout=30m"));
+  assert.ok(command.args.includes(`--json-schema=${JSON.stringify(JUDGE_SCHEMA)}`));
+  assert.ok(command.args.includes("--print=task with spaces"));
+});
+
 test("uses provider-compatible explicit types in the judge schema", () => {
   assert.equal(JUDGE_SCHEMA.properties.verdict.type, "string");
   assert.equal(JUDGE_SCHEMA.properties.maxSeverity.type, "string");
@@ -136,7 +177,7 @@ test("rejects an invalid Codex sandbox", () => {
   assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /sandbox is invalid/u);
 });
 
-test("normalizes Codex and streaming Claude results", () => {
+test("normalizes Codex, streaming Claude, and agy results", () => {
   const codex = [
     { type: "thread.started", thread_id: "thread" },
     { type: "item.completed", item: { type: "agent_message", text: "ok" } },
@@ -149,6 +190,34 @@ test("normalizes Codex and streaming Claude results", () => {
     { type: "result", result: "ok", is_error: false, session_id: "session", usage: { input_tokens: 3 } },
   ].map(JSON.stringify).join("\n");
   assert.deepEqual(normalizeProviderResult("claude", claude, 0, null).continuationId, "session");
+
+  const agy = [
+    { event: "init", conversation_id: "conversation" },
+    {
+      event: "result",
+      result: {
+        conversation_id: "conversation",
+        status: "SUCCESS",
+        response: "ok",
+        usage: { input_tokens: 4, output_tokens: 2, cache_read_tokens: 3 },
+      },
+    },
+  ].map(JSON.stringify).join("\n");
+  const normalizedAgy = normalizeProviderResult("agy", agy, 0, null);
+  assert.equal(normalizedAgy.status, "done");
+  assert.equal(normalizedAgy.result, "ok");
+  assert.equal(normalizedAgy.continuationId, "conversation");
+  assert.equal(normalizedAgy.usage.cacheReadInputTokens, 3);
+});
+
+test("surfaces agy result errors", () => {
+  const stream = JSON.stringify({
+    event: "result",
+    result: { status: "ERROR", response: "", error: "model unavailable", usage: {} },
+  });
+  const result = normalizeProviderResult("agy", stream, 0, null);
+  assert.equal(result.status, "failed");
+  assert.equal(result.error.message, "model unavailable");
 });
 
 test("selects the last valid JSON block for a Codex judge", () => {
@@ -547,6 +616,17 @@ test("preflight probes every routed worker and judge runtime", async () => {
   const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
   assert.deepEqual(checks.map((check) => check.id).sort(), ["luna", "sol"]);
   assert.ok(checks.every((check) => check.ok), JSON.stringify(checks));
+});
+
+test("preflight runs an agy runtime through its native stream protocol", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-preflight-agy-"));
+  const path = writeContract(directory, fixture({
+    runtimeDefaults: { worker: "agy", judge: "sol" },
+    nodes: [{ id: "build", type: "backend", prompt: "Implement it", gate: false }],
+  }));
+  const checks = await withFakeAgy(directory, () => preflightContract(path));
+  assert.deepEqual(checks.map((check) => check.id), ["agy"]);
+  assert.equal(checks[0].ok, true, checks[0].detail);
 });
 
 test("preflight reports a missing credential by variable name only", async () => {
