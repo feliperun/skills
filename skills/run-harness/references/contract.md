@@ -1,9 +1,15 @@
 # Contract reference
 
+The harness runs on Node.js 22 or newer and CI exercises the current LTS and
+current releases. TypeScript is a development-only dependency for
+`npm run typecheck`; the runtime is plain ESM `.mjs`.
+
 ## Shape
 
 ```json
 {
+  "schemaVersion": 1,
+  "harnessVersion": "0.1.0",
   "id": "feature-42",
   "campaignId": "feature-42",
   "goal": "Deliver feature 42 with tests",
@@ -92,7 +98,7 @@ A task packet is a JSON object with every field required:
   "symbols": ["runContract"],
   "decisions": ["Decision already made; do not reopen"],
   "nonGoals": ["Explicitly excluded work"],
-  "verification": ["node --test test/feature.test.mjs"]
+  "verification": [{ "argv": ["node", "--test", "test/feature.test.mjs"] }]
 }
 ```
 
@@ -101,6 +107,11 @@ A task packet is a JSON object with every field required:
 where sensible. Execution packets require non-empty `readFiles` and
 `writeFiles`. Read paths are relative to `cwd`, cannot escape it, and must exist
 at validation time. Write paths are also relative and may name new files.
+Each `verification` entry is an argv command object: `argv` is required (a
+non-empty array of strings, at most 32 commands per packet, 64 argv items and
+32 KiB of argv bytes per command), with optional `cwd`, `timeoutSec` (default
+120, at most 600), `repeat` (default 2, at most 8), and `env` (declared
+environment-variable names; values never travel in the packet).
 Discovery packets are read-only: `writeFiles` must be empty, and the generated
 prompt requires the worker to return an execution packet rather than edit the
 repository. When a discovery packet supplies no `readFiles`, it is the explicit
@@ -112,16 +123,44 @@ Validation rejects the old `prompt`/`promptFile` fields, malformed packets,
 unknown fields, escaping paths, and missing execution read files. The harness
 renders a deterministic worker prompt from the packet. Execution prompts state
 that the context is closed, limit inspection/edits to the listed paths, and
-require `BLOCKED_CONTEXT: <missing file or fact>` instead of repository-wide
+require the structured `blocked_context` worker result instead of repository-wide
 exploration. Judges receive the same closed evidence set: inspect only
 `writeFiles`, run only the listed `verification`, and do no repository-wide
 discovery.
 
 The stored `contract.json` inlines the packet and drops both `taskPacketFile`
 and the generated prompt, so `resume` regenerates the same prompt from the
-packet. Packets are snapshots, not hashed or sealed in this version; regenerate
+packet. Packets carry a `packetHash` that the harness validates on load; regenerate
 the contract when a scoped file changes, and treat the stored contract as the
 durable execution record.
+
+## Worker results
+
+Every worker ends with exactly one structured worker-result object as the only
+content of its final message:
+
+```json
+{
+  "status": "done",
+  "summary": "Implemented the described behavior",
+  "changedFiles": ["src/feature.ts"],
+  "verification": ["node --test test/feature.test.mjs"],
+  "artifacts": [],
+  "missingContext": []
+}
+```
+
+`status` is `done` or `blocked_context`. `blocked_context` requires at least
+one `missingContext` entry and is the only allowed response when the packet's
+closed context is missing a required file or fact — never repository-wide
+exploration. `done` requires an empty `missingContext`. The result is bounded:
+32 KiB total, 4 KiB summary, at most 32 entries each in `changedFiles`,
+`verification`, and `artifacts` (at most 16 in `missingContext`), and per-item
+byte caps (2 KiB per changed-file, verification, or missing-context entry,
+16 KiB per artifact); unknown or missing fields are rejected.
+`parseWorkerResult`/`validateWorkerResult` in `worker-result.mjs` enforce the
+schema. A discovery node returns `done` with exactly one `artifacts` entry: the
+execution task packet for the next node.
 
 ## Runtime resolution
 
@@ -133,11 +172,19 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
 
-`driver` is `claude`, `codex`, or `agy`. An agy runtime uses the installed `agy`
-CLI (or `HARNESS_AGY_BIN`) and may set `printTimeout`; omit `reasoning` for models
-that do not accept `--effort`. A Codex runtime may provide arbitrary `config`
-entries; the adapter serializes each one as a `-c key=value` override. Store
-environment variable names, never secret values.
+`driver` is `claude`, `codex`, `agy`, or `exec-jsonl`. An agy runtime uses the
+installed `agy` CLI (or `HARNESS_AGY_BIN`) and may set `printTimeout`; omit
+`reasoning` for models that do not accept `--effort`. A Codex runtime may
+provide arbitrary `config` entries; the adapter serializes each one as a
+`-c key=value` override. Store environment variable names, never secret values.
+
+`exec-jsonl` is the generic driver for an existing executable that speaks the
+JSONL protocol: it receives one `run.request` line on stdin and writes
+`run.started`/`message`/`run.completed`/`run.failed` events to stdout, in that
+order, with no unknown fields. Set `executable` (or `HARNESS_EXEC_JSONL_BIN`)
+for the binary, `args` for fixed arguments, and `versionArgs` when it does not
+accept `--version`. It supports structured output, continuation, and usage
+reporting, but neither sandbox nor permission negotiation.
 
 A Codex runtime may set `sandbox` to `read-only`, `workspace-write`, or
 `danger-full-access`; the default is `workspace-write`. Select the least
@@ -267,6 +314,48 @@ The stored `contract.json` round-trips through validation on resume: the
 internal disabled-gate shape `{"enabled": false}` stays disabled, so a node
 without a gate is never silently re-gated by a resume.
 
+## Leases
+
+The run directory holds `controller-lease.json` (and `watcher-lease.json` for
+the watchdog). A lease records holder id, pid, process start token, and an
+expiry; the controller renews it on a short TTL while it works. A second
+controller or watcher is rejected while a healthy lease is held, so
+simultaneous `resume` calls cannot double-run a node. `STATUS.md` treats a
+`running` node as an orphan when the lease is missing, expired, or invalid —
+the process is gone, so the node is not live work. `cancel` takes over a stale
+lease after confirming the previous controller is dead.
+
+## Environment doctor
+
+`doctor [<contract.json>] [--cwd <dir>] [--json]` is mutation-free: it never
+writes run state. It checks that `cwd` is a git work tree, that `.runs/` is
+git-ignored, that `node` and `npm` are on `PATH`, that the harness protocol and
+schema versions are current, and — when a contract is given — that the contract
+validates, every routed driver binary exists, and each runtime probes cleanly
+against the exact model and capability requirements. Without a contract no
+driver is required; binaries are reported as present or absent without failing
+the check. Exit code 0 means every check passed. `--json` prints
+`{schemaVersion: 1, repo, ok, checks}`.
+
+## Cancel
+
+`cancel <run-dir>` writes `cancel.request.json`, terminates the controller and
+every recorded provider and verification process, and marks the run terminal.
+A live controller receives `SIGTERM`, then `SIGKILL` if it does not die within
+two seconds, and cancellation waits for the lease to expire before taking it
+over. Running verification attempts are recorded as canceled with a `SIGTERM`
+signal, and any node that is not already terminal is transitioned to `canceled`
+instead of being left `running`. Cancel cannot take over a lease held by the
+process that invokes it.
+
+## JSON status and report
+
+`status --json <run-dir>` and `report --json <run-dir>` emit stable
+`schemaVersion: 1` payloads for streaming monitors: run id, contract and
+campaign ids, lease health, per-node status/phase/runtime/attempt/revisions,
+and — for report — per-node and total token usage. They never render or write
+`STATUS.md`. `events.jsonl` remains the append-only transition stream.
+
 ## Campaigns
 
 Every contract requires `campaignId`. Campaign state lives at
@@ -274,11 +363,20 @@ Every contract requires `campaignId`. Campaign state lives at
 the harness CLI:
 
 ```bash
-node <skill-dir>/scripts/harness.mjs campaign init <campaign-id> --goal "Goal"
-node <skill-dir>/scripts/harness.mjs campaign attach <campaign-id> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
-node <skill-dir>/scripts/harness.mjs campaign note <campaign-id> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
-node <skill-dir>/scripts/harness.mjs campaign show <campaign-id>
+node <skill-dir>/scripts/harness.mjs campaign list [--cwd <dir>]
+node <skill-dir>/scripts/harness.mjs campaign init <campaign-id> --cwd <dir> --goal "Goal"
+node <skill-dir>/scripts/harness.mjs campaign attach <campaign-id> --cwd <dir> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
+node <skill-dir>/scripts/harness.mjs campaign note <campaign-id> --cwd <dir> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
+node <skill-dir>/scripts/harness.mjs campaign resolve <campaign-id> --cwd <dir> --session-id <session-id> --question-id <id> --text <answer>
+node <skill-dir>/scripts/harness.mjs campaign close <campaign-id> --cwd <dir>
+node <skill-dir>/scripts/harness.mjs campaign show <campaign-id> --cwd <dir>
 ```
+
+`list` discovers active and closed campaigns so a resumed session can pick the
+single active one instead of guessing. `resolve` answers an `open-question`
+journal event and removes it from the handoff's open-questions section.
+`close` marks the campaign terminal; a closed campaign rejects further
+attach/note/resolve writes but remains inspectable via `show` and `list`.
 
 Artifacts:
 

@@ -1,308 +1,47 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  JUDGE_SCHEMA,
-  judgePrompt,
-  normalizeProviderResult,
-  providerCommand,
   renderFindings,
   renderReport,
   renderStatus,
-  routeRuntime,
   validateContract,
 } from "./lib.mjs";
-import { preflightContract, runContract, resumeRun } from "./harness.mjs";
+import { renderStatusJson } from "./render.mjs";
+import { cancelRun, preflightContract, runContract, resumeRun } from "./harness.mjs";
+import { invocationAlive, invocationResult, processStartToken } from "./supervisor.mjs";
+import { captureWorkspaceSnapshot } from "./verification.mjs";
+import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts } from "./store.mjs";
 import {
-  appendJournal,
-  campaignDir,
-  HANDOFF_BYTES,
-  HANDOFF_LIMIT,
-  initializeCampaign,
-  readJournal,
-  registerRun,
-  renderHandoff,
-  resolveCampaign,
-  validateJournalEntry,
-} from "./campaign.mjs";
+  closeResult,
+  fakeCodex,
+  fixture,
+  initializeGit,
+  orphan,
+  packet,
+  readStatus,
+  waitForValue,
+  withFakeAgy,
+  withFakeCodex,
+  writeContract,
+} from "../test/helpers.mjs";
 
-function orphan(runDir, nodeId, patch = {}) {
-  const path = join(runDir, "nodes", `${nodeId}.json`);
-  const state = JSON.parse(readFileSync(path, "utf8"));
-  writeFileSync(path, JSON.stringify({
-    ...state,
-    status: "running",
-    phase: "worker",
-    result: null,
-    gate: null,
-    ...patch,
-  }, null, 2));
+/** @param {import("./harness.mjs").RunOutcome} result @param {string} [id] @returns {import("./contract.mjs").NodeSnapshot} */
+function nodeState(result, id = "build") {
+  const state = result.states.get(id);
+  if (!state) throw new Error(`missing node state for ${id}`);
+  return state;
 }
 
-async function withFakeCodex(directory, mode, body) {
-  const previous = process.env.HARNESS_CODEX_BIN;
-  process.env.HARNESS_CODEX_BIN = fakeCodex(directory, mode);
-  try {
-    return await body();
-  } finally {
-    if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
-    else process.env.HARNESS_CODEX_BIN = previous;
-  }
+/** @param {import("node:child_process").ChildProcess} child @returns {number} */
+function childPid(child) {
+  if (child.pid === undefined) throw new Error("child pid unavailable");
+  return child.pid;
 }
-
-async function withFakeAgy(directory, body) {
-  const previous = process.env.HARNESS_AGY_BIN;
-  process.env.HARNESS_AGY_BIN = fakeAgy(directory);
-  try {
-    return await body();
-  } finally {
-    if (previous === undefined) delete process.env.HARNESS_AGY_BIN;
-    else process.env.HARNESS_AGY_BIN = previous;
-  }
-}
-
-function fixture(overrides = {}) {
-  return {
-    id: "test-run",
-    campaignId: "test-campaign",
-    goal: "Prove the runner works",
-    cwd: ".",
-    runtimeDefaults: { worker: "luna", judge: "sol" },
-    runtimes: {
-      luna: { driver: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
-      sol: { driver: "codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
-      opus: { driver: "claude", model: "opus", reasoning: "high" },
-      agy: { driver: "agy", model: "gemini-3.7-flash-low" },
-      flash: {
-        driver: "codex",
-        model: "deepseek-v4-flash",
-        config: { model_provider: "deepseek", "model_providers.deepseek.env_key": "DEEPSEEK_API_KEY" },
-      },
-    },
-    runtimeRules: [
-      { match: { type: "frontend" }, runtime: "opus" },
-      { match: { type: "mechanic" }, runtime: "flash" },
-    ],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-    ...overrides,
-  };
-}
-
-function packet(overrides = {}) {
-  return {
-    mode: "execution",
-    objective: "Implement it",
-    instructions: ["Implement the requested behavior"],
-    readFiles: ["contract.json"],
-    writeFiles: ["README.md"],
-    symbols: [],
-    decisions: [],
-    nonGoals: [],
-    verification: ["node --test skills/run-harness/scripts/harness.test.mjs"],
-    ...overrides,
-  };
-}
-
-function writeContract(directory, value) {
-  const path = join(directory, "contract.json");
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
-  const cwd = join(directory, value.cwd ?? ".");
-  const runsDir = join(cwd, ".runs");
-  const pathForCampaign = campaignDir(runsDir, value.campaignId);
-  if (!existsSync(pathForCampaign)) {
-    initializeCampaign(runsDir, { campaignId: value.campaignId, goal: value.goal });
-  }
-  return path;
-}
-
-function fakeCodex(directory, mode = "pass") {
-  const path = join(directory, `fake-codex-${mode}.mjs`);
-  writeFileSync(path, `#!/usr/bin/env node
-const prompt = process.argv.at(-1);
-const mode = ${JSON.stringify(mode)};
-console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
-if (mode === "slow") {
-  // The worker eats most of the node budget; the judge must still get its own.
-  const wait = prompt.startsWith("Review node") ? 2000 : 3500;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
-}
-if (mode === "silent") setTimeout(() => {}, 60_000);
-else if (mode === "heartbeat") setInterval(() => console.error("working"), 10);
-else if (prompt.includes("FAIL_WORKER") || (mode === "worker-fail" && !prompt.startsWith("Review node")) || (mode === "judge-fail" && prompt.startsWith("Review node"))) {
-  console.log(JSON.stringify({type:"turn.failed",error:{message:"deliberate failure"}}));
-} else {
-  const judge = prompt.startsWith("Review node");
-  const text = judge
-    ? mode === "critical"
-      ? JSON.stringify({verdict:"fail",maxSeverity:"critical",summary:"critical defect",findings:[{severity:"critical",description:"broken",evidence:"test failed"}]})
-      : JSON.stringify({verdict:"fail",maxSeverity:"minor",summary:"minor advisory",findings:[{severity:"minor",description:"style",evidence:"line 1"}]})
-    : "worker complete";
-  console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
-  console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
-}
-`);
-  chmodSync(path, 0o755);
-  return path;
-}
-
-function fakeAgy(directory) {
-  const path = join(directory, "fake-agy.mjs");
-  writeFileSync(path, `#!/usr/bin/env node
-console.log(JSON.stringify({event:"init",conversation_id:"fake-conversation"}));
-console.log(JSON.stringify({event:"result",result:{
-  conversation_id:"fake-conversation",
-  status:"SUCCESS",
-  response:"READY",
-  usage:{input_tokens:4,output_tokens:1,cache_read_tokens:2}
-}}));
-`);
-  chmodSync(path, 0o755);
-  return path;
-}
-
-test("routes explicit, matching, and default runtimes", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-route-"));
-  const path = writeContract(directory, fixture());
-  const contract = validateContract(JSON.parse(readFileSync(path)), path);
-  assert.equal(routeRuntime(contract, { id: "a", type: "frontend", gate: {} }).id, "opus");
-  assert.equal(routeRuntime(contract, { id: "b", type: "mechanic", gate: {} }).id, "flash");
-  assert.equal(routeRuntime(contract, { id: "c", type: "backend", gate: {} }).id, "luna");
-  assert.equal(routeRuntime(contract, { id: "d", type: "backend", runtime: "opus", gate: {} }).id, "opus");
-});
-
-test("builds custom provider config as command-line overrides", () => {
-  const command = providerCommand({ ...fixture().runtimes.flash, sandbox: "danger-full-access" }, "task");
-  assert.equal(command.executable, "codex");
-  assert.deepEqual(command.args.slice(0, 4), ["exec", "--json", "--sandbox", "danger-full-access"]);
-  assert.ok(command.args.includes("model_provider=\"deepseek\""));
-  assert.ok(command.args.includes("model=\"deepseek-v4-flash\""));
-  assert.ok(command.args.includes("model_providers.deepseek.env_key=\"DEEPSEEK_API_KEY\""));
-  assert.ok(!command.args.includes("--profile"));
-});
-
-test("builds agy commands with unambiguous equals-form flags", () => {
-  const command = providerCommand(
-    { driver: "agy", model: "gemini-3.7-flash-low", reasoning: "xhigh", printTimeout: "30m" },
-    "task with spaces",
-    { schema: JUDGE_SCHEMA },
-  );
-  assert.equal(command.executable, "agy");
-  assert.ok(command.args.includes("--model=gemini-3.7-flash-low"));
-  assert.ok(command.args.includes("--effort=high"));
-  assert.ok(command.args.includes("--print-timeout=30m"));
-  assert.ok(command.args.includes(`--json-schema=${JSON.stringify(JUDGE_SCHEMA)}`));
-  assert.ok(command.args.includes("--print=task with spaces"));
-});
-
-test("uses provider-compatible explicit types in the judge schema", () => {
-  assert.equal(JUDGE_SCHEMA.properties.verdict.type, "string");
-  assert.equal(JUDGE_SCHEMA.properties.maxSeverity.type, "string");
-  assert.equal(JUDGE_SCHEMA.properties.findings.items.properties.severity.type, "string");
-});
-
-test("rejects an invalid Codex sandbox", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-sandbox-"));
-  const value = fixture();
-  value.runtimes.flash.sandbox = "unrestricted";
-  const path = writeContract(directory, value);
-  assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /sandbox is invalid/u);
-});
-
-test("normalizes Codex, streaming Claude, and agy results", () => {
-  const codex = [
-    { type: "thread.started", thread_id: "thread" },
-    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
-    { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 1 } },
-  ].map(JSON.stringify).join("\n");
-  assert.deepEqual(normalizeProviderResult("codex", codex, 0, null).status, "done");
-
-  const claude = [
-    { type: "system", subtype: "init" },
-    { type: "result", result: "ok", is_error: false, session_id: "session", usage: { input_tokens: 3 } },
-  ].map(JSON.stringify).join("\n");
-  assert.deepEqual(normalizeProviderResult("claude", claude, 0, null).continuationId, "session");
-
-  const agy = [
-    { event: "init", conversation_id: "conversation" },
-    {
-      event: "result",
-      result: {
-        conversation_id: "conversation",
-        status: "SUCCESS",
-        response: "ok",
-        usage: { input_tokens: 4, output_tokens: 2, cache_read_tokens: 3 },
-      },
-    },
-  ].map(JSON.stringify).join("\n");
-  const normalizedAgy = normalizeProviderResult("agy", agy, 0, null);
-  assert.equal(normalizedAgy.status, "done");
-  assert.equal(normalizedAgy.result, "ok");
-  assert.equal(normalizedAgy.continuationId, "conversation");
-  assert.equal(normalizedAgy.usage.cacheReadInputTokens, 3);
-});
-
-test("surfaces agy result errors", () => {
-  const stream = JSON.stringify({
-    event: "result",
-    result: { status: "ERROR", response: "", error: "model unavailable", usage: {} },
-  });
-  const result = normalizeProviderResult("agy", stream, 0, null);
-  assert.equal(result.status, "failed");
-  assert.equal(result.error.message, "model unavailable");
-});
-
-test("selects structured JSON from an agy response with progress prose", () => {
-  const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
-  const stream = JSON.stringify({
-    event: "result",
-    result: {
-      conversation_id: "conversation",
-      status: "SUCCESS",
-      response: `Waiting for checks...\n${verdict}\n`,
-      usage: {},
-    },
-  });
-  assert.equal(
-    normalizeProviderResult("agy", stream, 0, null, { preferStructured: true }).result,
-    verdict,
-  );
-});
-
-test("selects the last valid JSON block for a Codex judge", () => {
-  const verdict = JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "advisory", findings: [
-    { severity: "minor", description: "cleanup", evidence: "line 1" },
-  ] });
-  const stream = [
-    { type: "item.completed", item: { type: "agent_message", text: `Review complete.\n\n\`\`\`json\n${verdict}\n\`\`\`` } },
-    { type: "item.completed", item: { type: "agent_message", text: "Temporary files are harmless." } },
-    { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
-  ].map(JSON.stringify).join("\n");
-  assert.equal(normalizeProviderResult("codex", stream, 0, null).result, "Temporary files are harmless.");
-  assert.equal(normalizeProviderResult("codex", stream, 0, null, { preferStructured: true }).result, verdict);
-});
-
-test("normalizes Codex cached token naming", () => {
-  const stream = [
-    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
-    { type: "turn.completed", usage: { input_tokens: 8, cached_input_tokens: 5, output_tokens: 2 } },
-  ].map(JSON.stringify).join("\n");
-  assert.equal(normalizeProviderResult("codex", stream, 0, null).usage.cacheReadInputTokens, 5);
-});
-
-test("rejects dependency cycles", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-cycle-"));
-  const path = writeContract(directory, fixture({
-    nodes: [
-      { id: "a", type: "backend", taskPacket: packet({ objective: "a" }), dependsOn: ["b"] },
-      { id: "b", type: "backend", taskPacket: packet({ objective: "b" }), dependsOn: ["a"] },
-    ],
-  }));
-  assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /dependency cycle/u);
-});
 
 test("runs the CLI through an installed symlink", () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-symlink-"));
@@ -314,13 +53,105 @@ test("runs the CLI through an installed symlink", () => {
   assert.equal(result.stdout, "valid\n");
 });
 
+test("doctor checks repository prerequisites without mutating anything", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-doctor-"));
+  execFileSync("git", ["init", "-q", directory]);
+  writeFileSync(join(directory, ".gitignore"), ".runs/\n");
+  const cli = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory], { encoding: "utf8" });
+  assert.equal(text.status, 0, text.stderr);
+  const payload = /** @type {{schemaVersion: number, ok: boolean, checks: {name: string, ok: boolean, detail: string}[]}} */ (JSON.parse(text.stdout));
+  assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.ok, true);
+  const names = payload.checks.map((check) => check.name);
+  assert.ok(names.includes("git repository"));
+  assert.ok(names.includes(".runs ignored"));
+  const runsIgnored = payload.checks.find((check) => check.name === ".runs ignored");
+  assert.ok(runsIgnored, ".runs ignored check present");
+  assert.equal(runsIgnored.ok, true);
+  assert.equal(payload.checks.some((check) => check.detail.includes("required by contract")), false, "no contract means no required driver");
+  assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
+});
+
+test("doctor does not fail a driver resolved through an explicit executable", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-doctor-override-"));
+  execFileSync("git", ["init", "-q", directory]);
+  writeFileSync(join(directory, ".gitignore"), ".runs/\n");
+  const cli = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const worker = join(directory, "my-worker.mjs");
+  writeFileSync(worker, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('my-worker 1.0.0');\n");
+  chmodSync(worker, 0o755);
+  const contract = join(directory, "contract.json");
+  writeFileSync(contract, `${JSON.stringify({
+    schemaVersion: 1,
+    harnessVersion: "0.1.0",
+    id: "doctor-run",
+    campaignId: "doctor-campaign",
+    goal: "doctor",
+    cwd: ".",
+    runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
+    runtimes: { wrapped: { driver: "exec-jsonl", model: "m", executable: "./my-worker.mjs" } },
+    runtimeRules: [],
+    nodes: [{ id: "build", type: "backend", dependsOn: [], taskPacket: packet(), gate: false }],
+  })}\n`);
+  const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory, contract], { encoding: "utf8" });
+  assert.equal(text.status, 0, text.stdout + text.stderr);
+  const payload = /** @type {{ok: boolean, checks: {name: string, ok: boolean, detail: string}[]}} */ (JSON.parse(text.stdout));
+  assert.equal(payload.ok, true);
+  const binaryCheck = payload.checks.find((check) => check.name === "binary exec-jsonl");
+  assert.ok(binaryCheck, "exec-jsonl binary check present");
+  assert.equal(binaryCheck.ok, true);
+  assert.match(binaryCheck.detail, /override/u);
+});
+
+test("status --json and report --json emit stable machine-readable output", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-json-status-"));
+  const path = writeContract(directory, fixture({
+    id: "json-status-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const cli = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const status = spawnSync(process.execPath, [cli, "status", "--json", runDir], { encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  const statusPayload = JSON.parse(status.stdout);
+  assert.equal(statusPayload.schemaVersion, 1);
+  assert.equal(statusPayload.run, "json-status-run");
+  assert.equal(statusPayload.leaseHealthy, false);
+  assert.equal(statusPayload.nodes[0].status, "done");
+  const report = spawnSync(process.execPath, [cli, "report", "--json", runDir], { encoding: "utf8" });
+  assert.equal(report.status, 0, report.stderr);
+  const reportPayload = JSON.parse(report.stdout);
+  assert.equal(reportPayload.schemaVersion, 1);
+  assert.equal(reportPayload.totals.inputTokens, 10);
+  assert.equal(reportPayload.nodes[0].revisions, 0);
+});
+
+test("cancel subcommand terminates a stale running node", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-cancel-cli-"));
+  const path = writeContract(directory, fixture({
+    id: "cancel-cli-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+  const cli = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [cli, "cancel", runDir], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const node = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8"));
+  assert.equal(node.status, "canceled");
+  assert.equal(readFileSync(join(runDir, "cancel.request.json"), "utf8").length > 0, true);
+});
+
 test("run --detach leaves a controller that outlives the invoker and completes the run", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-detach-"));
   const contractPath = writeContract(directory, fixture({
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const contract = validateContract(JSON.parse(readFileSync(contractPath)), contractPath);
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
   const runDir = join(contract.cwd, ".runs", contract.id);
   const nodePath = join(runDir, "nodes", "build.json");
   const result = await withFakeCodex(directory, "pass", () =>
@@ -334,26 +165,27 @@ test("run --detach leaves a controller that outlives the invoker and completes t
   assert.equal(match[1], contract.id);
   assert.equal(match[3], runDir);
   const pid = Number(match[2]);
-  // The invoker is already gone; the controller must still be alive while the run is in flight.
-  const alive = await waitForValue(() => {
-    try {
-      process.kill(pid, 0);
-      return "alive";
-    } catch {
-      return readStatus(nodePath) === "done" ? "done" : null;
+  try {
+    // The invoker is already gone; the controller must still be alive while the run is in flight.
+    const alive = await waitForValue(() => {
+      try {
+        process.kill(pid, 0);
+        return "alive";
+      } catch {
+        return readStatus(nodePath) === "done" ? "done" : null;
+      }
+    }, 10_000);
+    assert.ok(alive === "alive" || alive === "done", `detached controller died while the run was in flight: ${alive}`);
+    assert.equal(await waitForValue(() => (readStatus(nodePath) === "done" ? "done" : null), 20_000), "done");
+    assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).pid, pid);
+  } finally {
+    cleanupBootstrapAttempts(runDir);
+    const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    if (invocationAlive({ pid, processStartToken: metadata.processStartToken })) {
+      try { process.kill(pid, "SIGTERM"); } catch {}
+      try { process.kill(pid, "SIGKILL"); } catch {}
     }
-  }, 10_000);
-  assert.ok(alive === "alive" || alive === "done", `detached controller died while the run was in flight: ${alive}`);
-  assert.equal(await waitForValue(() => (readStatus(nodePath) === "done" ? "done" : null), 20_000), "done");
-  assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).pid, pid);
-  await waitForValue(() => {
-    try {
-      process.kill(pid, 0);
-      return null;
-    } catch {
-      return "exited";
-    }
-  }, 10_000);
+  }
 });
 
 test("resume --detach restarts a failed node through a detached controller", async () => {
@@ -362,7 +194,7 @@ test("resume --detach restarts a failed node through a detached controller", asy
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const contract = validateContract(JSON.parse(readFileSync(contractPath)), contractPath);
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
   const runDir = join(contract.cwd, ".runs", contract.id);
   const nodePath = join(runDir, "nodes", "build.json");
   await withFakeCodex(directory, "worker-fail", () => runContract(contractPath));
@@ -376,24 +208,6 @@ test("resume --detach restarts a failed node through a detached controller", asy
   assert.match(result.stdout, /\[resume\] detached · pid \d+ · .*/u);
   assert.equal(await waitForValue(() => (readStatus(nodePath) === "done" ? "done" : null), 20_000), "done");
 });
-
-function readStatus(nodePath) {
-  try {
-    return JSON.parse(readFileSync(nodePath, "utf8")).status;
-  } catch {
-    return null;
-  }
-}
-
-async function waitForValue(readValue, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = readValue();
-    if (value !== null) return value;
-    if (Date.now() > deadline) throw new Error("condition not reached within the deadline");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
 
 test("runs a worker and treats minor judge findings as advisory", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-run-"));
@@ -413,12 +227,260 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
   try {
     const result = await runContract(path);
     assert.equal(result.ok, true);
-    assert.equal(result.states.get("build").status, "done");
+    assert.equal(nodeState(result).status, "done");
     assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
   }
+});
+
+test("runs a full contract through the generic exec-jsonl driver end to end", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-jsonl-run-"));
+  const fake = join(directory, "fake-jsonl.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("fake-jsonl 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.type !== "run.request" || request.schemaVersion !== 1) process.exit(2);
+  const judge = request.prompt.startsWith("Review node");
+  const result = judge
+    ? JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "minor advisory", findings: [{ severity: "minor", description: "style", evidence: "line 1" }] })
+    : JSON.stringify({ status: "done", summary: "jsonl worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "jsonl-thread" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "message", text: "working" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "jsonl-thread", usage: { inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 1 }, costUsd: 0.01 }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "jsonl-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(result.ok, true);
+  assert.equal(state.status, "done");
+  assert.equal(state.attempt, 1);
+  assert.equal(state.revisions, 0);
+  assert.equal(state.gate?.maxSeverity, "minor");
+  assert.equal(state.gate?.summary, "minor advisory");
+  assert.equal(state.usage?.inputTokens, 10, "worker and judge usage both accrue");
+  assert.equal(state.usage?.outputTokens, 4);
+  assert.equal(state.usage?.cacheReadInputTokens, 2);
+  assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
+  assert.equal(existsSync(join(result.runDir, "logs", "build.1.worker.jsonl")), true, "normalized protocol events are persisted");
+  assert.equal(existsSync(join(result.runDir, "logs", "build.1.judge.jsonl")), true, "judge protocol events are persisted");
+});
+
+test("blocks a structured blocked_context worker result without invoking a judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-blocked-context-"));
+  const path = writeContract(directory, fixture({
+    id: "blocked-context-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+  }));
+  const result = await withFakeCodex(directory, "blocked-context", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked");
+  assert.ok(state.error, "blocked node records an error");
+  assert.equal(state.error.code, "context_missing");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("discovery blocked_context maps to the blocked terminal state, not an invalid-result retry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-discovery-blocked-context-"));
+  const path = writeContract(directory, fixture({
+    id: "discovery-blocked-context-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "discover",
+      type: "backend",
+      taskPacket: packet({ mode: "discovery", readFiles: [], writeFiles: [], objective: "Find the entrypoint" }),
+      gate: {},
+    }],
+  }));
+  const result = await withFakeCodex(directory, "blocked-context", () => runContract(path));
+  const state = nodeState(result, "discover");
+  assert.equal(state.status, "blocked");
+  assert.ok(state.error, "discovery blocked node records an error");
+  assert.equal(state.error.code, "context_missing");
+  assert.deepEqual(/** @type {{missingContext: string[]}} */ (state.result).missingContext, ["missing.txt"]);
+  assert.equal(state.attempt, 1);
+  assert.equal(state.revisions, 0);
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("resume preserves a terminal blocked_context node without re-running or judging it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-blocked-context-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-blocked-context-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+  }));
+  const runDir = await withFakeCodex(directory, "blocked-context", async () => (await runContract(path)).runDir);
+
+  // A provider that would complete the node proves the blocked outcome is not re-executed.
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "blocked");
+  assert.ok(state.error, "resumed blocked node records an error");
+  assert.equal(state.error.code, "context_missing");
+  assert.deepEqual(/** @type {{missingContext: string[]}} */ (state.result).missingContext, ["missing.txt"]);
+  assert.equal(state.attempt, 1);
+  assert.ok(!readdirSync(join(resumed.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("worker result with prose before the JSON still parses", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-prose-json-"));
+  const path = writeContract(directory, fixture({
+    id: "prose-json-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "prose-json", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.equal(/** @type {{status: string}} */ (state.result).status, "done");
+});
+
+test("invalid worker result consumes a bounded revision before failing terminally", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-invalid-result-"));
+  const path = writeContract(directory, fixture({
+    id: "invalid-result-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 1 } }],
+  }));
+  const result = await withFakeCodex(directory, "prose-retry", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.equal(state.revisions, 1);
+  assert.equal(state.attempt, 2);
+});
+
+test("invalid worker result without revisions fails terminally", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-invalid-result-terminal-"));
+  const path = writeContract(directory, fixture({
+    id: "invalid-result-terminal-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
+  }));
+  const result = await withFakeCodex(directory, "prose-retry", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.ok(state.error, "invalid worker result records an error");
+  assert.equal(state.error.code, "invalid_worker_result");
+  assert.equal(state.revisions, 0);
+});
+
+test("fails deterministic verification before the judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-verification-fail-"));
+  const path = writeContract(directory, fixture({
+    id: "verification-fail-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(2)"] }] }), gate: {} }],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.ok(state.error, "verification failure records an error");
+  assert.equal(state.error.code, "verification_failed");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+  assert.ok(state.verification, "verification state persisted");
+  assert.ok(state.verification.commands, "verification commands persisted");
+  assert.equal(state.verification.commands[0].attempts.length, 2);
+  assert.equal(state.verification.completed, true);
+  assert.ok(state.verification.attempts, "verification attempts persisted");
+  assert.equal(state.verification.attempts.length, 2);
+  assert.equal(new Set(state.verification.attempts.map((attempt) => attempt.invocationId)).size, 2);
+  assert.ok(state.verification.attempts.every((attempt) => attempt.status === "failed" && Number.isInteger(attempt.pid) && Number.isInteger(attempt.processGroupId)));
+  assert.equal(state.attempt, 2);
+  assert.equal(state.revisions, 1);
+  assert.ok(state.gate, "verification failure still records a gate");
+  assert.equal(state.gate.verdict, "fail");
+  assert.equal(state.gate.maxSeverity, "critical");
+  assert.match(state.gate.findings[0].evidence, /exit=2/u);
+});
+
+test("oversized judge prompt fails before judge spawn or persistence", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-judge-prompt-cap-"));
+  const path = writeContract(directory, fixture({
+    id: "judge-prompt-cap-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", definitionOfDone: ["x".repeat(2 * 1024)].concat(Array.from({ length: 40 }, () => "y".repeat(2 * 1024))), taskPacket: packet(), gate: {} }],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.ok(state.error, "judge prompt cap records an error");
+  assert.equal(state.error.code, "judge_prompt_too_large");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0);
+});
+
+test("provider diagnostics stay bounded and recovery consumes only a bounded tail", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-raw-bounded-"));
+  const path = writeContract(directory, fixture({ id: "raw-bounded-run", pollIntervalMs: 10 }));
+  const result = await withFakeCodex(directory, "large-output", () => runContract(path));
+  const logs = readdirSync(join(result.runDir, "logs"));
+  const rawPath = logs.find((name) => name.endsWith(".worker.jsonl"));
+  assert.ok(rawPath);
+  const raw = readFileSync(join(result.runDir, "logs", rawPath));
+  assert.ok(raw.length <= 512 * 1024);
+  assert.ok(raw.toString().includes("turn.completed"));
+  const boundedInput = `${"x".repeat(700000)}\n${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "tail", changedFiles: [], verification: [], artifacts: [], missingContext: [] }) } })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`;
+  const recoveryPath = join(directory, "recovery.jsonl");
+  writeFileSync(recoveryPath, boundedInput);
+  const recovered = invocationResult({ stdoutPath: recoveryPath }, { driver: "codex", model: "test" }, { preferStructured: false });
+  assert.ok(recovered, "recovery returns an envelope");
+  assert.equal(recovered.status, "done");
+});
+
+test("fails closed on unexpected writes and preserves pre-existing dirt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-scope-"));
+  writeFileSync(join(directory, "preexisting.txt"), "keep me\n");
+  const path = writeContract(directory, fixture({
+    id: "scope-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.ok(state.error, "unexpected write records an error");
+  assert.equal(state.error.code, "unexpected_write");
+  assert.ok(state.scope, "scope snapshot persisted");
+  assert.ok(state.scope.unexpectedPaths.includes("unexpected.txt"));
+
+  const cleanDirectory = mkdtempSync(join(tmpdir(), "harness-scope-clean-"));
+  writeFileSync(join(cleanDirectory, "preexisting.txt"), "keep me\n");
+  const cleanPath = writeContract(cleanDirectory, fixture({
+    id: "scope-clean-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const clean = await withFakeCodex(cleanDirectory, "pass", () => runContract(cleanPath));
+  assert.equal(nodeState(clean).status, "done");
+});
+
+test("rejects parallel execution until isolation exists", () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-max-parallel-"));
+  const path = writeContract(directory, fixture({ maxParallel: 2 }));
+  assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /maxParallel must be 1/u);
 });
 
 test("marks a silent provider stalled", async () => {
@@ -437,7 +499,7 @@ test("marks a silent provider stalled", async () => {
   try {
     const result = await runContract(path);
     assert.equal(result.ok, false);
-    assert.equal(result.states.get("build").status, "stalled");
+    assert.equal(nodeState(result).status, "stalled");
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
@@ -455,10 +517,10 @@ test("preserves the worker report when the judge provider fails", async () => {
   process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "judge-fail");
   try {
     const result = await runContract(path);
-    const state = result.states.get("build");
+    const state = nodeState(result);
     assert.equal(state.status, "failed");
     assert.equal(state.phase, "judge");
-    assert.equal(state.result, "worker complete");
+    assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
@@ -477,8 +539,10 @@ test("enforces the wall-clock cap even while output changes", async () => {
   process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "heartbeat");
   try {
     const result = await runContract(path);
-    assert.equal(result.states.get("build").status, "exhausted");
-    assert.equal(result.states.get("build").error.code, "wall_clock_timeout");
+    assert.equal(nodeState(result).status, "exhausted");
+    const timedOut = nodeState(result);
+    assert.ok(timedOut.error, "timeout records an error");
+    assert.equal(timedOut.error.code, "wall_clock_timeout");
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
@@ -496,8 +560,9 @@ test("spends the wall-clock budget per phase, not per node", async () => {
   // The worker takes 3.5s of a 5s budget. A node-wide clock leaves the judge
   // 1.5s for work that needs 2s and kills a healthy reviewer.
   const result = await withFakeCodex(directory, "slow", () => runContract(path));
-  const state = result.states.get("build");
+  const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
+  assert.ok(state.gate, "judge gate recorded");
   assert.equal(state.gate.summary, "minor advisory");
 });
 
@@ -518,8 +583,8 @@ test("bounds gate retries and reports exhausted", async () => {
   try {
     const result = await runContract(path);
     assert.equal(result.ok, false);
-    assert.equal(result.states.get("build").status, "exhausted");
-    assert.equal(result.states.get("build").attempt, 2);
+    assert.equal(nodeState(result).status, "exhausted");
+    assert.equal(nodeState(result).attempt, 2);
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
@@ -535,12 +600,59 @@ test("resume adopts an orphaned worker result instead of repeating the work", as
   // A provider that fails every worker call proves the result came from the orphaned log.
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
   assert.equal(resumed.ok, true);
-  assert.equal(resumed.states.get("build").status, "done");
-  assert.equal(resumed.states.get("build").result, "worker complete");
-  assert.equal(resumed.states.get("build").attempt, 1);
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(/** @type {{summary: string}} */ (nodeState(resumed).result).summary, "worker complete");
+  assert.equal(nodeState(resumed).attempt, 1);
 });
 
-test("resume re-judges an adopted worker result for a gated node", async () => {
+test("resume refuses a driver that was known but is now unavailable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-driver-drift-"));
+  const path = writeContract(directory, fixture({ id: "resume-driver-drift-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+  await assert.rejects(
+    () => withFakeCodex(directory, "version-fail", () => resumeRun(runDir)),
+    /source drift detected in driverVersions/u,
+  );
+});
+
+test("resume permits worker edits only to packet write files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-write-boundary-"));
+  const work = join(directory, "work");
+  mkdirSync(work);
+  writeFileSync(join(work, "README.md"), "baseline\n");
+  initializeGit(work);
+  const path = writeContract(directory, fixture({
+    id: "resume-write-boundary-run",
+    cwd: "work",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"], writeFiles: ["README.md"] }), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "write-allowed", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  assert.equal(nodeState(resumed).status, "done");
+});
+
+test("resume rejects source drift outside packet write files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-unexpected-drift-"));
+  const work = join(directory, "work");
+  mkdirSync(work);
+  writeFileSync(join(work, "README.md"), "baseline\n");
+  initializeGit(work);
+  const path = writeContract(directory, fixture({
+    id: "resume-unexpected-drift-run",
+    cwd: "work",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"], writeFiles: ["README.md"] }), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  writeFileSync(join(work, "unexpected.txt"), "not in packet\n");
+  orphan(runDir, "build");
+  await assert.rejects(() => withFakeCodex(directory, "worker-fail", () => resumeRun(runDir)), /source drift detected in dirtyTreeFingerprint/u);
+});
+
+test("resume adopts a completed orphan judge without running it twice", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-resume-gate-"));
   const path = writeContract(directory, fixture({
     id: "resume-gate-run",
@@ -551,11 +663,84 @@ test("resume re-judges an adopted worker result for a gated node", async () => {
   orphan(runDir, "build");
 
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
-  const state = resumed.states.get("build");
+  const state = nodeState(resumed);
   assert.equal(state.status, "done");
-  assert.equal(state.result, "worker complete");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
+  assert.ok(state.gate, "adopted gate recorded");
   assert.equal(state.gate.summary, "minor advisory");
-  assert.ok(existsSync(join(runDir, "logs", "build.1.judge.r2.jsonl")), "the second judge log must not overwrite the first");
+  assert.equal(existsSync(join(runDir, "logs", "build.1.judge.r2.jsonl")), false, "a completed judge must be adopted once");
+});
+
+test("invalid orphan judge output is rejudged without charging worker usage twice", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-invalid-judge-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-invalid-judge-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string}>}} */
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const judgeInvocation = state.invocations.at(-1);
+  assert.ok(judgeInvocation, "persisted judge invocation exists");
+  writeFileSync(judgeInvocation.stdoutPath, "not a structured judge result\n");
+  writeFileSync(nodePath, JSON.stringify({ ...state, status: "running", phase: "judge" }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const final = nodeState(resumed);
+  assert.equal(final.status, "done");
+  assert.ok(final.usage, "usage persisted");
+  assert.equal(final.usage.inputTokens, 30, "worker usage is not added again while rejudging");
+  assert.ok(final.executionOverrides, "execution overrides persisted");
+  assert.equal(final.executionOverrides.filter((item) => item.invocationId === judgeInvocation.id).length, 1);
+  const resumedAgain = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const finalAgain = nodeState(resumedAgain);
+  assert.ok(finalAgain.usage, "usage persisted on second resume");
+  assert.equal(finalAgain.usage.inputTokens, 30, "a second resume does not charge the orphan judge again");
+});
+
+test("invalid orphan judge usage survives a full worker restart exactly once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-invalid-restart-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-invalid-restart-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string, usage?: unknown}>}} */
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const judgeInvocation = state.invocations.at(-1);
+  const workerInvocation = state.invocations.find((invocation) => invocation.phase === "worker");
+  assert.ok(judgeInvocation && workerInvocation, "persisted judge and worker invocations exist");
+  writeFileSync(workerInvocation.stdoutPath, "not a provider stream\n");
+  writeFileSync(judgeInvocation.stdoutPath, [
+    { type: "thread.started", thread_id: "orphan-judge" },
+    { type: "item.completed", item: { type: "agent_message", text: "not a structured verdict" } },
+    { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 0 } },
+  ].map((event) => JSON.stringify(event)).join("\n"));
+  const { usage: _judgeUsage, ...judgeWithoutUsage } = judgeInvocation;
+  writeFileSync(nodePath, JSON.stringify({
+    ...state,
+    status: "running",
+    phase: "judge",
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0 },
+    invocations: state.invocations.map((invocation) => invocation.id === judgeInvocation.id ? judgeWithoutUsage : invocation),
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const final = nodeState(resumed);
+  assert.equal(final.status, "done");
+  assert.equal(final.attempt, 2, "an unusable worker forces a full worker restart");
+  assert.ok(final.usage, "usage persisted");
+  assert.equal(final.usage.inputTokens, 40, "the orphan judge usage is charged before the replacement worker");
+  assert.ok(final.executionOverrides, "execution overrides persisted");
+  assert.equal(final.executionOverrides.filter((item) => item.invocationId === judgeInvocation.id).length, 1);
+  const resumedAgain = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const finalAgain = nodeState(resumedAgain);
+  assert.ok(finalAgain.usage, "usage persisted on second resume");
+  assert.equal(finalAgain.usage.inputTokens, 40, "the second resume does not charge the judge again");
 });
 
 test("resume restarts a node with no usable worker output", async () => {
@@ -564,8 +749,326 @@ test("resume restarts a node with no usable worker output", async () => {
   const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
 
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  assert.equal(resumed.states.get("build").status, "done");
-  assert.equal(resumed.states.get("build").attempt, 2);
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(nodeState(resumed).attempt, 2);
+});
+
+test("simultaneous resumes allow one controller and reject the other", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-concurrent-resume-"));
+  const path = writeContract(directory, fixture({ id: "concurrent-resume-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const slow = fakeCodex(directory, "slow");
+  const first = spawn(process.execPath, [harness, "resume", runDir], {
+    env: { ...process.env, HARNESS_CODEX_BIN: slow },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await waitForValue(() => {
+      try {
+        return JSON.parse(readFileSync(join(runDir, "controller-lease.json"), "utf8")).pid === first.pid ? "held" : null;
+      } catch {
+        return null;
+      }
+    }, 5_000);
+    const second = spawn(process.execPath, [harness, "resume", runDir], {
+      env: { ...process.env, HARNESS_CODEX_BIN: fakeCodex(directory, "pass") },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const [firstResult, secondResult] = await Promise.all([closeResult(first), closeResult(second)]);
+    assert.equal(firstResult.code, 0, firstResult.stderr);
+    assert.notEqual(secondResult.code, 0, secondResult.stderr);
+    assert.match(secondResult.stderr, /lease/u);
+    assert.equal(readStatus(join(runDir, "nodes", "build.json")), "done");
+  } finally {
+    try { first.kill("SIGKILL"); } catch {}
+  }
+});
+
+test("cancelRun confirms controller death and terminates every recorded provider", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-cancel-confirmation-"));
+  const path = writeContract(directory, fixture({ id: "cancel-confirmation-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const controller = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { detached: process.platform !== "win32", stdio: "ignore" });
+  const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: process.platform !== "win32", stdio: "ignore" });
+  const verificationProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: process.platform !== "win32", stdio: "ignore" });
+  const now = Date.now();
+  const startedAt = new Date(now).toISOString();
+  const invocation = {
+    id: "cancel-provider",
+    pid: childPid(provider),
+    processGroupId: process.platform === "win32" ? null : childPid(provider),
+    processStartToken: processStartToken(childPid(provider)),
+    driver: "codex",
+    runtimeId: "luna",
+    phase: "worker",
+    promptPath: null,
+    stdoutPath: join(runDir, "logs", "missing.jsonl"),
+    stderrPath: null,
+    startedAt,
+    updatedAt: startedAt,
+    deadlineAt: new Date(now + 60_000).toISOString(),
+    closedAt: null,
+    exitCode: null,
+    signal: null,
+    status: "active",
+    executable: process.execPath,
+  };
+  state.status = "running";
+  state.phase = "worker";
+  state.verification = {
+    passed: false,
+    completed: false,
+    commands: [],
+    attempts: [{
+      invocationId: "cancel-verification",
+      commandIndex: 0,
+      attempt: 1,
+      pid: childPid(verificationProcess),
+      processGroupId: process.platform === "win32" ? null : childPid(verificationProcess),
+      processStartToken: processStartToken(childPid(verificationProcess)),
+      startedAt,
+      deadlineAt: new Date(now + 60_000).toISOString(),
+      status: "active",
+      completedAt: null,
+      result: null,
+    }],
+  };
+  writeFileSync(nodePath, JSON.stringify({ ...state, invocations: [invocation] }, null, 2));
+  writeFileSync(join(runDir, "controller-lease.json"), JSON.stringify({
+    schemaVersion: 1,
+    harnessVersion: "0.1.0",
+    holderId: "controller-under-test",
+    generation: 1,
+    pid: childPid(controller),
+    processStartToken: processStartToken(childPid(controller)),
+    acquiredAt: new Date(now - 100).toISOString(),
+    renewedAt: new Date(now - 100).toISOString(),
+    expiresAt: new Date(now + 250).toISOString(),
+  }, null, 2));
+  try {
+    await cancelRun(runDir);
+    assert.equal(JSON.parse(readFileSync(nodePath, "utf8")).status, "canceled");
+    assert.equal(invocationAlive({ pid: childPid(controller), processStartToken: processStartToken(childPid(controller)) }), false);
+    assert.equal(invocationAlive(invocation), false);
+    assert.equal(invocationAlive({ pid: childPid(verificationProcess), processStartToken: processStartToken(childPid(verificationProcess)) }), false);
+    assert.equal(JSON.parse(readFileSync(nodePath, "utf8")).verification.attempts[0].status, "canceled");
+  } finally {
+    try { process.kill(process.platform === "win32" ? childPid(controller) : -childPid(controller), "SIGKILL"); } catch {}
+    try { process.kill(process.platform === "win32" ? childPid(provider) : -childPid(provider), "SIGKILL"); } catch {}
+    try { process.kill(process.platform === "win32" ? childPid(verificationProcess) : -childPid(verificationProcess), "SIGKILL"); } catch {}
+  }
+});
+
+test("resume adopts a still-live orphan invocation after its stream completes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-live-orphan-"));
+  const path = writeContract(directory, fixture({ id: "live-orphan-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const stdoutPath = join(runDir, "logs", "active-orphan.jsonl");
+  const stream = [
+    { type: "thread.started", thread_id: "orphan-thread" },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "adopted worker", changedFiles: [], verification: [], artifacts: [], missingContext: [] }) } },
+    { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } },
+  ].map((event) => JSON.stringify(event)).join("\n") + "\n";
+  const child = spawn(process.execPath, ["-e", `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(stdoutPath)}, ${JSON.stringify(stream)}), 50); setTimeout(() => {}, 10000)`], {
+    detached: process.platform !== "win32",
+    stdio: "ignore",
+  });
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const snapshotPath = join(runDir, "logs", "active-orphan.snapshot.json");
+  writeFileSync(snapshotPath, JSON.stringify(captureWorkspaceSnapshot(directory)));
+  const now = new Date().toISOString();
+  state.status = "running";
+  state.phase = "worker";
+  state.result = null;
+  state.invocations = [{
+    id: "live-orphan",
+    pid: childPid(child),
+    processGroupId: process.platform === "win32" ? null : childPid(child),
+    processStartToken: processStartToken(childPid(child)),
+    driver: "codex",
+    runtimeId: "luna",
+    phase: "worker",
+    promptPath: null,
+    stdoutPath,
+    stderrPath: null,
+    startedAt: now,
+    updatedAt: now,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    closedAt: null,
+    exitCode: null,
+    signal: null,
+    status: "active",
+    executable: process.execPath,
+    snapshotPath,
+  }];
+  writeFileSync(nodePath, JSON.stringify(state, null, 2));
+  try {
+    const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+    const final = nodeState(resumed);
+    assert.equal(final.status, "done");
+    assert.equal(/** @type {{summary: string}} */ (final.result).summary, "adopted worker");
+    assert.ok(final.invocations, "adopted invocation persisted");
+    assert.equal(final.invocations.length, 1);
+    assert.equal(final.invocations[0].id, "live-orphan");
+  } finally {
+    try { process.kill(process.platform === "win32" ? childPid(child) : -childPid(child), "SIGKILL"); } catch {}
+  }
+});
+
+test("resume terminates an interrupted verification attempt and re-runs the phase", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-verification-resume-"));
+  const path = writeContract(directory, fixture({ id: "verification-resume-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const verificationProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: process.platform !== "win32", stdio: "ignore" });
+  const now = Date.now();
+  state.status = "running";
+  state.phase = "worker";
+  state.result = null;
+  state.verification = {
+    passed: false,
+    completed: false,
+    commands: [],
+    attempts: [{
+      invocationId: "crashed-verification",
+      commandIndex: 0,
+      attempt: 1,
+      pid: childPid(verificationProcess),
+      processGroupId: process.platform === "win32" ? null : childPid(verificationProcess),
+      processStartToken: processStartToken(childPid(verificationProcess)),
+      startedAt: new Date(now).toISOString(),
+      deadlineAt: new Date(now + 60_000).toISOString(),
+      status: "active",
+      completedAt: null,
+      result: null,
+    }],
+  };
+  writeFileSync(nodePath, JSON.stringify(state, null, 2));
+  try {
+    const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+    const final = nodeState(resumed);
+    assert.equal(final.status, "done");
+    assert.ok(final.verification, "verification state persisted");
+    assert.equal(final.verification.passed, true);
+    assert.ok(final.verification.attempts, "verification attempts persisted");
+    assert.equal(final.verification.attempts[0].status, "crashed");
+    assert.equal(final.verification.attempts.length, 3);
+    assert.equal(final.revisions, 0);
+    assert.equal(invocationAlive({ pid: childPid(verificationProcess), processStartToken: processStartToken(childPid(verificationProcess)) }), false);
+  } finally {
+    try { process.kill(process.platform === "win32" ? childPid(verificationProcess) : -childPid(verificationProcess), "SIGKILL"); } catch {}
+  }
+});
+
+test("verification output beyond the snapshot budget does not crash the controller", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-verification-large-"));
+  const path = writeContract(directory, fixture({
+    id: "verification-large-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(100000)); process.stderr.write('y'.repeat(100000))"] }] }),
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.ok(state.verification, "verification state persisted");
+  assert.equal(state.verification.passed, true);
+  assert.ok(state.verification.attempts, "verification attempts persisted");
+  const boundedAttempt = state.verification.attempts[0];
+  assert.ok(boundedAttempt.result, "bounded attempt result persisted");
+  assert.ok(Buffer.byteLength(boundedAttempt.result.stdout, "utf8") <= 2 * 1024);
+  assert.ok(Buffer.byteLength(boundedAttempt.result.stderr, "utf8") <= 2 * 1024);
+});
+
+test("resume rejects a dead completion whose persisted close time is past the absolute deadline", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-deadline-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-deadline-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const invocation = state.invocations.at(-1);
+  const startedAt = new Date(Date.now() - 20_000).toISOString();
+  const timeoutAt = new Date(Date.now() - 10_000).toISOString();
+  writeFileSync(nodePath, JSON.stringify({
+    ...state,
+    status: "running",
+    phase: "worker",
+    executionOverrides: [{ kind: "timeout", timeoutSec: 10, at: timeoutAt, reason: "persisted deadline" }],
+    invocations: [{ ...invocation, status: "closed", startedAt, closedAt: new Date().toISOString() }],
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const final = nodeState(resumed);
+  assert.equal(final.status, "done");
+  assert.equal(final.attempt, 2, "an overdue completion is restarted rather than adopted");
+});
+
+test("resume adopts a dead completion closed before its deadline after downtime", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-downtime-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-downtime-run",
+    timeoutSec: 10,
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const invocation = state.invocations.at(-1);
+  const startedAt = new Date(Date.now() - 20_000).toISOString();
+  const closedAt = new Date(Date.now() - 19_000).toISOString();
+  writeFileSync(nodePath, JSON.stringify({
+    ...state,
+    status: "running",
+    phase: "worker",
+    executionOverrides: [{ kind: "timeout", timeoutSec: 10, at: new Date(Date.now() - 20_000).toISOString(), reason: "persisted deadline" }],
+    invocations: [{ ...invocation, status: "closed", startedAt, closedAt }],
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const final = nodeState(resumed);
+  assert.equal(final.status, "done");
+  assert.equal(final.attempt, 1, "a completion closed before the deadline remains adoptable after downtime");
+  assert.ok(final.usage, "usage persisted");
+  assert.equal(final.usage.inputTokens, 10);
+});
+
+test("resume preserves a durable pending judge phase instead of resetting to worker", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-resume-pending-judge-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-pending-judge-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  writeFileSync(nodePath, JSON.stringify({
+    ...state,
+    status: "pending",
+    phase: "judge",
+    result: { status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] },
+    gate: null,
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const final = nodeState(resumed);
+  assert.equal(final.status, "done");
+  assert.equal(final.attempt, 1, "the pending judge does not repeat the worker attempt");
 });
 
 test("resume does not re-enable a disabled gate from the stored contract", async () => {
@@ -575,7 +1078,7 @@ test("resume does not re-enable a disabled gate from the stored contract", async
   assert.equal(JSON.parse(readFileSync(join(runDir, "contract.json"), "utf8")).nodes[0].gate.enabled, false);
 
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  assert.equal(resumed.states.get("build").status, "done");
+  assert.equal(nodeState(resumed).status, "done");
   const logs = readdirSync(join(runDir, "logs"));
   assert.ok(!logs.some((name) => name.includes("judge")), "a disabled gate must not run a judge after resume");
 });
@@ -598,9 +1101,9 @@ test("gate revisions are not consumed by attempts burned in restarts", async () 
   assert.equal(JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).attempt, 2);
 
   const final = await withFakeCodex(directory, "critical", () => resumeRun(runDir));
-  assert.equal(final.states.get("build").status, "exhausted");
-  assert.equal(final.states.get("build").attempt, 4, "two burned starts plus the gate retry start");
-  assert.equal(final.states.get("build").revisions, 1, "one real gate rejection consumed");
+  assert.equal(nodeState(final).status, "exhausted");
+  assert.equal(nodeState(final).attempt, 4, "two burned starts plus the gate retry start");
+  assert.equal(nodeState(final).revisions, 1, "one real gate rejection consumed");
 });
 
 test("status separates a live running node from an orphaned one", async () => {
@@ -609,10 +1112,50 @@ test("status separates a live running node from an orphaned one", async () => {
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
 
-  assert.match(renderStatus(runDir), /Nothing needs you right now/u);
-
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: 2_147_483_647, startedAt: "earlier" }));
   assert.match(renderStatus(runDir), /build still claims to be running/u);
+
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({
+    schemaVersion: 1,
+    harnessVersion: "0.1.0",
+    pid: 2_147_483_647,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    sourceIdentity: { kind: "run", contractId: "orphan-run", campaignId: "test-campaign" },
+  }));
+  assert.match(renderStatus(runDir), /build still claims to be running/u);
+});
+
+test("status --json flags an orphaned running node with leaseHealthy false", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-orphan-json-"));
+  const path = writeContract(directory, fixture({ id: "orphan-json-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+
+  const payload = /** @type {{leaseHealthy: boolean, summary: string, nodes: {id: string, status: string}[]}} */ (JSON.parse(renderStatusJson(runDir)));
+  assert.equal(payload.leaseHealthy, false, "a missing controller lease while a node claims running must be machine-readable");
+  assert.equal(payload.nodes.find((node) => node.id === "build")?.status, "running");
+});
+
+test("status and resume reject unknown persisted protocol fields", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-persisted-validation-"));
+  const path = writeContract(directory, fixture({ id: "persisted-validation-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const node = JSON.parse(readFileSync(nodePath, "utf8"));
+  writeFileSync(nodePath, JSON.stringify({ ...node, typo: true }));
+  assert.throws(() => renderStatus(runDir), /node snapshot has unexpected field typo/u);
+  writeFileSync(nodePath, JSON.stringify(node));
+  writeFileSync(nodePath, JSON.stringify({ ...node, id: "other" }));
+  assert.throws(() => renderStatus(runDir), /node snapshot\.id does not match/u);
+  assert.throws(() => renderReport(runDir), /node snapshot\.id does not match/u);
+  assert.throws(() => renderFindings(runDir), /node snapshot\.id does not match/u);
+  await assert.rejects(() => resumeRun(runDir), /node snapshot\.id does not match/u);
+  writeFileSync(nodePath, JSON.stringify(node));
+
+  const runPath = join(runDir, "run.json");
+  const metadata = JSON.parse(readFileSync(runPath, "utf8"));
+  writeFileSync(runPath, JSON.stringify({ ...metadata, typo: true }));
+  assert.throws(() => renderStatus(runDir), /run metadata has unexpected field typo/u);
+  await assert.rejects(() => resumeRun(runDir), /run metadata has unexpected field typo/u);
 });
 
 test("report aggregates per-node status, attempts, revisions, and tokens", async () => {
@@ -679,7 +1222,7 @@ test("preflight runs an agy runtime through its native stream protocol", async (
   }));
   const checks = await withFakeAgy(directory, () => preflightContract(path));
   assert.deepEqual(checks.map((check) => check.id), ["agy"]);
-  assert.equal(checks[0].ok, true, checks[0].detail);
+  assert.equal(checks[0].ok, true, checks[0].detail ?? undefined);
 });
 
 test("preflight reports a missing credential by variable name only", async () => {
@@ -693,7 +1236,11 @@ test("preflight reports a missing credential by variable name only", async () =>
     const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
     assert.deepEqual(checks.map((check) => check.id), ["flash"]);
     assert.equal(checks[0].ok, false);
-    assert.match(checks[0].detail, /missing environment variable DEEPSEEK_API_KEY/u);
+    assert.equal(checks[0].driver, "codex");
+    assert.match(checks[0].executable, /fake-codex-pass\.mjs$/u);
+    assert.equal(checks[0].model, "deepseek-v4-flash");
+    assert.equal(checks[0].version, "fake-codex 1.0.0");
+    assert.match(checks[0].detail ?? "", /missing environment variable DEEPSEEK_API_KEY/u);
   } finally {
     if (previous !== undefined) process.env.DEEPSEEK_API_KEY = previous;
   }
@@ -702,9 +1249,31 @@ test("preflight reports a missing credential by variable name only", async () =>
 test("preflight fails a runtime the provider rejects", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-preflight-fail-"));
   const path = writeContract(directory, fixture());
-  const checks = await withFakeCodex(directory, "worker-fail", () => preflightContract(path));
+  const checks = await withFakeCodex(directory, "version-fail", () => preflightContract(path));
   assert.equal(checks[0].ok, false);
-  assert.match(checks[0].detail, /deliberate failure/u);
+  assert.match(checks[0].detail ?? "", /deliberate failure/u);
+});
+
+test("preflight preserves conflicting runtime and node capability requirements", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-preflight-capabilities-"));
+  const path = writeContract(directory, fixture({
+    runtimes: {
+      luna: { driver: "codex", model: "gpt-5.6-luna", requiredCapabilities: { sandbox: true } },
+      sol: { driver: "codex", model: "gpt-5.6-sol" },
+    },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      requiredCapabilities: { sandbox: false },
+      gate: false,
+    }],
+  }));
+  const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].ok, false);
+  assert.match(checks[0].detail ?? "", /requirement 2: sandbox=false/u);
 });
 
 test("resume doubles the wall-clock budget of a node that exhausted it", async () => {
@@ -720,9 +1289,10 @@ test("resume doubles the wall-clock budget of a node that exhausted it", async (
   }, null, 2));
 
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  assert.equal(resumed.states.get("build").status, "done");
+  assert.equal(nodeState(resumed).status, "done");
   const stored = JSON.parse(readFileSync(join(runDir, "contract.json"), "utf8"));
-  assert.equal(stored.nodes[0].timeoutSec, 4800, "budget persisted so later resumes keep it");
+  assert.equal(stored.nodes[0].timeoutSec, undefined, "the original contract remains immutable");
+  assert.equal(JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).executionOverrides.at(-1).timeoutSec, 4800, "budget override is persisted in execution state");
 });
 
 test("findings renders exhausted gate findings ready for a fix node", async () => {
@@ -764,45 +1334,22 @@ test("maxInputTokens blocks pending nodes once the budget is spent", async () =>
   }));
   const result = await withFakeCodex(directory, "pass", () => runContract(path));
   assert.equal(result.ok, false);
-  assert.equal(result.states.get("first").status, "done");
-  const blocked = result.states.get("second");
+  assert.equal(nodeState(result, "first").status, "done");
+  const blocked = nodeState(result, "second");
   assert.equal(blocked.status, "blocked");
+  assert.ok(blocked.error, "budget block records an error");
   assert.equal(blocked.error.code, "budget_exceeded");
 });
 
 test("a finished run prints the token report", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-auto-report-"));
   const path = writeContract(directory, fixture({ pollIntervalMs: 10 }));
-  const writes = [];
-  const original = process.stdout.write;
-  process.stdout.write = (chunk) => {
-    writes.push(String(chunk));
-    return true;
-  };
-  try {
-    await withFakeCodex(directory, "pass", () => runContract(path));
-  } finally {
-    process.stdout.write = original;
-  }
-  assert.ok(writes.some((line) => line.includes("totals · in 10")), "auto-report table");
-  assert.ok(writes.some((line) => line.includes("worker complete")), "node note surfaces the worker summary");
+  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
+  const result = await withFakeCodex(directory, "pass", () => spawnSync(process.execPath, [harness, "run", path], { encoding: "utf8" }));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /totals · in 10/u, "auto-report table");
+  assert.match(result.stdout, /worker complete/u, "node note surfaces the worker summary");
 });
-
-test("validate warns when a task packet verification command is absent from the Definition of Done", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-cmd-warn-"));
-  const value = fixture();
-  value.nodes[0].taskPacket = packet({ verification: ["pnpm exec vitest run tests/fixtures/x.test.ts"] });
-  value.nodes[0].definitionOfDone = ["It works"];
-  const path = writeContract(directory, value);
-  const contract = validateContract(JSON.parse(readFileSync(path)), path);
-  assert.ok(contract.warnings.some((warning) => warning.includes("tests/fixtures/x.test.ts")));
-  const clean = fixture();
-  clean.nodes[0].taskPacket = packet({ verification: ["pnpm exec vitest run tests/fixtures/y.test.ts"] });
-  clean.nodes[0].definitionOfDone = ["tests/fixtures/y.test.ts passes"];
-  const cleanPath = writeContract(directory, clean);
-  assert.equal(validateContract(JSON.parse(readFileSync(cleanPath)), cleanPath).warnings.length, 0);
-});
-
 test("run warns when a node id is already done in another run", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-rerun-guard-"));
   const firstPath = writeContract(directory, fixture({ id: "first-run", pollIntervalMs: 10 }));
@@ -824,7 +1371,8 @@ test("watch resumes a run whose controller died", async () => {
   // Simulate a controller that died mid-work: the node claims running but the
   // recorded pid is gone.
   orphan(runDir, "build");
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ pid: 2_147_483_647, startedAt: "earlier" }));
+  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...metadata, pid: 2_147_483_647 }));
 
   // The watcher's resumed controller inherits the watcher's environment, so
   // the fake provider must stay installed for the whole watch lifetime.
@@ -851,6 +1399,70 @@ test("watch resumes a run whose controller died", async () => {
   }
 });
 
+test("detached resume surfaces bootstrap failure before reporting success", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-bootstrap-failure-"));
+  const path = writeContract(directory, fixture({ id: "bootstrap-failure-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  metadata.sourceIdentity.cwd = "/unexpected-source";
+  writeFileSync(join(runDir, "run.json"), JSON.stringify(metadata));
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./harness.mjs", import.meta.url)), "resume", "--detach", runDir], {
+    env: { ...process.env, HARNESS_CODEX_BIN: fakeCodex(directory, "pass") },
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /source drift detected in cwd/u);
+  const bootstrapFailed = await waitForValue(
+    () => {
+      try { return readFileSync(join(runDir, "bootstrap.json"), "utf8").includes('"status": "failed"') ? "failed" : null; } catch { return null; }
+    },
+    15_000,
+  );
+  assert.equal(bootstrapFailed, "failed");
+  assert.deepEqual(readdirSync(runDir).filter((name) => name.startsWith("bootstrap.json.")), [], "failed detached attempts are cleaned up");
+});
+
+test("bootstrap attempt cleanup leaves concurrent failure temp writes intact", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-bootstrap-cleanup-race-"));
+  const path = writeContract(directory, fixture({ id: "bootstrap-cleanup-race-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const temporary = join(runDir, `bootstrap.json.${process.pid}.7a6b4a44-77a7-47a7-97a7-7a7a7a7a7a7a.tmp`);
+  const staleAttempt = bootstrapAttemptPath(runDir, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  writeFileSync(temporary, JSON.stringify({ status: "failed" }));
+  writeFileSync(staleAttempt, "{}");
+  cleanupBootstrapAttempts(runDir);
+  assert.equal(existsSync(staleAttempt), false);
+  assert.equal(existsSync(temporary), true);
+  renameSync(temporary, bootstrapPath(runDir));
+  assert.equal(JSON.parse(readFileSync(bootstrapPath(runDir), "utf8")).status, "failed");
+});
+
+test("detached ACK timeout and parse errors clean only their nonce attempt and ACK", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "harness-bootstrap-ack-cleanup-"));
+  const path = writeContract(directory, fixture({ id: "bootstrap-ack-cleanup-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const errorNonce = "11111111-1111-4111-8111-111111111111";
+  writeFileSync(bootstrapAckPath(runDir, errorNonce), "not json\n");
+  const errorResult = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./harness.mjs", import.meta.url)), "resume", runDir],
+    { env: { ...process.env, HARNESS_BOOTSTRAP_NONCE: errorNonce, HARNESS_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
+  );
+  assert.notEqual(errorResult.status, 0);
+  assert.equal(existsSync(join(runDir, `bootstrap.json.${errorNonce}`)), false);
+  assert.equal(existsSync(bootstrapAckPath(runDir, errorNonce)), false);
+
+  const timeoutNonce = "22222222-2222-4222-8222-222222222222";
+  const timeoutResult = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./harness.mjs", import.meta.url)), "resume", runDir],
+    { env: { ...process.env, HARNESS_BOOTSTRAP_NONCE: timeoutNonce, HARNESS_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
+  );
+  assert.equal(timeoutResult.status, 0, timeoutResult.stderr);
+  assert.equal(existsSync(join(runDir, `bootstrap.json.${timeoutNonce}`)), false);
+  assert.equal(existsSync(bootstrapAckPath(runDir, timeoutNonce)), false);
+});
+
 test("blocks downstream nodes after a failed dependency", async () => {
   const directory = mkdtempSync(join(tmpdir(), "harness-dependency-"));
   const path = writeContract(directory, fixture({
@@ -865,342 +1477,10 @@ test("blocks downstream nodes after a failed dependency", async () => {
   process.env.HARNESS_CODEX_BIN = fakeCodex(directory, "worker-fail");
   try {
     const result = await runContract(path);
-    assert.equal(result.states.get("first").status, "failed");
-    assert.equal(result.states.get("second").status, "blocked");
+    assert.equal(nodeState(result, "first").status, "failed");
+    assert.equal(nodeState(result, "second").status, "blocked");
   } finally {
     if (previous === undefined) delete process.env.HARNESS_CODEX_BIN;
     else process.env.HARNESS_CODEX_BIN = previous;
   }
-});
-
-test("validate requires a campaignId", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-id-"));
-  const value = fixture();
-  delete value.campaignId;
-  const path = join(directory, "contract.json");
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
-  assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /campaignId/u);
-
-  for (const campaignId of [".", ".."]) {
-    const invalid = fixture({ campaignId });
-    writeFileSync(path, `${JSON.stringify(invalid, null, 2)}\n`);
-    assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), /campaignId/u);
-  }
-});
-
-test("validate rejects legacy prompt and promptFile fields", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-legacy-prompt-"));
-  const value = fixture();
-  value.nodes[0].prompt = "legacy prompt";
-  const promptPath = writeContract(directory, value);
-  assert.throws(() => validateContract(JSON.parse(readFileSync(promptPath)), promptPath), /must not use prompt or promptFile/u);
-
-  const fileValue = fixture();
-  fileValue.nodes[0].promptFile = "legacy.md";
-  const filePath = writeContract(directory, fileValue);
-  assert.throws(() => validateContract(JSON.parse(readFileSync(filePath)), filePath), /must not use prompt or promptFile/u);
-});
-
-test("validate loads taskPacketFile and renders a closed execution prompt", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-file-"));
-  writeFileSync(join(directory, "packet.json"), `${JSON.stringify(packet())}\n`);
-  const value = fixture();
-  value.nodes[0] = { id: "build", type: "backend", taskPacketFile: "packet.json", gate: false };
-  const path = writeContract(directory, value);
-  const contract = validateContract(JSON.parse(readFileSync(path)), path);
-  assert.equal(contract.nodes[0].taskPacket.mode, "execution");
-  assert.match(contract.nodes[0].prompt, /Closed context/u);
-  assert.match(contract.nodes[0].prompt, /BLOCKED_CONTEXT/u);
-});
-
-test("validate rejects malformed, escaping, and missing-read-file task packets", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-invalid-"));
-  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-outside-"));
-  writeFileSync(join(outside, "secret.txt"), "secret");
-  symlinkSync(join(outside, "secret.txt"), join(directory, "outside-link"));
-  const cases = [
-    [packet({ readFiles: ["../outside"] }), /escapes cwd/u],
-    [packet({ writeFiles: ["../outside"] }), /escapes cwd/u],
-    [packet({ readFiles: ["outside-link"] }), /escapes cwd/u],
-    [packet({ writeFiles: ["outside-link"] }), /escapes cwd/u],
-    [packet({ writeFiles: ["."] }), /must name a file/u],
-    [packet({ readFiles: ["missing.txt"] }), /does not exist/u],
-    [packet({ mode: "discovery", writeFiles: ["README.md"] }), /must be empty for a discovery packet/u],
-    [packet({ mode: "execution", readFiles: [] }), /readFiles must not be empty/u],
-    [packet({ mode: "execution", writeFiles: [] }), /writeFiles must not be empty/u],
-  ];
-  for (const [taskPacket, expected] of cases) {
-    const value = fixture({ nodes: [{ id: "build", type: "backend", taskPacket, gate: false }] });
-    const path = writeContract(directory, value);
-    assert.throws(() => validateContract(JSON.parse(readFileSync(path)), path), expected);
-  }
-});
-
-test("validate rejects new write paths beneath an outward symlink", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-parent-"));
-  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-target-"));
-  symlinkSync(outside, join(directory, "outside-dir"));
-  const value = fixture({
-    nodes: [{ id: "build", type: "backend", taskPacket: packet({ writeFiles: ["outside-dir/new.txt"] }), gate: false }],
-  });
-  const path = writeContract(directory, value);
-  assert.throws(
-    () => validateContract(JSON.parse(readFileSync(path)), path),
-    /escapes cwd/u,
-  );
-});
-
-test("validate rejects a symlink followed by dotdot escaping cwd", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-dotdot-"));
-  const outside = mkdtempSync(join(tmpdir(), "harness-task-packet-symlink-dotdot-target-"));
-  mkdirSync(join(outside, "sub"), { recursive: true });
-  writeFileSync(join(directory, "secret.txt"), "inside secret");
-  writeFileSync(join(outside, "secret.txt"), "outside secret");
-  symlinkSync(join(outside, "sub"), join(directory, "link"));
-  const value = fixture({
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ readFiles: ["link/../secret.txt"] }),
-      gate: false,
-    }],
-  });
-  const path = writeContract(directory, value);
-  assert.throws(
-    () => validateContract(JSON.parse(readFileSync(path)), path),
-    /escapes cwd/u,
-  );
-});
-
-test("judge prompt exposes only the write-file evidence boundary", () => {
-  const node = {
-    id: "build",
-    type: "backend",
-    taskPacket: packet(),
-    definitionOfDone: ["It works"],
-  };
-  const prompt = judgePrompt(node, "worker complete");
-  assert.match(prompt, /Write files:\n- README\.md/u);
-  assert.doesNotMatch(prompt, /Read files/u);
-  assert.doesNotMatch(prompt, /contract\.json/u);
-});
-
-test("discovery packets render as read-only discovery work", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-discovery-packet-"));
-  const value = fixture({
-    nodes: [{
-      id: "discover",
-      type: "backend",
-      taskPacket: packet({ mode: "discovery", readFiles: [], writeFiles: [], objective: "Find the entrypoint" }),
-      gate: false,
-    }],
-  });
-  const path = writeContract(directory, value);
-  const contract = validateContract(JSON.parse(readFileSync(path)), path);
-  assert.match(contract.nodes[0].prompt, /read-only/u);
-  assert.match(contract.nodes[0].prompt, /Return one JSON task packet/u);
-});
-
-test("stored contract inlines the task packet and drops the generated prompt", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-stored-packet-"));
-  const path = writeContract(directory, fixture({ id: "stored-packet-run", pollIntervalMs: 10 }));
-  const result = await withFakeCodex(directory, "pass", () => runContract(path));
-  const stored = JSON.parse(readFileSync(join(result.runDir, "contract.json"), "utf8"));
-  assert.equal(stored.nodes[0].taskPacket.mode, "execution");
-  assert.equal(stored.nodes[0].prompt, undefined);
-  assert.equal(stored.nodes[0].taskPacketFile, undefined);
-  const revalidated = validateContract(stored, join(result.runDir, "contract.json"));
-  assert.match(revalidated.nodes[0].prompt, /Closed context/u);
-});
-
-test("initializes a campaign with an empty bounded handoff", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-init-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "launch", goal: "Ship the durable handoff" });
-  assert.equal(created.campaign.goal, "Ship the durable handoff");
-  assert.equal(readJournal(created.path)[0].type, "campaign.initialized");
-  const handoff = renderHandoff(created.path, runsDir);
-  assert.match(handoff, /# campaign launch handoff/u);
-  assert.match(handoff, /Ship the durable handoff/u);
-  assert.match(handoff, /No linked runs yet/u);
-});
-
-test("rejects dot and dotdot campaign ids", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-dot-id-"));
-  const runsDir = join(directory, ".runs");
-  for (const campaignId of [".", ".."]) {
-    assert.throws(() => campaignDir(runsDir, campaignId), /campaignId/u);
-    assert.throws(
-      () => initializeCampaign(runsDir, { campaignId, goal: "Prove bounded campaign paths" }),
-      /campaignId/u,
-    );
-    assert.throws(() => resolveCampaign(runsDir, campaignId), /campaignId/u);
-  }
-  assert.equal(existsSync(join(runsDir, "campaigns")), false);
-});
-
-test("session lineage records transcripts and explicit unavailability", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-session-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "sessions", goal: "Prove lineage" });
-  appendJournal(created.path, {
-    type: "session.attached",
-    at: new Date().toISOString(),
-    sessionId: "codex-1",
-    tool: "codex",
-    transcript: join(directory, "codex-1.jsonl"),
-    transcriptUnavailable: false,
-    format: "jsonl",
-    cursor: "42",
-  });
-  appendJournal(created.path, {
-    type: "session.attached",
-    at: new Date().toISOString(),
-    sessionId: "claude-1",
-    tool: "claude",
-    transcript: null,
-    transcriptUnavailable: true,
-    format: null,
-    cursor: null,
-  });
-  appendJournal(created.path, {
-    type: "intent",
-    at: new Date().toISOString(),
-    sessionId: "codex-1",
-    text: "Continue without reading the full transcript",
-  });
-  const handoff = renderHandoff(created.path, runsDir);
-  assert.match(handoff, /Updated: \d{4}-\d{2}-\d{2}T/u);
-  assert.match(handoff, /codex codex-1 · transcript: .*codex-1\.jsonl · format: jsonl · cursor: 42/u);
-  assert.match(handoff, /claude claude-1 · transcript: unavailable · format: - · cursor: -/u);
-  assert.match(handoff, /Recent user intents[\s\S]*Continue without reading the full transcript/u);
-});
-
-test("decision supersession removes replaced decisions from the handoff", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-supersede-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "decisions", goal: "Prove supersession" });
-  const at = new Date().toISOString();
-  appendJournal(created.path, { type: "decision", at, sessionId: "codex-1", decisionId: "d1", text: "Use JSONL" });
-  appendJournal(created.path, { type: "decision", at, sessionId: "codex-1", decisionId: "d2", text: "Use Markdown handoff" });
-  appendJournal(created.path, { type: "supersede", at, sessionId: "codex-1", supersedes: "d1", text: "Replaced by d2" });
-  const handoff = renderHandoff(created.path, runsDir);
-  assert.match(handoff, /\[d2\] Use Markdown handoff/u);
-  assert.doesNotMatch(handoff, /\[d1\] Use JSONL/u);
-});
-
-test("handoff projection is bounded to the latest entries", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-bounded-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "bounded", goal: "Prove bounded projection" });
-  for (let index = 0; index < HANDOFF_LIMIT + 5; index += 1) {
-    appendJournal(created.path, {
-      type: "constraint",
-      at: new Date().toISOString(),
-      sessionId: "codex-1",
-      text: `constraint-${String(index).padStart(3, "0")}`,
-    });
-  }
-  const handoff = renderHandoff(created.path, runsDir);
-  assert.doesNotMatch(handoff, /constraint-000/u);
-  assert.match(handoff, /constraint-024/u);
-  assert.ok(Buffer.byteLength(handoff, "utf8") <= HANDOFF_BYTES);
-});
-
-test("run registration links the run and handoff reflects fresh node status", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-run-"));
-  const path = writeContract(directory, fixture({
-    id: "linked-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const contract = validateContract(JSON.parse(readFileSync(path)), path);
-  const result = await withFakeCodex(directory, "pass", () => runContract(path));
-  assert.equal(result.ok, true);
-  const runsDir = join(directory, ".runs");
-  const campaign = resolveCampaign(runsDir, "test-campaign");
-  assert.deepEqual(campaign.campaign.linkedRunIds, ["linked-run"]);
-  const handoff = renderHandoff(campaign.path, runsDir);
-  assert.match(handoff, /## Linked runs/u);
-  assert.match(handoff, /- linked-run: 1 nodes · 1 done/u);
-});
-
-test("run registration is idempotent across resume", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-idempotent-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "idempotent", goal: "Prove idempotent registration" });
-  registerRun(created.path, "same-run");
-  registerRun(created.path, "same-run");
-  assert.deepEqual(resolveCampaign(runsDir, "idempotent").campaign.linkedRunIds, ["same-run"]);
-  assert.equal(readJournal(created.path).filter((entry) => entry.type === "run.registered").length, 1);
-});
-
-test("rejects malformed journal events before append", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-invalid-"));
-  const runsDir = join(directory, ".runs");
-  const created = initializeCampaign(runsDir, { campaignId: "invalid", goal: "Prove validation" });
-  assert.throws(
-    () => validateJournalEntry({ type: "intent", sessionId: "codex-1", text: "missing timestamp" }),
-    /entry\.at/u,
-  );
-  assert.throws(
-    () => appendJournal(created.path, { type: "intent", sessionId: "codex-1", text: "missing timestamp" }),
-    /entry\.at/u,
-  );
-  assert.throws(
-    () => appendJournal(created.path, { type: "intent", at: new Date().toISOString(), sessionId: "codex-1", text: "" }),
-    /entry\.text/u,
-  );
-  assert.throws(
-    () => appendJournal(created.path, { type: "session.attached", at: new Date().toISOString(), sessionId: "codex-1", tool: "codex", transcript: "relative.jsonl", transcriptUnavailable: false, format: "jsonl", cursor: null }),
-    /absolute path/u,
-  );
-});
-
-test("refuses ambiguous campaign discovery", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-ambiguous-"));
-  const runsDir = join(directory, ".runs");
-  initializeCampaign(runsDir, { campaignId: "alpha", goal: "First" });
-  initializeCampaign(runsDir, { campaignId: "beta", goal: "Second" });
-  assert.throws(() => resolveCampaign(runsDir), /multiple campaigns found/u);
-  assert.equal(resolveCampaign(runsDir, "beta").campaign.id, "beta");
-});
-
-test("campaign CLI initializes, attaches, records via stdin, and shows the handoff", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-cli-"));
-  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
-  const init = spawnSync(process.execPath, [harness, "campaign", "init", "cli", "--cwd", directory, "--goal", "Ship CLI"], { encoding: "utf8" });
-  assert.equal(init.status, 0, init.stderr);
-  assert.match(init.stdout, /cli initialized/u);
-
-  const attach = spawnSync(process.execPath, [
-    harness, "campaign", "attach", "cli", "--cwd", directory,
-    "--tool", "codex", "--session-id", "codex-1", "--transcript", join(directory, "transcript.jsonl"),
-    "--format", "jsonl", "--cursor", "12",
-  ], { encoding: "utf8" });
-  assert.equal(attach.status, 0, attach.stderr);
-
-  const record = spawnSync(process.execPath, [
-    harness, "campaign", "note", "cli", "--cwd", directory,
-    "--session-id", "codex-1", "--kind", "decision", "--decision-id", "d1", "--text", "-",
-  ], { encoding: "utf8", input: "Use a bounded handoff" });
-  assert.equal(record.status, 0, record.stderr);
-
-  const show = spawnSync(process.execPath, [harness, "campaign", "show", "cli", "--cwd", directory], { encoding: "utf8" });
-  assert.equal(show.status, 0, show.stderr);
-  assert.match(show.stdout, /Use a bounded handoff/u);
-  assert.match(show.stdout, /codex codex-1/u);
-});
-
-test("campaign CLI refuses a malformed checkpoint", () => {
-  const directory = mkdtempSync(join(tmpdir(), "harness-campaign-cli-invalid-"));
-  const runsDir = join(directory, ".runs");
-  initializeCampaign(runsDir, { campaignId: "cli-invalid", goal: "Prove CLI validation" });
-  const harness = fileURLToPath(new URL("./harness.mjs", import.meta.url));
-  const result = spawnSync(process.execPath, [
-    harness, "campaign", "note", "cli-invalid", "--cwd", directory,
-    "--session-id", "codex-1", "--kind", "bogus", "--text", "bad",
-  ], { encoding: "utf8" });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--kind must be/u);
 });
