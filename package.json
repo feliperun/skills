@@ -1,0 +1,19 @@
+{
+  "name": "harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reusable skills for agent work with a small control-plane context.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "for f in skills/run-harness/scripts/*.mjs skills/run-harness/scripts/drivers/*.mjs skills/run-harness/test/*.mjs; do node --check \"$f\" || exit 1; done",
+    "typecheck": "tsc",
+    "test": "node --test skills/run-harness/scripts/harness.test.mjs skills/run-harness/test/*.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

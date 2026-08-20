@@ -17,10 +17,17 @@ Run a plan outside the main context while keeping the current session as the con
    transcript path and format, or explicit `--no-transcript`. Record every
    material user intent, decision, constraint, outcome, next action, and open
    question as a concise campaign event. This is mandatory handoff state, not
-   optional documentation.
+   optional documentation. `campaign list --cwd <repo>` finds the active
+   campaign; `campaign resolve <campaign> --cwd <repo> --session-id <id>
+   --question-id <id> --text <answer>` closes an open question once it is
+   answered. `campaign close <campaign> --cwd <repo>` marks the campaign
+   terminal after the objective ships; a closed campaign rejects further
+   attach/note/resolve writes but remains inspectable via `show` and `list`.
 3. Inspect the target repository exactly once, then turn the approved plan into one JSON contract. Author one closed task packet per node instead of leaving workers to discover the repository themselves. Workers do not own repository discovery; the orchestrator owns it once and amortizes that inspection across workers, judges, and retries. Use an explicit `mode: "discovery"` node only when you genuinely cannot produce an execution packet yet.
 4. Ensure the target repository ignores `.runs/`; add that single entry to its `.gitignore` if needed.
-5. Default to `maxParallel: 1`. Raise it only when concurrent nodes write to disjoint paths; worktree isolation is not implemented in v0.
+5. Run with `maxParallel: 1`. The harness rejects `maxParallel` above 1 until
+   worktree or equivalent filesystem isolation exists; prompt-only disjoint
+   paths are not sufficient.
 6. Preflight before spending model tokens. Give package-installing or networked nodes an explicit `sandbox`; do not rely on the caller's ambient permissions.
 
    ```bash
@@ -31,14 +38,27 @@ Run a plan outside the main context while keeping the current session as the con
    creates no run state. Probe the exact model each node will use: a valid
    credential does not imply the provider serves that model, and a provider can
    reject one model of a family while serving another.
+
+   Before spending model tokens, also run the mutation-free environment doctor
+   against the target repository:
+
+   ```bash
+   node <skill-dir>/scripts/harness.mjs doctor [<contract.json>] [--cwd <target-repo>]
+   ```
+
+   `doctor` checks that the target is a git work tree, that `.runs/` is
+   ignored, that `node`/`npm` are available, and — when a contract is given —
+   that every routed driver binary exists and its runtime probes cleanly. It
+   never writes run state. Exit code 0 means all checks passed; use `--json`
+   for a machine-readable report.
 7. Keep one independently testable checkpoint per node. Split research, implementation, and quality work at real gate boundaries; a phase-sized prompt can accumulate an expensive context before the first judge runs.
    Keep execution packets closed: list exact `readFiles`, `writeFiles`, and
    `verification` commands. Workers and judges must inspect only those paths and
-   must report `BLOCKED_CONTEXT: ...` instead of performing fresh repository
-   exploration. Repeated permission denials waste context and do not strengthen
-   the verdict. A discovery node with an empty `readFiles` list is the only
-   exception: it is read-only and may inspect the repository only to produce an
-   execution packet.
+   must return the structured `blocked_context` worker result instead of
+   performing fresh repository exploration. Repeated permission denials waste
+   context and do not strengthen the verdict. A discovery node with an empty
+   `readFiles` list is the only exception: it is read-only and may inspect the
+   repository only to produce an execution packet.
 8. Validate the contract:
 
    ```bash
@@ -78,6 +98,18 @@ Run a plan outside the main context while keeping the current session as the con
    ```bash
    node <skill-dir>/scripts/harness.mjs status <target-repo>/.runs/<run-id>
    ```
+
+   For streaming monitors, `status --json <run-dir>` emits a stable
+   `schemaVersion: 1` payload (node statuses, phase, runtime, attempt,
+   revisions, and note) and `report --json <run-dir>` adds per-node usage
+   totals. Prefer these over parsing the rendered table; `events.jsonl` is the
+   append-only transition stream.
+
+   To stop a run and terminate every recorded provider and verification
+   process, use `cancel <run-dir>`. It signals the controller, waits for
+   confirmation of its death, takes over a stale lease if needed, and marks the
+   run terminal. `cancel` cannot act on a lease held by the same process that
+   invokes it.
 
 12. When a run finishes (or at any point) and cost or effort matters, aggregate per-node attempts, revisions, runtimes, and tokens:
 
@@ -133,6 +165,11 @@ Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or a
 - Route bounded implementation work to Luna or Terra through Codex.
 - Route mechanical, tightly specified work to DeepSeek Flash through Codex.
 - Route independent review to Sol through Codex.
+- Route to `exec-jsonl` when the runtime is an existing executable that speaks
+  the generic JSONL protocol: one `run.request` line on stdin and
+  `run.started`/`message`/`run.completed`/`run.failed` events on stdout. Point
+  at it with `executable` (or `HARNESS_EXEC_JSONL_BIN`) and set `versionArgs`
+  when it does not accept `--version`.
 
 The Codex adapter passes custom provider configuration with `-c`. Never rely on a profile name to select DeepSeek: Codex 0.147.0 silently accepts unknown profiles and does not reliably load provider tables from config files.
 
@@ -142,11 +179,15 @@ Enable a gate per node. Keep executor and judge runtimes different when possible
 
 Set `maxRevisions` explicitly. A failing gate retries the worker in place with structured findings; reaching the cap produces `exhausted`. The cap counts gate rejections, not worker starts — attempts burned by resumed crashes do not consume a contracted revision.
 
-Put deterministic checks before an LLM judge. A judge must return `pass` only
-with no findings and `maxSeverity: none`; findings below `failOn` are advisory
-but still require a `fail` verdict in the structured report. The Codex adapter
-selects the last parseable JSON agent message for judge output so trailing
-prose cannot replace the verdict.
+Put deterministic checks before an LLM judge. The controller runs each
+declared argv command itself, captures bounded stdout/stderr, duration, and
+exit code, and repeats evidence-producing commands (default twice) before any
+judge. A controller interrupted mid-verification re-runs the phase on resume;
+only a real command failure or timeout is a deterministic failure. A judge must
+return `pass` only with no findings and `maxSeverity: none`; findings below
+`failOn` are advisory but still require a `fail` verdict in the structured
+report. The Codex adapter selects the last parseable JSON agent message for
+judge output so trailing prose cannot replace the verdict.
 
 Make deterministic checks safe under the test runner's actual concurrency.
 Concurrent checks must use unique temporary/output paths; otherwise serialize
@@ -172,19 +213,25 @@ bounded, self-contained retry is preferable to repeating upstream research.
 
 ## Safety
 
+- Requires Node.js 22 or newer on `PATH`; TypeScript is a development-only
+  dependency for `npm run typecheck`, never a runtime requirement.
 - Keep secrets in environment variables. Put only environment variable names in contracts.
-- During a live run, work only on disjoint paths and stage explicit paths.
-  The harness does not isolate its workers in git worktrees.
+- The harness does not isolate its workers in git worktrees, so concurrent
+  execution is rejected: `maxParallel` is fixed at 1. Run one worker at a time
+  and stage explicit paths.
 - Use Claude's `bypassPermissions` only in a repository-scoped, recoverable environment with no production write access. Otherwise keep `acceptEdits` and let denied operations become `blocked`.
 - Refuse to overwrite an existing run directory. Choose a new run id instead.
+- One controller lease per run directory and one watcher lease per watcher:
+  a second controller or watcher is rejected while a healthy lease is held, so
+  simultaneous `resume` calls cannot double-run a node.
 - Treat `STATUS.md` and node JSON as state; treat logs as diagnostic artifacts.
 - Stop and ask before destructive production, data, merge, deployment, or credential operations even if a worker proposes them.
 
 ## Limitations
 
-v0 does not isolate concurrent nodes in git worktrees, enforce token or
-log-size budgets, negotiate provider schema capabilities, represent a
-domain-level STOP as its own state, or send its own UI notifications. Resume
+v0 does not isolate concurrent nodes in git worktrees, negotiate provider
+schema capabilities, represent a domain-level STOP as its own state, or send
+its own UI notifications. Resume
 recovers a completed worker phase but never a partial one: a provider killed
 mid-turn is re-run from the start of the node. Stall detection is
 byte-activity based and
