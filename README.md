@@ -110,6 +110,14 @@ injects a fresh handoff automatically. See
 - [AGENTS.md](AGENTS.md) is the canonical guidance; the other agent files are
   symlinks to it — never edit them.
 
+## Inspiration
+
+The memory-layer split (session handoff / campaign handoff / standing memory)
+draws on [ai-memory](https://github.com/akitaonrails/ai-memory) by Akita on
+Rails. Most other patterns here — compile-not-retrieve summaries,
+start-of-session handoff injection, cross-harness workstreams — converged
+independently.
+
 ## License
 
 [MIT](LICENSE).

@@ -138,3 +138,10 @@ that should be rewritten or deleted, not read.
   matter when it starts.
 - One handoff per project. If several repos changed, summarize the others
   under "State".
+
+## References
+
+The memory-layer taxonomy and the single-use handoff semantics draw on
+[ai-memory](https://github.com/akitaonrails/ai-memory) by Akita on Rails.
+Other patterns — compile-not-retrieve summaries, injecting the handoff before
+the first prompt — developed independently here and match its design.
