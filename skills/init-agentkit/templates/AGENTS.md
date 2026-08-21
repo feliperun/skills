@@ -33,7 +33,7 @@ Write the minimum code that runs. No fluff, no gold-plating.
 ## Repository rules
 
 - **`AGENTS.md` is the single source of guidance.** `CLAUDE.md`, `GEMINI.md`,
-  `CURSOR.md`, `AGENT.md` and `.github/copilot-instructions.md` are symlinks to it.
+  `CURSOR.md` and `AGENT.md` are symlinks to it.
   Never edit a symlink; never let one drift into a real file.
 - **Never commit secrets.** Tokens, credentials, and service-account JSON stay in a
   secret manager or a gitignored `.env`. The `pre-commit` hook scans the staged diff;
@@ -102,5 +102,5 @@ file — keep appending.
 
 Adapted from [Marcos Hernanz](https://x.com/MarcosHernanz/status/2083954734487212511).
 Structural gate by [Sentrux](https://github.com/sentrux/sentrux).
-`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`, `AGENT.md` and `.github/copilot-instructions.md`
+`CLAUDE.md`, `GEMINI.md`, `CURSOR.md` and `AGENT.md`
 are symlinks to this file — edit `AGENTS.md` only.

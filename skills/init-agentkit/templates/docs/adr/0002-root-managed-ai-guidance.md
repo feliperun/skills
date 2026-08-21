@@ -8,7 +8,7 @@ date: {{DATE}}
 
 ## Context
 
-Multiple AI tools (Cursor, Claude Code, Gemini CLI, Copilot) each expect their own
+Multiple AI tools (Cursor, Claude Code, Gemini CLI) each expect their own
 instruction file at the repository root. Maintaining `CLAUDE.md`, `GEMINI.md`, and
 `CURSOR.md` as separate documents means every guardrail change has to land in each
 of them; in practice one gets updated and the rest drift, so different agents end
@@ -17,8 +17,8 @@ up working under different rules in the same repo.
 ## Decision
 
 **`AGENTS.md` at the repo root is the canonical AI + contributor guidance.
-Tool-specific files (`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`, `AGENT.md`,
-`.github/copilot-instructions.md`) are symlinks to `AGENTS.md`.** Update guidance in
+Tool-specific files (`CLAUDE.md`, `GEMINI.md`, `CURSOR.md`, `AGENT.md`)
+are symlinks to `AGENTS.md`.** Update guidance in
 one place only.
 
 ## Options considered

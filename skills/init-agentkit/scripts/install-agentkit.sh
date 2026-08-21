@@ -83,7 +83,7 @@ done < <(find "$TEMPLATES" -type f)
 
 # --- guidance symlinks → AGENTS.md --------------------------------------------
 say "\n② Guidance symlinks → AGENTS.md" "$B"
-for f in CLAUDE.md GEMINI.md CURSOR.md AGENT.md .github/copilot-instructions.md; do
+for f in CLAUDE.md GEMINI.md CURSOR.md AGENT.md; do
   link="$TARGET/$f"
   # relative target: one ../ per directory level below the repo root
   case "$f" in */*) dest="../AGENTS.md" ;; *) dest="AGENTS.md" ;; esac
