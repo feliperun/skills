@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["skills/plan-runner/scripts/**/*.mjs", "skills/plan-runner/test/**/*.mjs"]
+  "include": ["skills/mine/plan-runner/scripts/**/*.mjs", "skills/mine/plan-runner/test/**/*.mjs"]
 }
