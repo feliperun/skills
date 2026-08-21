@@ -229,7 +229,9 @@ test("verification timeout and cancellation terminate process groups", async () 
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-descendants-"));
   const pidPath = join(cwd, "child.pid");
   const script = "const {spawn}=require('node:child_process'); const fs=require('node:fs'); const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)']); fs.writeFileSync(process.argv[1],String(c.pid)); setInterval(()=>{},1000);";
-  const timed = await runVerification([{ argv: [process.execPath, "-e", script, pidPath], timeoutSec: 0.2 }], cwd);
+  // 2s leaves the child time to boot and write child.pid before the timeout
+  // kills it, even under full-suite load; the assertion only needs a timeout.
+  const timed = await runVerification([{ argv: [process.execPath, "-e", script, pidPath], timeoutSec: 2 }], cwd);
   assert.equal(timed.passed, false);
   assert.equal(timed.commands[0].attempts[0].timedOut, true);
   const childPid = Number(readFileSync(pidPath, "utf8"));
