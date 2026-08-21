@@ -32,6 +32,8 @@ Run a plan outside the main context while keeping the current session as the con
    the harness — sees that active work exists before its first prompt. Read
    the block, never edit it; it is rewritten by the runner.
 3. Inspect the target repository exactly once, then turn the approved plan into one JSON contract. Author one closed task packet per node instead of leaving workers to discover the repository themselves. Workers do not own repository discovery; the orchestrator owns it once and amortizes that inspection across workers, judges, and retries. Use an explicit `mode: "discovery"` node only when you genuinely cannot produce an execution packet yet.
+
+   One contract covers one whole approved plan step: every node of the step with its `dependsOn` edges, authored in a single turn. Never split a step into one contract per node or per function — each extra contract is another orchestrator turn spent dispatching instead of planning, and serial micro-contracts keep the expensive control session active for the entire physical runtime. The only legitimate single-node contract is a targeted fix node after gate exhaustion; `validate` warns on any other single-node contract.
 4. Ensure the target repository ignores `.runs/`; add that single entry to its `.gitignore` if needed.
 5. Run with `maxParallel: 1`. The runner rejects `maxParallel` above 1 until
    worktree or equivalent filesystem isolation exists; prompt-only disjoint
@@ -88,7 +90,7 @@ Run a plan outside the main context while keeping the current session as the con
    repository — copying a whole graph that re-runs finished work is a real
    mistake; generate follow-up contracts by pruning done nodes.
 
-   For unattended guarantees, arm the built-in supervisor alongside the run:
+   Arm the built-in supervisor alongside every detached run:
 
    ```bash
    node <skill-dir>/scripts/runner.mjs supervise --detach <run-dir> [--interval 30]
@@ -107,7 +109,11 @@ Run a plan outside the main context while keeping the current session as the con
    lease is held.
 
    Without `--detach`, the controller is a child of the invoking session and dies with it, stranding any running node as an orphan until a later `resume`. Use `resume --detach <run-dir>` to restart an interrupted run the same way.
-10. Report the run directory immediately. Do not read worker logs during normal orchestration.
+10. Report the run directory and end the turn. Do not read worker logs during normal orchestration.
+
+    Never wait for a run inside the session: no `while`/`sleep` status loops, no repeated `status` calls, no watched background processes. Every tool call re-sends the whole session context, so a polling loop pays the orchestrator's full context price on every tick — one such loop kept a control session burning its entire usage period while the deterministic runner watched the same run for free. Waiting is the controller's and the supervisor's job; both are plain Node processes that cost nothing to keep alive.
+
+    Under a harness that re-invokes the session continuously (a `/goal`, an autonomous loop, a scheduler), check status at most once per invocation: run active and healthy → report one line and end the turn; terminal states → act on them (findings, fix node, or report); never sleep inside a turn.
 11. When the user asks for status, including through `/btw`, render and read the snapshot:
 
    ```bash
@@ -146,6 +152,12 @@ Run a plan outside the main context while keeping the current session as the con
    ```bash
    node <skill-dir>/scripts/runner.mjs findings <target-repo>/.runs/<run-id>
    ```
+
+   When a run finishes with any non-done node, the controller also writes a
+   consolidated `findings.json` into the run directory: per-node status, error
+   code, gate findings, `blockedBy`, and `missingContext` — the single file a
+   triage session reads (a few thousand tokens) instead of loading run state.
+   A resume that later drives the run fully done removes the artifact.
 
    After two gate rejections or any gate exhaustion, do not keep retrying and
    do not copy the whole graph. Create one follow-up fix node with the finding

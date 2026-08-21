@@ -269,9 +269,16 @@ logs/<id>.<attempt>.<worker|judge>[.r<n>].jsonl
 logs/<id>.<attempt>.<worker|judge>[.r<n>].err
 events.jsonl
 STATUS.md
+findings.json
 ```
 
 Use `STATUS.md` for normal status queries. Read logs only to diagnose an actionable failure. A provider or judge failure preserves the latest worker report in node state so completed work remains inspectable.
+
+When a run finishes with any non-done node, the controller writes
+`findings.json`: a consolidated snapshot with per-node status, error,
+gate findings, `blockedBy`, and `missingContext` — the single file a triage
+session reads instead of loading run state. Nodes remain the source of truth;
+a resume that later drives the run fully done removes the artifact.
 
 The stored `contract.json` inlines every task packet and drops generated
 prompts and `taskPacketFile`, so a run directory is a complete resumable
@@ -284,7 +291,7 @@ orphans instead of reporting them as `running`. A run directory written before
 process tracking has no `run.json`; liveness is then unknown and no claim is
 made.
 
-## Detached launch
+## Detached launch and waiting discipline
 
 `run --detach <contract.json>` and `resume --detach <run-dir>` fork the
 controller into its own process group, print `pid` and run directory, and exit
@@ -293,6 +300,21 @@ no longer strands a running node as an orphan; the run directory remains the
 single source of state and `status`/`resume` work against it the same as ever.
 Without `--detach` the controller is a child of the invoking session and dies
 with it.
+
+The orchestrator session never waits. No `while`/`sleep` status loops, no
+repeated `status` calls, no watched background processes: every tool call
+re-sends the whole session context, so a polling loop pays the orchestrator's
+full context price on every tick while the controller and supervisor — plain
+Node processes — do the same watching for free. Report the run directory, arm
+the supervisor, and end the turn. Under a harness that re-invokes the session
+continuously (a goal, an autonomous loop, a scheduler), check status at most
+once per invocation and act only on terminal states.
+
+One contract covers one whole approved plan step as a batched multi-node DAG
+(`dependsOn`), authored in a single turn. Serial single-node contracts keep the
+control session active for the entire physical runtime; `validate` warns on a
+single-node contract because the only legitimate case is a targeted fix node
+after gate exhaustion.
 
 ## Resume
 
