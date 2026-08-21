@@ -1364,9 +1364,9 @@ test("run warns when a node id is already done in another run", async () => {
   assert.match(result.stdout, /\[warn\] node build is already done in run first-run/u);
 });
 
-test("watch resumes a run whose controller died", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-watch-"));
-  const path = writeContract(directory, fixture({ id: "watch-run", pollIntervalMs: 10 }));
+test("supervise resumes a run whose controller died", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-supervise-"));
+  const path = writeContract(directory, fixture({ id: "supervise-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
   // Simulate a controller that died mid-work: the node claims running but the
   // recorded pid is gone.
@@ -1374,18 +1374,18 @@ test("watch resumes a run whose controller died", async () => {
   const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...metadata, pid: 2_147_483_647 }));
 
-  // The watcher's resumed controller inherits the watcher's environment, so
-  // the fake provider must stay installed for the whole watch lifetime.
+  // The supervisor's resumed controller inherits the supervisor's environment, so
+  // the fake provider must stay installed for the whole supervise lifetime.
   const previous = process.env.PLAN_RUNNER_CODEX_BIN;
   process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "pass");
-  const watcher = spawn(
+  const supervisor = spawn(
     process.execPath,
-    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "watch", runDir, "--interval", "0.05"],
+    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   try {
     let stdout = "";
-    watcher.stdout.on("data", (chunk) => { stdout += chunk; });
+    supervisor.stdout.on("data", (chunk) => { stdout += chunk; });
     const finished = await waitForValue(
       () => (stdout.includes("resumed") && stdout.includes("finished") ? "done" : null),
       20_000,
@@ -1395,7 +1395,7 @@ test("watch resumes a run whose controller died", async () => {
   } finally {
     if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
     else process.env.PLAN_RUNNER_CODEX_BIN = previous;
-    watcher.kill("SIGTERM");
+    supervisor.kill("SIGTERM");
   }
 });
 

@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
 export const LEASE_FILE = "controller-lease.json";
-export const WATCHER_LEASE_FILE = "watcher-lease.json";
+export const SUPERVISOR_LEASE_FILE = "supervisor-lease.json";
 export const BOOTSTRAP_FILE = "bootstrap.json";
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 const LEASE_LOCK_TTL_MS = 5_000;
@@ -172,8 +172,8 @@ export function leasePath(runDir) {
  * @param {string} runDir
  * @returns {string}
  */
-export function watcherLeasePath(runDir) {
-  return join(runDir, WATCHER_LEASE_FILE);
+export function supervisorLeasePath(runDir) {
+  return join(runDir, SUPERVISOR_LEASE_FILE);
 }
 
 /**
@@ -243,8 +243,8 @@ export function readLease(runDir) {
  * @param {string} runDir
  * @returns {ReadLeaseResult}
  */
-export function readWatcherLease(runDir) {
-  return readLeaseFile(watcherLeasePath(runDir));
+export function readSupervisorLease(runDir) {
+  return readLeaseFile(supervisorLeasePath(runDir));
 }
 
 /**
@@ -298,8 +298,8 @@ export function acquireControllerLease(runDir, options = {}) {
  * @param {LeaseOptions} options
  * @returns {ReturnType<typeof createLeaseHandle>}
  */
-export function acquireWatcherLease(runDir, options = {}) {
-  return acquireLease(runDir, { ...options, fileName: WATCHER_LEASE_FILE });
+export function acquireSupervisorLease(runDir, options = {}) {
+  return acquireLease(runDir, { ...options, fileName: SUPERVISOR_LEASE_FILE });
 }
 
 /**

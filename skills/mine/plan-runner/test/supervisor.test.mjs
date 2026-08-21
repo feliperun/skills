@@ -7,10 +7,10 @@ import { join } from "node:path";
 import {
   appendJsonl,
   acquireControllerLease,
-  acquireWatcherLease,
+  acquireSupervisorLease,
   LeaseBusyError,
   readJson,
-  readWatcherLease,
+  readSupervisorLease,
   writeJsonAtomic,
 } from "../scripts/store.mjs";
 import { PLAN_RUNNER_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
@@ -111,17 +111,17 @@ test("lease heartbeat expiry is authoritative even when the old PID is still ali
   second.release();
 });
 
-test("watcher lease takeover reclaims stale ownership without a permanent lock", () => {
-  const runDir = mkdtempSync(join(tmpdir(), "runner-watcher-lease-"));
-  const first = acquireWatcherLease(runDir, { contractVersion: "0.1.0", ttlMs: 50, now: 1_000 });
-  const second = acquireWatcherLease(runDir, { contractVersion: "0.1.0", ttlMs: 50, now: 1_100 });
+test("supervisor lease takeover reclaims stale ownership without a permanent lock", () => {
+  const runDir = mkdtempSync(join(tmpdir(), "runner-supervisor-lease-"));
+  const first = acquireSupervisorLease(runDir, { contractVersion: "0.1.0", ttlMs: 50, now: 1_000 });
+  const second = acquireSupervisorLease(runDir, { contractVersion: "0.1.0", ttlMs: 50, now: 1_100 });
   assert.equal(second.generation, first.generation + 1);
   first.release();
-  const current = readWatcherLease(runDir);
+  const current = readSupervisorLease(runDir);
   assert.ok(current && !("invalid" in current));
   assert.equal(current.holderId, second.holderId);
   second.release();
-  assert.equal(readWatcherLease(runDir), null);
+  assert.equal(readSupervisorLease(runDir), null);
 });
 
 test("atomic JSON and JSONL recovery never leaves a partial authoritative record", () => {

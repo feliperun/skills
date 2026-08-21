@@ -42,7 +42,7 @@ import {
 import {
   appendJsonl,
   acquireControllerLease,
-  acquireWatcherLease,
+  acquireSupervisorLease,
   bootstrapAckPath,
   bootstrapAttemptPath,
   bootstrapPath,
@@ -51,7 +51,7 @@ import {
   leaseHealthy,
   readJson,
   readLease,
-  readWatcherLease,
+  readSupervisorLease,
   writeJsonAtomic,
   writeTextAtomic,
 } from "./store.mjs";
@@ -1797,11 +1797,11 @@ function reusedDoneWarnings(contract) {
  * @param {number} intervalSec
  * @returns {Promise<void>}
  */
-export async function watchRun(runDir, intervalSec) {
+export async function superviseRun(runDir, intervalSec) {
   if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
-  const watcherLease = acquireWatcherLease(runDir, {
+  const supervisorLease = acquireSupervisorLease(runDir, {
     contractVersion: PLAN_RUNNER_VERSION,
     processStartToken: processStartToken(process.pid),
   });
@@ -1815,8 +1815,8 @@ export async function watchRun(runDir, intervalSec) {
       pid: process.pid,
       processStartToken: processStartToken(process.pid),
       runDir,
-      holderId: watcherLease.holderId,
-      generation: watcherLease.generation,
+      holderId: supervisorLease.holderId,
+      generation: supervisorLease.generation,
       at: new Date().toISOString(),
     });
     writeJsonAtomic(bootstrapAttemptPath(runDir, bootstrapNonce), readJson(bootstrapPath(runDir)));
@@ -1825,16 +1825,16 @@ export async function watchRun(runDir, intervalSec) {
         nonce: bootstrapNonce,
         pid: process.pid,
         processStartToken: processStartToken(process.pid),
-        holderId: watcherLease.holderId,
-        generation: watcherLease.generation,
+        holderId: supervisorLease.holderId,
+        generation: supervisorLease.generation,
       });
-    watcherLease.assert();
-    watcherLease.startHeartbeat();
+    supervisorLease.assert();
+    supervisorLease.startHeartbeat();
     for (;;) {
-      watcherLease.assert();
+      supervisorLease.assert();
       const nodes = readRunNodes(runDir, contract);
       if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
-        process.stdout.write(`[watch] ${basename(runDir)} finished · ${nodes.filter((node) => node.status === "done").length}/${nodes.length} done\n`);
+        process.stdout.write(`[supervise] ${basename(runDir)} finished · ${nodes.filter((node) => node.status === "done").length}/${nodes.length} done\n`);
         return;
       }
       const lease = readLease(runDir);
@@ -1842,14 +1842,14 @@ export async function watchRun(runDir, intervalSec) {
         const child = detachSelf("resume", runDir);
         const pid = child.pid;
         if (pid === undefined) throw new Error("detached child has no pid");
-        process.stdout.write(`[watch] controller lease expired · resumed · pid ${pid}\n`);
+        process.stdout.write(`[supervise] controller lease expired · resumed · pid ${pid}\n`);
         await waitForBootstrap(runDir, pid, child);
       }
       await delay(intervalSec * 1_000);
     }
   } finally {
-    watcherLease.stopHeartbeat();
-    watcherLease.release();
+    supervisorLease.stopHeartbeat();
+    supervisorLease.release();
   }
 }
 
@@ -1876,7 +1876,7 @@ function detachSelf(command, target, extraArgs = []) {
  * @param {string} runDir
  * @param {number} pid
  * @param {DetachedChild|null} [child]
- * @param {"controller"|"watcher"} [leaseKind]
+ * @param {"controller"|"supervisor"} [leaseKind]
  * @param {number} [timeoutMs]
  * @returns {Promise<BootstrapRecord>}
  */
@@ -1899,7 +1899,7 @@ async function waitForBootstrap(runDir, pid, child = null, leaseKind = "controll
           cleanupBootstrapAttempts(runDir);
           throw new Error(`detached bootstrap failed: ${bootstrap.error}`);
         }
-        const lease = leaseKind === "watcher" ? readWatcherLease(runDir) : readLease(runDir);
+        const lease = leaseKind === "supervisor" ? readSupervisorLease(runDir) : readLease(runDir);
         const currentOwner = lease !== null && !lease.invalid && leaseHealthy(lease)
           && lease.pid === pid
           && sameProcessStartToken(lease.processStartToken, expectedProcessStartToken)
@@ -2076,7 +2076,7 @@ function bootstrapRunDir(command, target) {
       const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
       return join(contract.cwd, ".runs", contract.id);
     }
-    if (["resume", "watch", "cancel"].includes(command)) {
+    if (["resume", "supervise", "cancel"].includes(command)) {
       if (!target) return null;
       return resolve(target);
     }
@@ -2102,10 +2102,10 @@ function writeBootstrapFailure(command, target, error) {
   try {
     current = /** @type {BootstrapRecord} */ (readJson(bootstrapPath(runDir)));
     const controllerLease = readLease(runDir);
-    const watcherLease = readWatcherLease(runDir);
+    const supervisorLease = readSupervisorLease(runDir);
     const currentOwnerActive = current.status === "ready" && current.pid !== process.pid && (
       leaseOwnedBy(controllerLease, current.pid, current.processStartToken) ||
-      leaseOwnedBy(watcherLease, current.pid, current.processStartToken)
+      leaseOwnedBy(supervisorLease, current.pid, current.processStartToken)
     );
     if (currentOwnerActive) return;
   } catch (readError) {
@@ -2160,7 +2160,7 @@ export { detectStalls, runProcessAlive, startProcess };
 const COMMAND_OPTIONS = {
   run: { detach: { type: "boolean" } },
   resume: { detach: { type: "boolean" } },
-  watch: { detach: { type: "boolean" }, interval: { type: "string" } },
+  supervise: { detach: { type: "boolean" }, interval: { type: "string" } },
   cancel: {},
   preflight: {},
   validate: {},
@@ -2250,18 +2250,18 @@ async function main(argv) {
     if (!result.ok) process.exitCode = 1;
     return;
   }
-  if (command === "watch") {
+  if (command === "supervise") {
     const intervalSec = typeof values.interval === "string" ? positiveInterval(values.interval) : 30;
     const runDir = resolve(target);
     if (values.detach === true) {
-      const child = detachSelf("watch", runDir, ["--interval", String(intervalSec)]);
+      const child = detachSelf("supervise", runDir, ["--interval", String(intervalSec)]);
       const pid = child.pid;
       if (pid === undefined) throw new Error("detached child has no pid");
-      await waitForBootstrap(runDir, pid, child, "watcher");
-      process.stdout.write(`[watch] detached · pid ${pid} · ${runDir}\n`);
+      await waitForBootstrap(runDir, pid, child, "supervisor");
+      process.stdout.write(`[supervise] detached · pid ${pid} · ${runDir}\n`);
       return;
     }
-    await watchRun(runDir, intervalSec);
+    await superviseRun(runDir, intervalSec);
     return;
   }
   if (command === "cancel") { await cancelRun(target); return; }
@@ -2448,7 +2448,7 @@ function findExecutable(name) {
 function usage() {
   process.stderr.write(
     "usage: runner.mjs <run|validate|preflight> <contract.json> [--detach] | " +
-    "<resume|watch|cancel> <run-dir> [--detach] [--interval <sec>] | " +
+    "<resume|supervise|cancel> <run-dir> [--detach] [--interval <sec>] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "doctor [<contract.json>] [--cwd <dir>] [--json] | campaign <init|attach|note|resolve|close|show|list> ...\n",
   );

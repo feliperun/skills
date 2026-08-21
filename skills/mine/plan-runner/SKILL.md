@@ -80,16 +80,23 @@ Run a plan outside the main context while keeping the current session as the con
    repository — copying a whole graph that re-runs finished work is a real
    mistake; generate follow-up contracts by pruning done nodes.
 
-   For unattended guarantees, arm the watchdog alongside the run:
+   For unattended guarantees, arm the built-in supervisor alongside the run:
 
    ```bash
-   node <skill-dir>/scripts/runner.mjs watch --detach <run-dir> [--interval 30]
+   node <skill-dir>/scripts/runner.mjs supervise --detach <run-dir> [--interval 30]
    ```
 
-   The watcher polls the run directory and, whenever the controller process is
-   gone while the run is not terminal, spawns `resume --detach` itself. It
-   exits when every node is terminal. One watcher per run; a short lock
-   prevents two watchers from double-resuming.
+   The supervisor polls the run directory and, whenever the controller process
+   is gone while the run is not terminal, spawns `resume --detach` itself. It
+   exits 0 when every node is terminal. One supervisor per run; a short lease
+   prevents two supervisors from double-resuming.
+
+   `supervise` is a plain Node process with no dependency on the orchestrator
+   or any agent runtime. Schedule it under whatever host scheduler survives
+   this session — launchd, cron, a CI job, or another agent — and it keeps
+   resuming the run until completion. It is idempotent, so a scheduler may
+   re-invoke it freely: a second invocation exits while a healthy supervisor
+   lease is held.
 
    Without `--detach`, the controller is a child of the invoking session and dies with it, stranding any running node as an orphan until a later `resume`. Use `resume --detach <run-dir>` to restart an interrupted run the same way.
 10. Report the run directory immediately. Do not read worker logs during normal orchestration.
@@ -221,9 +228,9 @@ bounded, self-contained retry is preferable to repeating upstream research.
   and stage explicit paths.
 - Use Claude's `bypassPermissions` only in a repository-scoped, recoverable environment with no production write access. Otherwise keep `acceptEdits` and let denied operations become `blocked`.
 - Refuse to overwrite an existing run directory. Choose a new run id instead.
-- One controller lease per run directory and one watcher lease per watcher:
-  a second controller or watcher is rejected while a healthy lease is held, so
-  simultaneous `resume` calls cannot double-run a node.
+- One controller lease per run directory and one supervisor lease per
+  supervisor: a second controller or supervisor is rejected while a healthy
+  lease is held, so simultaneous `resume` calls cannot double-run a node.
 - Treat `STATUS.md` and node JSON as state; treat logs as diagnostic artifacts.
 - Stop and ask before destructive production, data, merge, deployment, or credential operations even if a worker proposes them.
 

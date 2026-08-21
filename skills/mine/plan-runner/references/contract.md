@@ -316,10 +316,10 @@ without a gate is never silently re-gated by a resume.
 
 ## Leases
 
-The run directory holds `controller-lease.json` (and `watcher-lease.json` for
-the watchdog). A lease records holder id, pid, process start token, and an
-expiry; the controller renews it on a short TTL while it works. A second
-controller or watcher is rejected while a healthy lease is held, so
+The run directory holds `controller-lease.json` (and `supervisor-lease.json`
+for the supervisor). A lease records holder id, pid, process start token, and
+an expiry; the controller renews it on a short TTL while it works. A second
+controller or supervisor is rejected while a healthy lease is held, so
 simultaneous `resume` calls cannot double-run a node. `STATUS.md` treats a
 `running` node as an orphan when the lease is missing, expired, or invalid —
 the process is gone, so the node is not live work. `cancel` takes over a stale
