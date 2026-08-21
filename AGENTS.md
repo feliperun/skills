@@ -48,6 +48,11 @@ events before delegating. Give every execution worker a closed task packet with
 exact read files, write files, decisions, non-goals, and verification commands.
 Only an explicit read-only discovery node may explore beyond a supplied packet.
 
+**Continuity beats restart.** Before starting new work, check `.runs/` and the
+managed signal block at the bottom of this file: an active campaign or a
+non-terminal run is work to continue — read its `HANDOFF.md`/`STATUS.md`,
+re-attach the session, and `resume` or `supervise` — not to redo.
+
 ## Production note
 
 Rule 1 is written for side projects. Against a live system it can lead an agent to

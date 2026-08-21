@@ -35,6 +35,10 @@ Write the minimum code that runs. No fluff, no gold-plating.
 - **`AGENTS.md` is the single source of guidance.** `CLAUDE.md`, `GEMINI.md`,
   `CURSOR.md` and `AGENT.md` are symlinks to it.
   Never edit a symlink; never let one drift into a real file.
+- **Continuity beats restart.** Before starting new work, check `.runs/` and the
+  managed signal block at the bottom of this file: an active campaign or a
+  non-terminal run is work to continue — read its `HANDOFF.md`/`STATUS.md`,
+  re-attach the session, and `resume` or `supervise` — not to redo.
 - **Never commit secrets.** Tokens, credentials, and service-account JSON stay in a
   secret manager or a gitignored `.env`. The `pre-commit` hook scans the staged diff;
   do not work around it.
