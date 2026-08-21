@@ -90,6 +90,16 @@ Sentrux structural quality gate, a `create-adr` slash command, and githooks.
 Always ask which compatibility rule applies before running it — see
 [SKILL.md](skills/mine/init-agentkit/SKILL.md).
 
+### session-memory
+
+Keeps long sessions cheap across usage-limit resets: save a curated handoff to
+`.claude/session-handoff.md` while the session is warm (input cached, so the
+save costs little), then continue in a fresh session that reads only the
+handoff — instead of re-reading the whole conversation without cache. This
+repository wires the [SessionStart hook](.claude/hooks/session-start.mjs) that
+injects a fresh handoff automatically. See
+[SKILL.md](skills/mine/session-memory/SKILL.md).
+
 ## Development
 
 - Node.js 22 or newer; the runtime is plain ESM `.mjs` with no runtime

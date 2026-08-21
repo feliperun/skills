@@ -6,3 +6,5 @@ node_modules/
 *.log
 .claude/settings.local.json
 .runs/
+
+.claude/session-handoff.md

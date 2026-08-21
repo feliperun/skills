@@ -30,12 +30,13 @@ test("installs the mine bucket into .claude/skills by default", () => {
   const cwd = mkdtempSync(join(tmpdir(), "skills-install-"));
   const result = run([], cwd);
   assert.equal(result.status, 0, result.stderr);
-  for (const name of ["plan-runner", "init-agentkit"]) {
+  for (const name of ["plan-runner", "init-agentkit", "session-memory"]) {
     assert.ok(existsSync(join(cwd, ".claude", "skills", name, "SKILL.md")), `${name} missing`);
   }
   assert.match(result.stdout, /installed plan-runner/);
   assert.match(result.stdout, /installed init-agentkit/);
-  assert.match(result.stdout, /2 installed, 0 skipped/);
+  assert.match(result.stdout, /installed session-memory/);
+  assert.match(result.stdout, /3 installed, 0 skipped/);
 });
 
 test("installs only named skills", () => {
