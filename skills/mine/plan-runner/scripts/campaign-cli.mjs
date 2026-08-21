@@ -10,6 +10,7 @@ import {
   renderHandoff,
   resolveCampaign,
 } from "./campaign.mjs";
+import { syncAgentSignal } from "./signal.mjs";
 
 const NOTE_KINDS = new Set([
   "intent",
@@ -103,6 +104,7 @@ function init(campaignId, values) {
   const created = initializeCampaign(runsDir, { campaignId, goal });
   renderHandoff(created.path, runsDir);
   process.stdout.write(`[campaign] ${campaignId} initialized · ${created.path}\n`);
+  if (syncAgentSignal(runsDir)) process.stdout.write(`[campaign] AGENTS.md signal updated\n`);
 }
 
 /**
@@ -200,6 +202,7 @@ function close(campaignId, values) {
   const closed = closeCampaign(path, { eventId: values.eventId ?? randomUUID() });
   renderHandoff(path, runsDir);
   process.stdout.write(`[campaign] ${closed.campaign.id} closed\n`);
+  if (syncAgentSignal(runsDir)) process.stdout.write(`[campaign] AGENTS.md signal updated\n`);
 }
 
 /**

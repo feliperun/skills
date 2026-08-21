@@ -23,6 +23,14 @@ Run a plan outside the main context while keeping the current session as the con
    answered. `campaign close <campaign> --cwd <repo>` marks the campaign
    terminal after the objective ships; a closed campaign rejects further
    attach/note/resolve writes but remains inspectable via `show` and `list`.
+
+   The session-level layer (the `session-memory` skill) is the cheap,
+   disposable complement: flush material session events into the campaign
+   while the orchestrator context is warm, and re-attach on resume. The
+   campaign also mirrors its active state into a managed block at the bottom
+   of the target repo's `AGENTS.md`, so any agent that takes over — whatever
+   the harness — sees that active work exists before its first prompt. Read
+   the block, never edit it; it is rewritten by the runner.
 3. Inspect the target repository exactly once, then turn the approved plan into one JSON contract. Author one closed task packet per node instead of leaving workers to discover the repository themselves. Workers do not own repository discovery; the orchestrator owns it once and amortizes that inspection across workers, judges, and retries. Use an explicit `mode: "discovery"` node only when you genuinely cannot produce an execution packet yet.
 4. Ensure the target repository ignores `.runs/`; add that single entry to its `.gitignore` if needed.
 5. Run with `maxParallel: 1`. The runner rejects `maxParallel` above 1 until

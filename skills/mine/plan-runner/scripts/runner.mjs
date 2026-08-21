@@ -16,6 +16,7 @@ import {
 import { basename, delimiter, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
+import { syncAgentSignal } from "./signal.mjs";
 import {
   JUDGE_SCHEMA,
   TERMINAL,
@@ -217,7 +218,10 @@ export async function runContract(contractPath) {
       states.set(node.id, state);
       writeNode(runDir, state, lease);
     }
-    return await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    syncAgentSignal(runsDir);
+    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    syncAgentSignal(runsDir);
+    return outcome;
   } catch (error) {
     lease.release();
     throw error;
@@ -382,7 +386,9 @@ export async function resumeRun(runDirPath) {
       }
       transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] }, lease);
     }
-    return await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    syncAgentSignal(runsDir);
+    return outcome;
   } catch (error) {
     lease.release();
     throw error;
@@ -1646,6 +1652,7 @@ export async function cancelRun(runDirPath) {
       throw error;
     }
     if (!await waitForTerminal(runDir, 1_000)) throw new Error("cancel could not confirm a terminal run state");
+    syncAgentSignal(join(runDir, ".."));
     return true;
   } finally {
     controllerLease.release();
