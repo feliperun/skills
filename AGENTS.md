@@ -40,9 +40,9 @@ Write the minimum code that runs. No fluff, no gold-plating.
 - **Shell scripts** run under `set -euo pipefail` and are idempotent — re-running
   completes what is missing instead of duplicating or destroying.
 
-## Harness protocol
+## Plan Runner protocol
 
-When using `run-harness`, the orchestrator owns repository discovery. Read the
+When using `plan-runner`, the orchestrator owns repository discovery. Read the
 campaign `HANDOFF.md`, attach the current session, and record concise material
 events before delegating. Give every execution worker a closed task packet with
 exact read files, write files, decisions, non-goals, and verification commands.

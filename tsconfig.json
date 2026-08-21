@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["skills/run-harness/scripts/**/*.mjs", "skills/run-harness/test/**/*.mjs"]
+  "include": ["skills/plan-runner/scripts/**/*.mjs", "skills/plan-runner/test/**/*.mjs"]
 }

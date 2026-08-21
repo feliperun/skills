@@ -1,0 +1,9 @@
+{
+  "_comment": "PLACEHOLDER — replace by running `sentrux gate --save .` at the repo root with the Sentrux CLI installed (see docs/sentrux.md). Commit the real baseline.",
+  "_generated_by": "init-agentkit placeholder",
+  "quality_signal": null,
+  "coupling_score": null,
+  "cycle_count": 0,
+  "god_file_count": 0,
+  "complex_fn_count": 0
+}

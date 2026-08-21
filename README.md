@@ -10,7 +10,7 @@ state, and independent review.
 - Long runs without reliable status, budgets, recovery, or gate history.
 - Workers and judges sharing a model and therefore repeating the same bias.
 
-`run-harness` keeps the orchestrator as the control plane: it explores the
+`plan-runner` keeps the orchestrator as the control plane: it explores the
 repository once, records that discovery in closed task packets, and delegates
 only the context each node needs. State, logs, and status live in the target
 repository under `.runs/`, never in the main conversation.
@@ -27,7 +27,7 @@ In the repository that will receive the implementation, ignore `.runs/` and
 choose a campaign ID for the objective, not for an individual session.
 
 ```bash
-HARNESS=/path/to/harness/skills/run-harness/scripts/harness.mjs
+PLAN_RUNNER=/path/to/harness/skills/plan-runner/scripts/runner.mjs
 TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"
@@ -54,7 +54,7 @@ it references. An execution packet has an explicit scope:
 ```
 
 The contract defines the campaign, runtimes, graph, and Definition of Done. Its
-complete reference is in [contract.md](skills/run-harness/references/contract.md).
+complete reference is in [contract.md](skills/plan-runner/references/contract.md).
 Validate routing and run preflight before spending tokens:
 
 ```bash
@@ -178,9 +178,9 @@ to confirm that the credential serves the selected model.
 
 ## Other skills
 
-`init-harness` bootstraps repository governance: canonical `AGENTS.md`, symlinks
+`init-agentkit` bootstraps repository governance: canonical `AGENTS.md`, symlinks
 for other harnesses, initial documentation, ADRs, Sentrux, CI, and hooks. Read
-[SKILL.md](skills/init-harness/SKILL.md) before using it.
+[SKILL.md](skills/init-agentkit/SKILL.md) before using it.
 
 ## Repository conventions
 
