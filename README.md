@@ -1,192 +1,104 @@
-# harness
+# skills
 
-Reusable skills for agent work with a small control-plane context, recoverable
-state, and independent review.
+Personal catalog of reusable agent skills, organized by provenance and
+installable into any repository with a single command.
 
-## Problems it solves
+## Layout
 
-- Subagents repeatedly spending context rediscovering the same repository.
-- A session crashing, changing harnesses, or running out of credits and losing decisions.
-- Long runs without reliable status, budgets, recovery, or gate history.
-- Workers and judges sharing a model and therefore repeating the same bias.
+| Bucket | Meaning |
+|--------|---------|
+| [`skills/mine/`](skills/mine/) | Skills authored from scratch in this repository. ⭐ |
+| [`skills/curated/`](skills/curated/) | Community skills adapted to a personal workflow. 💎 |
+| [`skills/community/`](skills/community/) | Skills copied verbatim from the community. |
 
-`plan-runner` keeps the orchestrator as the control plane: it explores the
-repository once, records that discovery in closed task packets, and delegates
-only the context each node needs. State, logs, and status live in the target
-repository under `.runs/`, never in the main conversation.
+Each skill is one folder with a `SKILL.md`; scripts, references, and templates
+live inside the skill so it stays a single copyable unit.
 
-```text
-orchestrator ──> campaign / HANDOFF.md ──> DAG contract + task packets
-                                                │
-                              workers ──> independent gate ──> .runs/<id>/STATUS.md
-```
-
-## Quickstart
-
-In the repository that will receive the implementation, ignore `.runs/` and
-choose a campaign ID for the objective, not for an individual session.
+## Install
 
 ```bash
-PLAN_RUNNER=/path/to/harness/skills/plan-runner/scripts/runner.mjs
+npx github:feliperun/skills             # every `mine` skill → .claude/skills/ of the current repo
+npx github:feliperun/skills plan-runner # one named skill
+npx github:feliperun/skills list        # show the catalog
+npx github:feliperun/skills --global    # install into ~/.claude/skills/ instead
+npx github:feliperun/skills --force     # replace skills that already exist
+```
+
+`npx` needs the repository to be reachable (public, or private with git
+credentials). Without npx, copy or symlink a skill folder into
+`~/.claude/skills/` or `.claude/skills/`:
+
+```bash
+cp -r skills/mine/plan-runner ~/.claude/skills/plan-runner
+ln -s "$(pwd)/skills/mine/init-agentkit" ~/.claude/skills/init-agentkit
+```
+
+## Skills
+
+### plan-runner
+
+Executes large implementation plans as observable multi-model DAGs outside the
+orchestrator's context: declarative routing (Claude or Codex workers, including
+DeepSeek through Codex custom providers), closed task packets, structured
+cross-model quality gates, bounded revisions, campaign journaling with
+`HANDOFF.md`, and a built-in `supervise` watchdog that keeps resuming a dead
+controller until the run is terminal — from any host scheduler (launchd, cron,
+CI, or another agent), with no dependency on the orchestrator's runtime.
+
+Quickstart, in the repository that will receive the implementation:
+
+```bash
+PLAN_RUNNER=/path/to/skills/skills/mine/plan-runner/scripts/runner.mjs
 TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"
-node "$HARNESS" campaign init feature-42 --cwd "$TARGET" --goal "Deliver feature 42"
-node "$HARNESS" campaign attach feature-42 --cwd "$TARGET" \
-  --tool codex --session-id <session-id> --no-transcript
+node "$PLAN_RUNNER" campaign init feature-42 --cwd "$TARGET" --goal "Deliver feature 42"
+node "$PLAN_RUNNER" campaign attach feature-42 --cwd "$TARGET" --tool codex --session-id <session-id> --no-transcript
 ```
 
-Inspect the target once. Then create `.harness/feature-42.json` and the packets
-it references. An execution packet has an explicit scope:
-
-```json
-{
-  "mode": "execution",
-  "objective": "Add idempotency validation",
-  "instructions": ["Implement only the described behavior"],
-  "readFiles": ["docs/SPEC.md", "src/idempotency.ts"],
-  "writeFiles": ["src/idempotency.ts", "test/idempotency.test.ts"],
-  "symbols": ["validateIdempotency"],
-  "decisions": ["Do not change the public API"],
-  "nonGoals": ["Commit, deploy, or additional discovery"],
-  "verification": [{ "argv": ["node", "--test", "test/idempotency.test.ts"] }]
-}
-```
-
-The contract defines the campaign, runtimes, graph, and Definition of Done. Its
-complete reference is in [contract.md](skills/plan-runner/references/contract.md).
-Validate routing and run preflight before spending tokens:
+Inspect the target once, write the contract and its task packets, then:
 
 ```bash
-node "$HARNESS" validate "$TARGET/.harness/feature-42.json"
-node "$HARNESS" preflight "$TARGET/.harness/feature-42.json"
-node "$HARNESS" run --detach "$TARGET/.harness/feature-42.json"
+node "$PLAN_RUNNER" validate contract.json
+node "$PLAN_RUNNER" preflight contract.json
+node "$PLAN_RUNNER" run --detach contract.json
+node "$PLAN_RUNNER" supervise --detach "$TARGET/.runs/<run-id>"   # unattended resume
 ```
-
-Every worker ends with one structured worker-result object —
-`{status, summary, changedFiles, verification, artifacts, missingContext}` —
-where `status` is `done` or `blocked_context` and `blocked_context` requires at
-least one `missingContext` entry. Workers return `blocked_context` instead of
-exploring the repository when a required file or fact is missing.
-
-## Operating a run
 
 | Goal | Command |
 | --- | --- |
 | Find the active campaign | `campaign list --cwd <repo>` |
-| Start a new objective | `campaign init <campaign> --cwd <repo> --goal <goal>` |
-| Read the handoff before resuming | `campaign show <campaign> --cwd <repo>` |
-| Record a decision or outcome | `campaign note <campaign> --session-id <id> --kind <kind> --text <text>` |
-| Attach a new session | `campaign attach <campaign> --tool <tool> --session-id <id> --transcript <path> --format <format>` |
-| Answer an open question | `campaign resolve <campaign> --session-id <id> --question-id <id> --text <answer>` |
-| Close a finished campaign | `campaign close <campaign> --cwd <repo>` |
 | Validate a contract | `validate <contract.json>` |
-| Check credentials and models | `preflight <contract.json>` |
-| Check the repository and binaries | `doctor [<contract.json>] [--cwd <dir>]` |
+| Check credentials, models, binaries | `preflight <contract.json>` / `doctor [--cwd <dir>]` |
 | Start without blocking the session | `run --detach <contract.json>` |
-| Read current state | `status <run-dir>` or `status --json <run-dir>` |
-| View attempts and tokens | `report <run-dir>` or `report --json <run-dir>` |
+| Read current state | `status <run-dir>` / `status --json <run-dir>` |
+| View attempts and tokens | `report <run-dir>` |
 | Prepare a repair after gate exhaustion | `findings <run-dir>` |
 | Stop a run and terminate its providers | `cancel <run-dir>` |
 | Resume an interrupted run | `resume --detach <run-dir>` |
-| Watch and restart a dead controller | `watch --detach <run-dir>` |
+| Keep a dead controller alive | `supervise --detach <run-dir> [--interval 30]` |
 
-Every command above is a subcommand of `node "$HARNESS"`. A campaign contains
-`campaign.json`, an append-only `journal.jsonl`, and a `HANDOFF.md` limited to
-16 KiB. When moving between Codex, Claude Code, Cursor, or a cloud harness,
-read the handoff, attach the new session, and continue. Open the original
-transcript only when you need detail that was not summarized.
+Operational detail: [SKILL.md](skills/mine/plan-runner/SKILL.md) and the
+[contract reference](skills/mine/plan-runner/references/contract.md).
 
-`doctor` never mutates the repository: it checks that `cwd` is a git work tree,
-that `.runs/` is ignored, that `node` and `npm` are on `PATH`, that the harness
-protocol/schema versions are current, and — when a contract is given — that
-every routed driver binary exists and its runtime probes cleanly. Without a
-contract no driver is required. `status --json` and `report --json` emit stable
-`schemaVersion: 1` payloads for streaming monitors; `events.jsonl` records every
-node transition with attempt, runtime, error code, and gate verdict.
+### init-agentkit
 
-`cancel <run-dir>` terminates the controller and every recorded provider or
-verification process, then marks the run terminal. A running controller gets
-`SIGTERM` and then `SIGKILL` if it does not die within two seconds; a stale
-controller lease is taken over directly. The run directory's
-`controller-lease.json` (and `watcher-lease.json` for the watchdog) prevents two
-controllers or watchers from acting on the same run at once.
+Bootstraps the agent kit into a repository: canonical `AGENTS.md` with
+`CLAUDE.md`/`GEMINI.md`/`CURSOR.md`/`AGENT.md` symlinks, base docs (VISION,
+ARCHITECTURE, ABSTRACTIONS, GETTING-STARTED), ADRs with template and index, the
+Sentrux structural quality gate, a `create-adr` slash command, and githooks.
+Always ask which compatibility rule applies before running it — see
+[SKILL.md](skills/mine/init-agentkit/SKILL.md).
 
-## Agent roles
+## Development
 
-| Role | Responsibility |
-| --- | --- |
-| Orchestrator | Reads the handoff, explores the repository once, creates packets, chooses runtimes, and decides next steps. |
-| Worker | Executes a node inside `readFiles`, `writeFiles`, and `verification`; returns the structured `blocked_context` worker result when context is missing. |
-| Judge | Inspects only output files and declared verification; returns an independent JSON verdict. |
-| Watcher | Detects a dead controller and invokes `resume --detach`; it does not replace the orchestrator. |
-
-A worker does not own discovery. A read-only `mode: "discovery"` node is the
-only exception and must produce an execution packet for the next node.
-
-## Supported runtimes and models
-
-The harness supports four drivers and routes everything declaratively through
-the contract. The names below are tested configurations; a driver can also
-receive another compatible model.
-
-| Driver | Models/configuration | Recommended use |
-| --- | --- | --- |
-| `codex` | GPT-5.6 Luna, Terra, Sol | Bounded implementation, general tasks, and independent review. |
-| `claude` | Opus | Frontend or presentation work when the benefit justifies startup and cache cost. |
-| `codex` + custom provider | DeepSeek V4 Flash and V4 Pro | Flash for tightly specified mechanical work; Pro when a deeper worker or judge justifies the cost. |
-| `agy` | Models accepted by the `agy` CLI, such as Gemini Flash | Runtimes already available through that driver. |
-| `exec-jsonl` | Any executable that speaks the JSONL protocol | Generic wrapper driver: one `run.request` line on stdin, `run.started`/`message`/`run.completed`/`run.failed` events on stdout. |
-
-For DeepSeek, declare the provider configuration in `runtimes[].config`; the
-harness sends it as `-c` overrides. Do not use profiles. `preflight` is required
-to confirm that the credential serves the selected model.
-
-## Requirements
-
-- Node.js 22 or newer; CI exercises the current LTS and current releases on
-  Linux and macOS. TypeScript is a development-only dependency for
-  `npm run typecheck` (`checkJs`/`noEmit`); the runtime is plain ESM `.mjs`
-  with no runtime dependencies.
-- Install with `npm ci` for the deterministic lockfile. The checks are
-  `npm run check` (syntax), `npm run typecheck`, and `npm test`; CI runs the
-  suite twice across Node 22, 24, and 26.
-
-## Operating policy
-
-- The default timeout is 40 minutes (`2400` seconds). Set `4800` seconds per
-  node for profile-wide or browser-heavy work; never leave that choice implicit.
-- After two gate rejections or an `exhausted` state, use `findings` and create a
-  single-purpose fix node. Do not copy the whole graph or keep retrying blindly.
-- Run `report` after every terminal run. Token and revision totals reveal cost
-  patterns before they become habit.
-- While a run is live, work only on disjoint paths and stage explicitly. The
-  harness does not isolate concurrent worktrees.
-
-## Limitations
-
-- `maxParallel` is fixed at 1: workers share the repository and the harness does
-  not isolate them in git worktrees.
-- Resume recovers a completed worker phase but never a partial one; a provider
-  killed mid-turn is re-run from the start of the node.
-- Stall detection observes byte activity only and cannot distinguish a silent
-  provider cold start or long final composition from a deadlock.
-- The graph has no domain-level `stopped` state; model a STOP condition as a
-  fail-closed artifact check and preserve the harness terminal state separately.
-- Contract packets are hashed (`packetHash`) and validated on load: regenerate the contract
-  when a scoped file changes.
-
-## Other skills
-
-`init-agentkit` bootstraps repository governance: canonical `AGENTS.md`, symlinks
-for other harnesses, initial documentation, ADRs, Sentrux, CI, and hooks. Read
-[SKILL.md](skills/init-agentkit/SKILL.md) before using it.
-
-## Repository conventions
-
-[AGENTS.md](AGENTS.md) is the canonical guidance. `CLAUDE.md`, `GEMINI.md`,
-`CURSOR.md`, `AGENT.md`, and `.github/copilot-instructions.md` are symlinks and
-must not be edited directly. Run state is local and ignored by Git.
+- Node.js 22 or newer; the runtime is plain ESM `.mjs` with no runtime
+  dependencies. TypeScript is a development-only check (`checkJs`/`noEmit`).
+- `npm run check` — syntax; `npm run typecheck` — static types; `npm test` — the suite.
+- The skills of this repository stay active inside it through symlinks in
+  `.claude/skills/`.
+- [AGENTS.md](AGENTS.md) is the canonical guidance; the other agent files are
+  symlinks to it — never edit them.
 
 ## License
 
