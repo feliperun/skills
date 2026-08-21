@@ -1,16 +1,22 @@
 {
-  "name": "harness",
+  "name": "@feliperun/skills",
   "version": "0.1.0",
-  "private": true,
   "description": "Reusable skills for agent work with a small control-plane context.",
   "type": "module",
+  "bin": {
+    "skills": "bin/skills.mjs"
+  },
+  "files": [
+    "bin",
+    "skills"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "check": "for f in skills/mine/plan-runner/scripts/*.mjs skills/mine/plan-runner/scripts/drivers/*.mjs skills/mine/plan-runner/test/*.mjs; do node --check \"$f\" || exit 1; done",
+    "check": "for f in bin/*.mjs skills/mine/plan-runner/scripts/*.mjs skills/mine/plan-runner/scripts/drivers/*.mjs skills/mine/plan-runner/test/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
     "typecheck": "tsc",
-    "test": "node --test skills/mine/plan-runner/scripts/runner.test.mjs skills/mine/plan-runner/test/*.mjs"
+    "test": "node --test skills/mine/plan-runner/scripts/runner.test.mjs skills/mine/plan-runner/test/*.mjs test/*.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
