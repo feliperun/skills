@@ -197,6 +197,11 @@ Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or a
   `run.started`/`message`/`run.completed`/`run.failed` events on stdout. Point
   at it with `executable` (or `PLAN_RUNNER_EXEC_JSONL_BIN`) and set `versionArgs`
   when it does not accept `--version`.
+- A Claude-runtime worker whose node runs a toolchain (`zig build`, `npm
+  test`, smoke scripts) needs `permissionMode: "bypassPermissions"` in its
+  runtime: the default `acceptEdits` denies command execution in headless
+  mode, so the worker can only return `blocked_context`. Keep the sandbox
+  repository-scoped — the target repo is the blast radius.
 
 The Codex adapter passes custom provider configuration with `-c`. Never rely on a profile name to select DeepSeek: Codex 0.147.0 silently accepts unknown profiles and does not reliably load provider tables from config files.
 

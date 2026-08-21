@@ -119,6 +119,14 @@ exception to closed inspection and may read the repository read-only only as
 needed to produce that execution packet; otherwise it is closed to the listed
 files.
 
+A toolchain that writes caches or build output into the repository (`zig`,
+cargo, gradle, …) breaks the closed-scope gate: the controller snapshots the
+workspace and fails the node on any undeclared write. Redirect the toolchain's
+cache and output directories under `.runs/` (already git-ignored and outside
+the workspace snapshot) — for example `zig build --cache-dir .runs/zig-cache
+--global-cache-dir .runs/zig-gcache --prefix .runs/zig-out` — instead of
+enumerating generated paths in `writeFiles`.
+
 Validation rejects the old `prompt`/`promptFile` fields, malformed packets,
 unknown fields, escaping paths, and missing execution read files. The runner
 renders a deterministic worker prompt from the packet. Execution prompts state
@@ -157,7 +165,11 @@ exploration. `done` requires an empty `missingContext`. The result is bounded:
 32 KiB total, 4 KiB summary, at most 32 entries each in `changedFiles`,
 `verification`, and `artifacts` (at most 16 in `missingContext`), and per-item
 byte caps (2 KiB per changed-file, verification, or missing-context entry,
-16 KiB per artifact); unknown or missing fields are rejected.
+16 KiB per artifact). Worker and judge output are external LLM boundaries:
+unknown provider-added fields are dropped and the canonical fields are kept;
+missing or malformed canonical fields are rejected. Judge verdicts follow the
+same rule — a model that adds `toolAction` or `confidence` to the verdict
+object still gates correctly.
 `parseWorkerResult`/`validateWorkerResult` in `worker-result.mjs` enforce the
 schema. A discovery node returns `done` with exactly one `artifacts` entry: the
 execution task packet for the next node.
@@ -172,7 +184,11 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
 
-`driver` is `claude`, `codex`, `agy`, or `exec-jsonl`. An agy runtime uses the
+`driver` is `claude`, `codex`, `agy`, or `exec-jsonl`. A claude runtime accepts
+`permissionMode` (default `acceptEdits`); a node that must execute commands
+(builds, tests, smoke scripts) needs `bypassPermissions`, because headless
+`acceptEdits` denies every non-trivial command and the worker can only return
+`blocked_context`. An agy runtime uses the
 installed `agy` CLI (or `PLAN_RUNNER_AGY_BIN`) and may set `printTimeout`; omit
 `reasoning` for models that do not accept `--effort`. A Codex runtime may
 provide arbitrary `config` entries; the adapter serializes each one as a

@@ -1,4 +1,4 @@
-import { validateContract, routeRuntime, rejectUnknown } from "./contract.mjs";
+import { validateContract, routeRuntime } from "./contract.mjs";
 import { normalizeProviderResult, providerCommand } from "./drivers/index.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 export { runProcessAlive } from "./supervisor.mjs";
@@ -43,9 +43,6 @@ export const JUDGE_SCHEMA = {
   required: ["verdict", "maxSeverity", "summary", "findings"],
 };
 
-const JUDGE_FIELDS = new Set(Object.keys(JUDGE_SCHEMA.properties));
-const FINDING_FIELDS = new Set(Object.keys(JUDGE_SCHEMA.properties.findings.items.properties));
-
 /**
  * @param {string} result
  * @returns {JudgeVerdict}
@@ -59,7 +56,9 @@ export function parseJudge(result) {
   }
   const verdict = /** @type {Record<string, unknown>} */ (parsed);
   if (!verdict || typeof verdict !== "object" || Array.isArray(verdict)) throw new Error("judge result must be an object");
-  rejectUnknown(verdict, JUDGE_FIELDS, "judge result");
+  // Judge output is an external LLM boundary: models add fields beyond the
+  // schema (toolAction, confidence, …). Unknown keys are dropped here; every
+  // canonical field keeps strict value validation below.
   const judgeVerdict = verdict.verdict;
   const maxSeverity = verdict.maxSeverity;
   if (typeof judgeVerdict !== "string" || !JUDGE_SCHEMA.properties.verdict.enum.includes(judgeVerdict)) throw new Error("judge verdict must be pass or fail");
@@ -67,25 +66,34 @@ export function parseJudge(result) {
   if (typeof verdict.summary !== "string" || !Array.isArray(verdict.findings)) throw new Error("judge result is missing summary or findings");
   if (Buffer.byteLength(verdict.summary, "utf8") > 4 * 1024 || verdict.findings.length > 32) throw new Error("judge result exceeds limits");
   const severityRank = { none: 0, minor: 1, major: 2, critical: 3 };
-  const findings = /** @type {unknown[]} */ (verdict.findings);
-  const findingSeverities = /** @type {("minor"|"major"|"critical")[]} */ (findings.map((finding) => {
+  const rawFindings = /** @type {unknown[]} */ (verdict.findings);
+  const findings = rawFindings.map((finding) => {
     if (!finding || typeof finding !== "object" || Array.isArray(finding)) throw new Error("judge finding is invalid");
     const record = /** @type {Record<string, unknown>} */ (finding);
-    rejectUnknown(record, FINDING_FIELDS, "judge finding");
     const severity = record.severity;
     if (typeof severity !== "string" || !["minor", "major", "critical"].includes(severity) || typeof record.description !== "string" || typeof record.evidence !== "string") {
       throw new Error("judge finding is invalid");
     }
     if (Buffer.byteLength(record.description, "utf8") > 2 * 1024 || Buffer.byteLength(record.evidence, "utf8") > 4 * 1024) throw new Error("judge finding exceeds limits");
-    return /** @type {"minor"|"major"|"critical"} */ (severity);
-  }));
+    return {
+      severity: /** @type {"minor"|"major"|"critical"} */ (severity),
+      description: record.description,
+      evidence: record.evidence,
+    };
+  });
+  const findingSeverities = findings.map((finding) => finding.severity);
   const actualMax = findingSeverities.reduce(
     (highest, severity) => severityRank[severity] > severityRank[highest] ? severity : highest,
     /** @type {"none"|"minor"|"major"|"critical"} */ ("none"),
   );
   if (actualMax !== maxSeverity) throw new Error("judge maxSeverity does not match findings");
   if ((judgeVerdict === "pass") !== (maxSeverity === "none")) throw new Error("judge verdict and maxSeverity are inconsistent");
-  return /** @type {JudgeVerdict} */ ({ ...verdict });
+  return {
+    verdict: /** @type {"pass"|"fail"} */ (judgeVerdict),
+    maxSeverity: /** @type {"none"|"minor"|"major"|"critical"} */ (maxSeverity),
+    summary: verdict.summary,
+    findings,
+  };
 }
 
 /**

@@ -48,11 +48,11 @@ export function validateWorkerResult(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("worker result must be an object");
   }
+  // Worker output is an external LLM boundary: models add fields beyond the
+  // protocol. Unknown keys are dropped (the normalized pick below keeps only
+  // canonical fields); missing or invalid canonical fields stay fatal.
   const record = /** @type {Record<string, unknown>} */ (value);
   const expected = new Set(["status", "summary", "changedFiles", "verification", "artifacts", "missingContext"]);
-  for (const key of Object.keys(record)) {
-    if (!expected.has(key)) throw new TypeError(`worker result has unexpected field ${key}`);
-  }
   for (const key of expected) {
     if (!Object.hasOwn(record, key)) throw new TypeError(`worker result.${key} is required`);
   }

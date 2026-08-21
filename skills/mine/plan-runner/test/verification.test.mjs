@@ -15,6 +15,13 @@ test("worker result accepts done and blocked_context without prose", () => {
   assert.equal(parseWorkerResult(JSON.stringify({
     status: "blocked_context", summary: "missing input", changedFiles: [], verification: [], artifacts: [], missingContext: ["missing.txt"],
   })).status, "blocked_context");
+  // Unknown provider-added fields are dropped; the normalized pick keeps only
+  // the canonical protocol fields.
+  assert.deepEqual(parseWorkerResult(JSON.stringify({
+    status: "done", summary: "complete", changedFiles: [], verification: [], artifacts: [], missingContext: [], confidence: 0.9,
+  })), {
+    status: "done", summary: "complete", changedFiles: [], verification: [], artifacts: [], missingContext: [],
+  });
   assert.throws(() => parseWorkerResult("worker complete"), /invalid JSON/u);
 });
 
@@ -117,13 +124,15 @@ test("judge results are bounded, consistent, and require concrete evidence", () 
     verdict: "fail", maxSeverity: "critical", summary: "s",
     findings: Array.from({ length: 33 }, () => ({ severity: "minor", description: "d", evidence: "e" })),
   })), /judge result exceeds limits/u);
-  assert.throws(() => parseJudge(JSON.stringify({
-    verdict: "pass", maxSeverity: "none", summary: "ok", findings: [], typo: true,
-  })), /unexpected field typo/u);
-  assert.throws(() => parseJudge(JSON.stringify({
+  // Unknown provider-added fields (toolAction, confidence, …) are dropped at
+  // the LLM boundary instead of failing the node; the verdict stays canonical.
+  assert.deepEqual(parseJudge(JSON.stringify({
+    verdict: "pass", maxSeverity: "none", summary: "ok", findings: [], toolAction: { type: "none" },
+  })), { verdict: "pass", maxSeverity: "none", summary: "ok", findings: [] });
+  assert.deepEqual(parseJudge(JSON.stringify({
     verdict: "fail", maxSeverity: "critical", summary: "s",
-    findings: [{ severity: "critical", description: "d", evidence: "e", extra: true }],
-  })), /unexpected field extra/u);
+    findings: [{ severity: "critical", description: "d", evidence: "e", confidence: 0.9 }],
+  })).findings, [{ severity: "critical", description: "d", evidence: "e" }]);
   assert.throws(() => parseJudge(JSON.stringify(["pass", "none", "ok", []])), /judge result must be an object/u);
 });
 
