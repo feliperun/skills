@@ -11,6 +11,20 @@ save a curated summary **while the session is still warm** (the input is
 cached, so the save costs little), then continue in a **fresh session** that
 reads only the summary.
 
+## Memory layers
+
+Do not put everything in one place. Each layer has one owner and one lifetime:
+
+| Layer | What it holds | Lives | Owner |
+| --- | --- | --- | --- |
+| Session handoff (this file) | episodic: what this conversation did and knows | `.claude/session-handoff.md`, ~48h, single-use | session-memory |
+| Campaign handoff | the objective's durable state: decisions, outcomes, open questions, lineage | `.runs/<campaign>/HANDOFF.md` in the target repo, lives for the whole campaign | plan-runner |
+| Agent auto-memory | semantic: standing facts about the user and the project | Claude Code memory directory | the harness |
+| Skills and AGENTS.md | procedural: how work is done | repo, versioned | the repo |
+
+The session handoff is the cheapest layer and the most disposable. Never
+duplicate campaign state in it — point to the campaign instead.
+
 ## When to save
 
 - When the user says the limit is near, or `/usage` shows the budget running
@@ -56,6 +70,19 @@ Saved: <timestamp> · Objective: <one line>
 
 Delete the previous handoff only after the new one is written.
 
+If a plan-runner campaign is active (its signal block sits in the target
+repo's `AGENTS.md`), flush the session's material events into the campaign
+while the context is warm — the durable layer must not depend on anyone
+remembering to journal later:
+
+```bash
+node <plan-runner>/scripts/runner.mjs campaign note <campaign> --cwd <repo> \
+  --session-id <id> --kind decision|constraint|outcome|next-action|question --text <text>
+```
+
+Then reference the campaign in the handoff (one line) instead of duplicating
+its state.
+
 Then tell the user the one-line resume instruction: "Start a new session in
 this repo; the SessionStart hook injects `.claude/session-handoff.md`
 automatically."
@@ -65,11 +92,16 @@ automatically."
 1. The handoff file is injected into context at session start when the
    SessionStart hook is configured — read it. Without the hook, read
    `.claude/session-handoff.md` manually.
-2. Verify state before trusting it: git status/log, run directories, open
-   processes. The handoff is a memory, not the truth.
-3. Answer open questions only if the user already answered them; otherwise
+2. If the target repo's `AGENTS.md` carries a plan-runner signal block, the
+   work has a durable layer: read `.runs/<campaign>/HANDOFF.md` for the
+   campaign state, re-attach this session (`campaign attach`), and continue
+   the run or `supervise` it. The session handoff only covers what is not
+   yet in the campaign.
+3. Verify state before trusting it: git status/log, run directories, open
+   processes. A handoff is a memory, not the truth.
+4. Answer open questions only if the user already answered them; otherwise
    ask.
-4. Delete `.claude/session-handoff.md` once absorbed — or keep rewriting it
+5. Delete `.claude/session-handoff.md` once absorbed — or keep rewriting it
    while the work continues; the next save replaces it anyway.
 
 ## Wiring the SessionStart hook
