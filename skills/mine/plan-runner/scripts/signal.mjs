@@ -74,7 +74,7 @@ export function syncAgentSignal(runsDir) {
   const current = readFileSync(agentsPath, "utf8");
   const lines = [...activeCampaignLines(runsDir), ...activeRunLines(runsDir)];
   const block = lines.length
-    ? `${SIGNAL_START}\nBefore starting new work here, check \`.runs/\`: if a campaign is active or a run is not terminal, continue it instead of starting over — read its \`HANDOFF.md\`/\`STATUS.md\`, attach to the campaign, and \`resume\` or \`supervise\` the run.\n\n${lines.join("\n")}\n${SIGNAL_END}`
+    ? `${SIGNAL_START}\nBefore starting new work here, check \`.runs/\`: if a campaign is active or a run is not terminal, continue it instead of starting over — read its \`HANDOFF.md\`/\`STATUS.md\`, attach to the campaign, and \`resume\` or \`supervise\` the run. Active runs are supervised by a deterministic detached process: do not poll \`status\` in a loop — on resume, check status once and act only on terminal states.\n\n${lines.join("\n")}\n${SIGNAL_END}`
     : "";
   const start = current.indexOf(SIGNAL_START);
   const end = current.indexOf(SIGNAL_END);

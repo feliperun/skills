@@ -50,7 +50,7 @@ test("runs the CLI through an installed symlink", () => {
   symlinkSync(fileURLToPath(new URL("./runner.mjs", import.meta.url)), link);
   const result = spawnSync(process.execPath, [link, "validate", contractPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "valid\n");
+  assert.match(result.stdout, /^valid \(1 warning\)\n\[warn\] single-node contract/u);
 });
 
 test("doctor checks repository prerequisites without mutating anything", () => {
@@ -301,6 +301,9 @@ test("blocks a structured blocked_context worker result without invoking a judge
   assert.ok(state.error, "blocked node records an error");
   assert.equal(state.error.code, "context_missing");
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+  const artifact = JSON.parse(readFileSync(join(result.runDir, "findings.json"), "utf8"));
+  assert.equal(artifact.nodes[0].error.code, "context_missing");
+  assert.deepEqual(artifact.nodes[0].missingContext, ["missing.txt"]);
 });
 
 test("discovery blocked_context maps to the blocked terminal state, not an invalid-result retry", async () => {
@@ -1321,6 +1324,67 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
   }
 });
 
+test("a finished run with non-done nodes writes a findings.json handoff", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-findings-artifact-"));
+  const path = writeContract(directory, fixture({
+    id: "findings-artifact-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      gate: { failOn: ["critical"], maxRevisions: 0 },
+    }],
+  }));
+  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
+  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "critical");
+  try {
+    const result = await runContract(path);
+    const artifact = JSON.parse(readFileSync(join(result.runDir, "findings.json"), "utf8"));
+    assert.equal(artifact.run, "findings-artifact-run");
+    assert.equal(artifact.goal, "Prove the runner works");
+    assert.match(artifact.summary, /1 exhausted/u);
+    assert.equal(artifact.nodes.length, 1);
+    const node = artifact.nodes[0];
+    assert.equal(node.id, "build");
+    assert.equal(node.status, "exhausted");
+    assert.equal(node.error.code, "revision_cap");
+    assert.equal(node.gate.maxSeverity, "critical");
+    assert.equal(node.gate.findings[0].evidence, "test failed");
+  } finally {
+    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
+    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+  }
+});
+
+test("a fully done run writes no findings.json", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-findings-clean-"));
+  const path = writeContract(directory, fixture({ id: "findings-clean-run", pollIntervalMs: 10 }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(nodeState(result).status, "done");
+  assert.equal(existsSync(join(result.runDir, "findings.json")), false);
+});
+
+test("resume removes a stale findings.json after driving the run to done", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-findings-resume-"));
+  const path = writeContract(directory, fixture({
+    id: "findings-resume-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      gate: { failOn: ["critical"], maxRevisions: 0 },
+    }],
+  }));
+  const runDir = await withFakeCodex(directory, "critical", async () => (await runContract(path)).runDir);
+  assert.equal(existsSync(join(runDir, "findings.json")), true, "the exhausted run wrote the artifact");
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(existsSync(join(runDir, "findings.json")), false, "a done run leaves no stale artifact");
+});
+
 test("maxInputTokens blocks pending nodes once the budget is spent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-token-budget-"));
   const path = writeContract(directory, fixture({
@@ -1362,6 +1426,7 @@ test("run warns when a node id is already done in another run", async () => {
     }),
   );
   assert.match(result.stdout, /\[warn\] node build is already done in run first-run/u);
+  assert.match(result.stdout, /\[warn\] single-node contract/u);
 });
 
 test("supervise resumes a run whose controller died", async () => {
@@ -1479,6 +1544,12 @@ test("blocks downstream nodes after a failed dependency", async () => {
     const result = await runContract(path);
     assert.equal(nodeState(result, "first").status, "failed");
     assert.equal(nodeState(result, "second").status, "blocked");
+    const artifact = /** @type {{nodes: Array<{id: string, error: {code: string}, blockedBy?: string[]}>}} */ (JSON.parse(readFileSync(join(result.runDir, "findings.json"), "utf8")));
+    assert.equal(artifact.nodes.length, 2);
+    const blockedNode = artifact.nodes.find((node) => node.id === "second");
+    assert.ok(blockedNode, "blocked node recorded in the artifact");
+    assert.equal(blockedNode.error.code, "dependency_failed");
+    assert.deepEqual(blockedNode.blockedBy, ["first"]);
   } finally {
     if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
     else process.env.PLAN_RUNNER_CODEX_BIN = previous;

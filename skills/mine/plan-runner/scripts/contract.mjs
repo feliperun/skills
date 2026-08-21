@@ -192,6 +192,9 @@ export function validateContract(raw, contractPath) {
   assertAcyclic(nodes);
 
   const warnings = nodes.flatMap((node, index) => commandCoverageWarnings(node, index));
+  if (nodes.length === 1) {
+    warnings.push("single-node contract: a plan step arrives as one batched multi-node DAG with dependsOn; single nodes are only for targeted fix nodes after gate exhaustion");
+  }
   return /** @type {ValidatedContract} */ ({
     ...raw,
     schemaVersion: /** @type {number} */ (raw.schemaVersion),

@@ -46,6 +46,8 @@ test("writes a signal block for an active campaign and an active run", () => {
   assert.match(text, /^# Rules\n\nline one\n\n<!-- plan-runner-active:start/, "original content kept on top");
   assert.match(text, /campaign `demo`: active/);
   assert.match(text, /run `run-a`: active \(1\/2 nodes done\)/);
+  assert.match(text, /deterministic detached process/u);
+  assert.match(text, /do not poll `status` in a loop/u);
   assert.equal(text.split(SIGNAL_START).length - 1, 1, "single block");
 });
 

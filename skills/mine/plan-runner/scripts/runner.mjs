@@ -537,8 +537,9 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   }
   render(runDir);
   renderCampaignHandoffSafely(campaign, runsDir, runDir);
+  writeFindingsArtifact(runDir, contract, states);
   const failed = [...states.values()].filter((state) => state.status !== "done");
-  process.stdout.write(`[run] ${contract.id} ${failed.length ? "failed" : "done"} · ${runDir}\n`);
+  process.stdout.write(`[run] ${contract.id} ${failed.length ? `failed · ${runDir} · findings.json` : `done · ${runDir}`}\n`);
   if ([...states.values()].some((state) => state.usage)) process.stdout.write(renderReport(runDir));
   return { runDir, states, ok: failed.length === 0 };
 }
@@ -1232,6 +1233,58 @@ function writeNode(runDir, state, lease = null) {
 function render(runDir, lease = null) {
   lease?.assert();
   writeTextAtomic(join(runDir, "STATUS.md"), renderStatus(runDir));
+}
+
+/**
+ * Consolidated terminal-state handoff: one bounded JSON snapshot in the run
+ * dir so a triage session never loads full run state. Nodes stay the source
+ * of truth; this file is a snapshot of the moment the run finished. Written
+ * when any node ended non-done; removed when a later resume drives the run
+ * fully done, so a stale snapshot cannot outlive the state it described.
+ *
+ * @param {string} runDir
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ */
+function writeFindingsArtifact(runDir, contract, states) {
+  const failing = [...states.values()].filter((state) => state.status !== "done");
+  const path = join(runDir, "findings.json");
+  if (!failing.length) {
+    try { unlinkSync(path); } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    return;
+  }
+  const counts = new Map();
+  for (const state of states.values()) counts.set(state.status, (counts.get(state.status) ?? 0) + 1);
+  writeJsonAtomic(path, {
+    schemaVersion: 1,
+    run: contract.id,
+    goal: contract.goal,
+    summary: [...counts].map(([status, count]) => `${count} ${status}`).join(" · "),
+    nodes: failing.map((state) => ({
+      id: state.id,
+      status: state.status,
+      attempt: state.attempt,
+      revisions: state.revisions,
+      error: state.error,
+      gate: state.gate,
+      ...(state.blockedBy?.length ? { blockedBy: state.blockedBy } : {}),
+      ...missingContextOf(state),
+    })),
+  });
+}
+
+/**
+ * @param {NodeSnapshot} state
+ * @returns {{missingContext?: string[]}}
+ */
+function missingContextOf(state) {
+  const result = /** @type {{missingContext?: unknown}|null} */ (state.result);
+  if (result && Array.isArray(result.missingContext) && result.missingContext.length) {
+    return { missingContext: result.missingContext.map(String) };
+  }
+  return {};
 }
 
 /**
@@ -2229,7 +2282,7 @@ async function main(argv) {
     const runDir = join(contract.cwd, ".runs", contract.id);
     if (values.detach === true) {
       if (existsSync(runDir)) throw new Error(`run already exists: ${runDir}`);
-      for (const warning of reusedDoneWarnings(contract)) process.stdout.write(`[warn] ${warning}\n`);
+      for (const warning of [...contract.warnings, ...reusedDoneWarnings(contract)]) process.stdout.write(`[warn] ${warning}\n`);
       const child = detachSelf("run", target);
       const pid = child.pid;
       if (pid === undefined) throw new Error("detached child has no pid");
@@ -2237,7 +2290,7 @@ async function main(argv) {
       process.stdout.write(`[run] ${contract.id} detached · pid ${pid} · ${runDir}\n`);
       return;
     }
-    for (const warning of reusedDoneWarnings(contract)) process.stdout.write(`[warn] ${warning}\n`);
+    for (const warning of [...contract.warnings, ...reusedDoneWarnings(contract)]) process.stdout.write(`[warn] ${warning}\n`);
     const result = await runContract(target);
     if (!result.ok) process.exitCode = 1;
     return;

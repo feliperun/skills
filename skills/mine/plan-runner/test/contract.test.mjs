@@ -192,7 +192,28 @@ test("validate warns when a task packet verification command is absent from the 
   cleanNodes[0].taskPacket = helpers.packet({ verification: [{ argv: ["pnpm", "exec", "vitest", "run", "tests/fixtures/y.test.ts"] }] });
   cleanNodes[0].definitionOfDone = ["tests/fixtures/y.test.ts passes"];
   const cleanPath = helpers.writeContract(directory, clean);
-  assert.equal(validateContract(JSON.parse(readFileSync(cleanPath, "utf8")), cleanPath).warnings.length, 0);
+  const cleanWarnings = validateContract(JSON.parse(readFileSync(cleanPath, "utf8")), cleanPath).warnings;
+  assert.equal(cleanWarnings.length, 1, "only the single-node warning remains; no command-target warning");
+  assert.match(cleanWarnings[0], /^single-node contract/u);
+});
+
+test("validate warns on a single-node contract and not on a batched DAG", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-single-node-warn-"));
+  const singlePath = helpers.writeContract(directory, helpers.fixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: helpers.packet(), gate: false }],
+  }));
+  const single = validateContract(JSON.parse(readFileSync(singlePath, "utf8")), singlePath);
+  assert.ok(single.warnings.some((warning) => warning.startsWith("single-node contract")));
+
+  const batchedPath = helpers.writeContract(directory, helpers.fixture({
+    id: "batched-run",
+    nodes: [
+      { id: "first", type: "backend", taskPacket: helpers.packet({ objective: "a" }), gate: false },
+      { id: "second", type: "backend", taskPacket: helpers.packet({ objective: "b" }), dependsOn: ["first"], gate: false },
+    ],
+  }));
+  const batched = validateContract(JSON.parse(readFileSync(batchedPath, "utf8")), batchedPath);
+  assert.ok(!batched.warnings.some((warning) => warning.startsWith("single-node contract")));
 });
 
 test("validate requires a campaignId", () => {
