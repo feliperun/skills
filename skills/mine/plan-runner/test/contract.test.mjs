@@ -216,6 +216,29 @@ test("validate warns on a single-node contract and not on a batched DAG", () => 
   assert.ok(!batched.warnings.some((warning) => warning.startsWith("single-node contract")));
 });
 
+test("validate warns when writeFiles land outside the workspace snapshot", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-unsnapshotted-warn-"));
+  const path = helpers.writeContract(directory, helpers.fixture({
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: helpers.packet({ writeFiles: [".claude/settings.json", ".claude/hooks/pre.mjs", "src/app.ts"] }),
+      gate: false,
+    }],
+  }));
+  const warnings = validateContract(JSON.parse(readFileSync(path, "utf8")), path).warnings;
+  const unsnapshotted = warnings.filter((warning) => warning.includes("outside the workspace snapshot"));
+  assert.equal(unsnapshotted.length, 1, "one warning per excluded root, not per file");
+  assert.match(unsnapshotted[0], /nodes\[0\] \(build\): writeFiles under \.claude\//u);
+
+  const clean = helpers.writeContract(directory, helpers.fixture({
+    id: "clean-writes-run",
+    nodes: [{ id: "build", type: "backend", taskPacket: helpers.packet({ writeFiles: ["src/app.ts"] }), gate: false }],
+  }));
+  const cleanWarnings = validateContract(JSON.parse(readFileSync(clean, "utf8")), clean).warnings;
+  assert.ok(!cleanWarnings.some((warning) => warning.includes("outside the workspace snapshot")));
+});
+
 test("validate requires a campaignId", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-id-"));
   const value = helpers.fixture();

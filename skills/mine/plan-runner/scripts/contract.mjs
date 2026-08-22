@@ -191,7 +191,7 @@ export function validateContract(raw, contractPath) {
   }
   assertAcyclic(nodes);
 
-  const warnings = nodes.flatMap((node, index) => commandCoverageWarnings(node, index));
+  const warnings = nodes.flatMap((node, index) => [...commandCoverageWarnings(node, index), ...unsnapshottedWriteWarnings(node, index)]);
   if (nodes.length === 1) {
     warnings.push("single-node contract: a plan step arrives as one batched multi-node DAG with dependsOn; single nodes are only for targeted fix nodes after gate exhaustion");
   }
@@ -873,6 +873,26 @@ function assertAcyclic(nodes) {
     visited.add(id);
   };
   for (const node of nodes) visit(node.id);
+}
+
+// Roots the workspace snapshot skips, mirrored from verification.mjs. A write
+// declared under one of them is invisible to the closed-scope gate: the node
+// can neither fail on it nor prove it happened.
+const UNSNAPSHOTTED_ROOTS = new Set([".runs", ".git", "node_modules", ".claude", ".codex"]);
+
+/**
+ * @param {ValidatedNode} node
+ * @param {number} index
+ * @returns {string[]}
+ */
+function unsnapshottedWriteWarnings(node, index) {
+  const writeFiles = node.taskPacket.writeFiles ?? [];
+  const roots = [...new Set(writeFiles
+    .map((path) => String(path).replaceAll("\\", "/").split("/")[0])
+    .filter((root) => UNSNAPSHOTTED_ROOTS.has(root)))];
+  return roots.map((root) =>
+    `nodes[${index}] (${node.id}): writeFiles under ${root}/ are outside the workspace snapshot, so the closed-scope gate cannot observe them`,
+  );
 }
 
 /**

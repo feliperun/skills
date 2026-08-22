@@ -132,7 +132,10 @@ The workspace snapshot skips five directories at the repository root: `.runs`,
 state of the agent runtimes the runner itself spawns — a lock file, a todo
 list or a shell snapshot written there is the runner's own machinery, never
 worker product, and must not fail a node. Nested paths such as
-`src/.claude/…` are ordinary files and stay inside the snapshot.
+`src/.claude/…` are ordinary files and stay inside the snapshot. Declaring a
+`writeFiles` entry under an excluded root is not an error but earns a
+validation warning: the gate can neither fail on that write nor prove it
+happened.
 
 Validation rejects the old `prompt`/`promptFile` fields, malformed packets,
 unknown fields, escaping paths, and missing execution read files. The runner
