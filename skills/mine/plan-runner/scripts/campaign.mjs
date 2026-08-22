@@ -735,7 +735,10 @@ function renderBudgeted(handoff, cap) {
     return left;
   };
   let criticalLost = 0;
-  criticalLost += criticalSection(budget, "Latest next action", nextEntry ? [nextEntry] : [], (entry) => boundedText(entry.text ?? "", cap), 0, nextSection(), CRITICAL_FLOOR_BYTES);
+  // Stamped like every other journal section: this is the entry most likely to
+  // go stale, because it names a run that later runs supersede. Without the
+  // timestamp a reader cannot tell it apart from the current frontier.
+  criticalLost += criticalSection(budget, "Latest next action", nextEntry ? [nextEntry] : [], (entry) => entryLine(entry, idCap, cap), 0, nextSection(), CRITICAL_FLOOR_BYTES);
   criticalLost += criticalSection(budget, "Session lineage", sessions, (entry) => sessionLine(entry, idCap, cap), totals.sessions - sessions.length + (evicted.sessions ?? 0), nextSection(), CRITICAL_FLOOR_BYTES);
   criticalLost += criticalSection(budget, "Active decisions", activeDecisions, (entry) => decisionLine(entry, idCap, cap), totals.decisions - activeDecisions.length + (evicted.decisions ?? 0), nextSection(), CRITICAL_FLOOR_BYTES);
   criticalLost += criticalSection(budget, "User constraints", constraints, (entry) => entryLine(entry, idCap, cap), totals.constraints - constraints.length + (evicted.constraints ?? 0), nextSection(), CRITICAL_FLOOR_BYTES);

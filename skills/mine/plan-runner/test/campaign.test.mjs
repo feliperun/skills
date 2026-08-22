@@ -93,7 +93,8 @@ test("many linked runs cannot starve critical handoff sections", () => {
   assert.ok(Buffer.byteLength(handoff, "utf8") <= HANDOFF_BYTES);
   assert.match(handoff, /Ship the durable handoff/u);
   assert.match(handoff, /## Latest next action/u);
-  assert.match(handoff, /Render the next handoff/u);
+  // Stamped with session and timestamp so a superseded next action is visibly stale.
+  assert.match(handoff, /- Render the next handoff[^\n]* · [^\n]+ · \d{4}-\d{2}-\d{2}T[\d:.]+Z/u);
   assert.match(handoff, /## Session lineage/u);
   assert.match(handoff, /codex codex-1/u);
   assert.match(handoff, /## Active decisions/u);
