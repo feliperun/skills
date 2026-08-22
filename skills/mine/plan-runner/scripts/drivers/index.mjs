@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { claudeDriver } from "./claude.mjs";
 import { codexDriver } from "./codex.mjs";
 import { agyDriver } from "./agy.mjs";
+import { glmDriver } from "./glm.mjs";
 import { execJsonlDriver } from "./exec-jsonl.mjs";
 
 /** Current wire-contract version for runner protocol artifacts. */
@@ -14,6 +15,7 @@ const DRIVERS = new Map([
   ["claude", claudeDriver],
   ["codex", codexDriver],
   ["agy", agyDriver],
+  ["glm", glmDriver],
   ["exec-jsonl", execJsonlDriver],
 ]);
 
@@ -30,7 +32,7 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, usage?: boolean}} CapabilityRequirements */
 
-/** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null}} DriverCommand */
+/** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null, env?: Record<string, string|null>}} DriverCommand */
 
 /** @typedef {DriverCommand & {driver: string, model: string, capabilities: DriverCapabilities}} ProviderCommand */
 
@@ -77,7 +79,9 @@ export function driverCapabilities(runtime) {
 
 /**
  * Build one provider invocation. Prompt transport is explicit in the result:
- * stdin adapters return `input`, while argv adapters append the prompt.
+ * stdin adapters return `input`, while argv adapters append the prompt. An
+ * optional `env` overlay is merged over the runner environment at spawn time;
+ * a null value removes the ambient variable.
  *
  * @param {DriverRuntime} runtime
  * @param {string} prompt

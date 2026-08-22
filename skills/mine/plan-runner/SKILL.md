@@ -198,6 +198,12 @@ Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or a
   `run.started`/`message`/`run.completed`/`run.failed` events on stdout. Point
   at it with `executable` (or `PLAN_RUNNER_EXEC_JSONL_BIN`) and set `versionArgs`
   when it does not accept `--version`.
+- Route to the `glm` driver for GLM 5.3 (`glm-5.3[1m]`): it drives a
+  Claude-Code-compatible CLI pinned to the Z.ai Anthropic-compatible endpoint,
+  so GLM nodes work regardless of the ambient Anthropic configuration. The
+  token comes from the variable named by `config["auth_token.env_key"]`
+  (default `ZAI_API_KEY`); declare that key so preflight catches a missing
+  credential.
 - A Claude-runtime worker whose node runs a toolchain (`zig build`, `npm
   test`, smoke scripts) needs `permissionMode: "bypassPermissions"` in its
   runtime: the default `acceptEdits` denies command execution in headless

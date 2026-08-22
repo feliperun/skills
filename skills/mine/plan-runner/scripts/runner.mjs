@@ -2393,6 +2393,7 @@ const DRIVER_BIN_OVERRIDES = Object.freeze({
   codex: "PLAN_RUNNER_CODEX_BIN",
   claude: "PLAN_RUNNER_CLAUDE_BIN",
   agy: "PLAN_RUNNER_AGY_BIN",
+  glm: "PLAN_RUNNER_GLM_BIN",
   "exec-jsonl": "PLAN_RUNNER_EXEC_JSONL_BIN",
 });
 
@@ -2457,10 +2458,11 @@ async function doctorCommand(contractPath, values) {
   // A PATH-only check must not fail a runtime whose binary is supplied through
   // an explicit executable or a PLAN_RUNNER_*_BIN override; the driver probe above
   // already validated whatever the runtime actually resolves to.
-  for (const binary of ["codex", "claude", "agy", "exec-jsonl"]) {
-    const found = findExecutable(binary);
+  for (const binary of ["codex", "claude", "agy", "glm", "exec-jsonl"]) {
     const overrideName = /** @type {Record<string, string>} */ (DRIVER_BIN_OVERRIDES)[binary];
     const overridden = overriddenDrivers.has(binary) || Boolean(process.env[overrideName]);
+    // The glm driver drives a Claude-Code-compatible CLI; its default binary is `claude`.
+    const found = findExecutable(binary === "glm" && !overridden ? "claude" : binary);
     const required = usedDrivers.has(binary) && !overridden;
     checks.push({
       name: `binary ${binary}`,

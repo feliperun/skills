@@ -19,6 +19,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
     { driver: "codex", model: "m" },
     { driver: "claude", model: "m" },
     { driver: "agy", model: "m" },
+    { driver: "glm", model: "m" },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ];
   for (const runtime of runtimes) {
@@ -34,6 +35,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
   assert.equal(driverCapabilities(runtimes[1]).promptTransport, "stdin");
   assert.equal(driverCapabilities(runtimes[2]).promptTransport, "argv");
   assert.equal(driverCapabilities(runtimes[3]).promptTransport, "stdin");
+  assert.equal(driverCapabilities(runtimes[4]).promptTransport, "stdin");
   assert.deepEqual(driverCapabilities(runtimes[0]), {
     structuredOutput: true,
     promptTransport: "stdin",
@@ -46,7 +48,9 @@ test("all provider adapters report explicit capabilities and transport", () => {
   assert.equal(driverCapabilities(runtimes[1]).continuation, false);
   assert.equal(driverCapabilities(runtimes[2]).permissions, false);
   assert.equal(driverCapabilities(runtimes[2]).continuation, false);
-  assert.equal(driverCapabilities(runtimes[3]).continuation, true);
+  assert.equal(driverCapabilities(runtimes[3]).permissions, true);
+  assert.equal(driverCapabilities(runtimes[3]).sandbox, false);
+  assert.equal(driverCapabilities(runtimes[4]).continuation, true);
 });
 
 test("stdin adapters keep prompts out of argv and argv adapters enforce byte limits", () => {
@@ -54,6 +58,7 @@ test("stdin adapters keep prompts out of argv and argv adapters enforce byte lim
   for (const runtime of [
     { driver: "codex", model: "m" },
     { driver: "claude", model: "m" },
+    { driver: "glm", model: "m" },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ]) {
     const command = providerCommand(runtime, prompt);
@@ -113,6 +118,7 @@ test("all adapter normalizers return the common envelope", () => {
       { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } },
     ],
     claude: [{ type: "result", result: "claude", session_id: "c", usage: { input_tokens: 2 } }],
+    glm: [{ type: "result", result: "glm", session_id: "g", usage: { input_tokens: 5, output_tokens: 1 } }],
     agy: [{ event: "result", result: { status: "SUCCESS", response: "agy", conversation_id: "a", usage: {} } }],
     "exec-jsonl": [{ schemaVersion: 1, type: "run.completed", result: { answer: 1 }, continuationId: "e", usage: { inputTokens: 3 } }],
   };
@@ -244,6 +250,74 @@ test("builds agy commands with unambiguous equals-form flags", () => {
   assert.ok(command.args.includes("--print-timeout=30m"));
   assert.ok(command.args.includes(`--json-schema=${JSON.stringify(JUDGE_SCHEMA)}`));
   assert.ok(command.args.includes("--print=task with spaces"));
+});
+
+test("builds glm commands pinned to the Z.ai endpoint", () => {
+  const previous = {
+    ZAI_API_KEY: process.env.ZAI_API_KEY,
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+    PLAN_RUNNER_GLM_BIN: process.env.PLAN_RUNNER_GLM_BIN,
+    PLAN_RUNNER_TEST_GLM_TOKEN: process.env.PLAN_RUNNER_TEST_GLM_TOKEN,
+  };
+  process.env.ZAI_API_KEY = "test-zai-token";
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.PLAN_RUNNER_GLM_BIN;
+  delete process.env.PLAN_RUNNER_TEST_GLM_TOKEN;
+  try {
+    const command = providerCommand({ driver: "glm", model: "glm-5.3[1m]" }, "task", { schema: JUDGE_SCHEMA });
+    assert.equal(command.executable, "claude");
+    assert.deepEqual(command.args, [
+      "-p",
+      "--model",
+      "glm-5.3[1m]",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      "acceptEdits",
+      "--json-schema",
+      JSON.stringify(JUDGE_SCHEMA),
+    ]);
+    assert.equal(command.promptTransport, "stdin");
+    assert.equal(command.input, "task");
+    assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.z.ai/api/anthropic");
+    assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "test-zai-token");
+    assert.equal(command.env?.ANTHROPIC_MODEL, "glm-5.3[1m]");
+    assert.equal(command.env?.ANTHROPIC_API_KEY, null, "ambient Anthropic key must be removed");
+
+    const custom = providerCommand({
+      driver: "glm",
+      model: "glm-5.3",
+      config: { base_url: "https://custom.example/api", "auth_token.env_key": "PLAN_RUNNER_TEST_GLM_TOKEN" },
+    }, "task");
+    assert.equal(custom.env?.ANTHROPIC_BASE_URL, "https://custom.example/api");
+    assert.equal("ANTHROPIC_AUTH_TOKEN" in (custom.env ?? {}), false, "an unresolved token is omitted, not blanked");
+
+    process.env.PLAN_RUNNER_TEST_GLM_TOKEN = "custom-token";
+    const resolved = providerCommand({
+      driver: "glm",
+      model: "glm-5.3",
+      config: { "auth_token.env_key": "PLAN_RUNNER_TEST_GLM_TOKEN" },
+    }, "task");
+    assert.equal(resolved.env?.ANTHROPIC_AUTH_TOKEN, "custom-token");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("accepts a glm runtime in contracts and routes nodes to it", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-glm-contract-"));
+  const value = fixture();
+  /** @type {Record<string, Record<string, unknown>>} */
+  const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
+  runtimes.glm = { driver: "glm", model: "glm-5.3[1m]", config: { "auth_token.env_key": "ZAI_API_KEY" } };
+  const path = writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.runtimes.glm.driver, "glm");
+  assert.equal(routeRuntime(contract, { id: "g", type: "backend", runtime: "glm", gate: {} }).id, "glm");
 });
 
 test("uses provider-compatible explicit types in the judge schema", () => {

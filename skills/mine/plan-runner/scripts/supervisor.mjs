@@ -48,6 +48,14 @@ function capLog(path) {
     closeSync(out);
   } catch {}
 }
+function childEnv() {
+  const merged = { ...process.env };
+  for (const [key, value] of Object.entries(config.env ?? {})) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
 process.on("SIGTERM", () => stopProvider());
 process.on("SIGINT", () => stopProvider());
 const timer = setInterval(() => {
@@ -58,7 +66,7 @@ const timer = setInterval(() => {
   const stderrFd = openSync(config.stderrPath, "wx", 0o600);
   provider = spawn(config.executable, config.args, {
     cwd: config.cwd,
-    env: process.env,
+    env: childEnv(),
     stdio: [config.promptTransport === "stdin" ? "pipe" : "ignore", stdoutFd, stderrFd],
   });
   if (config.promptTransport === "stdin") process.stdin.pipe(provider.stdin);
@@ -97,6 +105,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
     executable: command.executable,
     args: command.args,
     promptTransport: command.promptTransport,
+    env: command.env ?? null,
     stdoutPath: paths.stdout,
     stderrPath: paths.stderr,
   });

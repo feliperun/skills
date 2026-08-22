@@ -32,6 +32,11 @@ current releases. TypeScript is a development-only dependency for
       "driver": "agy",
       "model": "gemini-3.7-flash-low"
     },
+    "glm": {
+      "driver": "glm",
+      "model": "glm-5.3[1m]",
+      "config": { "auth_token.env_key": "ZAI_API_KEY" }
+    },
     "luna": {
       "driver": "codex",
       "model": "gpt-5.6-luna",
@@ -194,7 +199,7 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
 
-`driver` is `claude`, `codex`, `agy`, or `exec-jsonl`. A claude runtime accepts
+`driver` is `claude`, `codex`, `agy`, `glm`, or `exec-jsonl`. A claude runtime accepts
 `permissionMode` (default `acceptEdits`); a node that must execute commands
 (builds, tests, smoke scripts) needs `bypassPermissions`, because headless
 `acceptEdits` denies every non-trivial command and the worker can only return
@@ -203,6 +208,20 @@ installed `agy` CLI (or `PLAN_RUNNER_AGY_BIN`) and may set `printTimeout`; omit
 `reasoning` for models that do not accept `--effort`. A Codex runtime may
 provide arbitrary `config` entries; the adapter serializes each one as a
 `-c key=value` override. Store environment variable names, never secret values.
+
+A glm runtime runs GLM models (for example `glm-5.3[1m]`, the 1M-context tier)
+through a Claude-Code-compatible CLI pinned to the Z.ai Anthropic-compatible
+endpoint, so GLM nodes do not depend on the caller's ambient Anthropic
+configuration. The adapter injects `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
+and `ANTHROPIC_AUTH_TOKEN` into the worker environment and removes any ambient
+`ANTHROPIC_API_KEY`. It resolves the token at invocation time from the variable
+named by `config["auth_token.env_key"]` (default `ZAI_API_KEY`, falling back to
+`ANTHROPIC_AUTH_TOKEN`); declaring the key in `config` also makes preflight
+report a missing credential. The default executable is `claude`; override it
+with `executable` or `PLAN_RUNNER_GLM_BIN`. Omit `reasoning` for models that do
+not accept `--effort`. The CLI may log an `unrecognized_model` warning on
+stderr for models outside its local catalog; the request still goes through
+and the result normalizes normally.
 
 `exec-jsonl` is the generic driver for an existing executable that speaks the
 JSONL protocol: it receives one `run.request` line on stdin and writes
