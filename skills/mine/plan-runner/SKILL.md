@@ -155,8 +155,9 @@ Run a plan outside the main context while keeping the current session as the con
 
    When a run finishes with any non-done node, the controller also writes a
    consolidated `findings.json` into the run directory: per-node status, error
-   code, gate findings, `blockedBy`, and `missingContext` — the single file a
-   triage session reads (a few thousand tokens) instead of loading run state.
+   code, gate findings, `blockedBy`, `missingContext`, and the
+   `unexpectedPaths` behind a closed-scope failure — the single file a triage
+   session reads (a few thousand tokens) instead of loading run state.
    A resume that later drives the run fully done removes the artifact.
 
    After two gate rejections or any gate exhaustion, do not keep retrying and

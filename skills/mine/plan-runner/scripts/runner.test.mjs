@@ -468,6 +468,10 @@ test("fails closed on unexpected writes and preserves pre-existing dirt", async 
   assert.equal(state.error.code, "unexpected_write");
   assert.ok(state.scope, "scope snapshot persisted");
   assert.ok(state.scope.unexpectedPaths.includes("unexpected.txt"));
+  const scopeFindings = /** @type {{nodes: {id: string, unexpectedPaths?: string[]}[]}} */ (
+    JSON.parse(readFileSync(join(directory, ".runs", "scope-run", "findings.json"), "utf8"))
+  );
+  assert.deepEqual(scopeFindings.nodes[0].unexpectedPaths, ["unexpected.txt"]);
 
   const cleanDirectory = mkdtempSync(join(tmpdir(), "runner-scope-clean-"));
   writeFileSync(join(cleanDirectory, "preexisting.txt"), "keep me\n");

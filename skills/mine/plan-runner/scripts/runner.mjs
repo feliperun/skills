@@ -1271,6 +1271,7 @@ function writeFindingsArtifact(runDir, contract, states) {
       gate: state.gate,
       ...(state.blockedBy?.length ? { blockedBy: state.blockedBy } : {}),
       ...missingContextOf(state),
+      ...unexpectedPathsOf(state),
     })),
   });
 }
@@ -1283,6 +1284,22 @@ function missingContextOf(state) {
   const result = /** @type {{missingContext?: unknown}|null} */ (state.result);
   if (result && Array.isArray(result.missingContext) && result.missingContext.length) {
     return { missingContext: result.missingContext.map(String) };
+  }
+  return {};
+}
+
+/**
+ * An `unexpected_write` failure is only actionable with the offending paths,
+ * and the bounded error message truncates them. Carry a bounded list into the
+ * artifact so triage never has to open the node file.
+ *
+ * @param {NodeSnapshot} state
+ * @returns {{unexpectedPaths?: string[]}}
+ */
+function unexpectedPathsOf(state) {
+  const scope = /** @type {{unexpectedPaths?: unknown}|null|undefined} */ (state.scope);
+  if (scope && Array.isArray(scope.unexpectedPaths) && scope.unexpectedPaths.length) {
+    return { unexpectedPaths: scope.unexpectedPaths.slice(0, 16).map(String) };
   }
   return {};
 }

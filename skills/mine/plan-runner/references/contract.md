@@ -299,8 +299,9 @@ Use `STATUS.md` for normal status queries. Read logs only to diagnose an actiona
 
 When a run finishes with any non-done node, the controller writes
 `findings.json`: a consolidated snapshot with per-node status, error,
-gate findings, `blockedBy`, and `missingContext` — the single file a triage
-session reads instead of loading run state. Nodes remain the source of truth;
+gate findings, `blockedBy`, `missingContext`, and the `unexpectedPaths` that
+tripped a closed-scope failure — the single file a triage session reads
+instead of loading run state. Nodes remain the source of truth;
 a resume that later drives the run fully done removes the artifact.
 
 The stored `contract.json` inlines every task packet and drops generated
