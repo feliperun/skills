@@ -45,6 +45,14 @@ const VERIFICATION_ENV_BASE_NAMES = Object.freeze([
   "TERM",
 ]);
 
+// Directories at the workspace root that the runner itself owns: its own run
+// store, the version-control store, installed dependencies, and the scratch
+// state of the agent runtimes the runner spawns (Claude Code writes locks,
+// todos and shell snapshots under .claude; Codex under .codex). They are
+// machinery, not worker product, so they stay out of the closed-scope
+// snapshot: a runtime writing its own lock file must never fail a node.
+const SNAPSHOT_ROOT_EXCLUDED = new Set([".runs", ".git", "node_modules", ".claude", ".codex"]);
+
 /** @typedef {"active"|"closed"|"failed"|"crashed"|"canceled"} VerificationAttemptStatus */
 
 /**
@@ -141,7 +149,7 @@ export function captureWorkspaceSnapshot(cwd) {
       throw fail("snapshot_read_error", `cannot read workspace path ${relativePath || "."}: ${error instanceof Error ? error.message : String(error)}`);
     }
     for (const name of names.sort()) {
-      if (relativePath === "" && (name === ".runs" || name === ".git" || name === "node_modules")) continue;
+      if (relativePath === "" && SNAPSHOT_ROOT_EXCLUDED.has(name)) continue;
       const child = resolve(absolute, name);
       const rel = relativePath ? `${relativePath}/${name}` : name;
       if (Buffer.byteLength(rel, "utf8") > VERIFICATION_LIMITS.snapshotPathBytes) {

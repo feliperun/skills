@@ -203,6 +203,20 @@ test("workspace snapshots fail closed and hash the complete file", () => {
   assert.throws(() => captureWorkspaceSnapshot(many), /exceeds 4096 entries/u);
 });
 
+test("workspace snapshots ignore runner and agent-runtime scratch at the root", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "runner-verification-runtime-scratch-"));
+  writeFileSync(join(cwd, "src.txt"), "before");
+  const before = captureWorkspaceSnapshot(cwd);
+  for (const directory of [".claude", ".codex", ".runs", ".git", "node_modules"]) {
+    mkdirSync(join(cwd, directory));
+    writeFileSync(join(cwd, directory, "scratch.lock"), "runtime debris");
+  }
+  mkdirSync(join(cwd, "src", ".claude"), { recursive: true });
+  writeFileSync(join(cwd, "src", ".claude", "nested.txt"), "not runtime scratch");
+  const comparison = compareWorkspaceSnapshot(before, cwd, []);
+  assert.deepEqual(comparison.unexpectedPaths, ["src", "src/.claude", "src/.claude/nested.txt"]);
+});
+
 test("workspace snapshots reject paths over the hard byte limit", (t) => {
   if (process.platform === "darwin") {
     t.skip("macOS PATH_MAX prevents constructing a >1024-byte relative path");

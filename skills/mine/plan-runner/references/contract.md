@@ -127,6 +127,13 @@ the workspace snapshot) — for example `zig build --cache-dir .runs/zig-cache
 --global-cache-dir .runs/zig-gcache --prefix .runs/zig-out` — instead of
 enumerating generated paths in `writeFiles`.
 
+The workspace snapshot skips five directories at the repository root: `.runs`,
+`.git`, `node_modules`, `.claude` and `.codex`. The last two are the scratch
+state of the agent runtimes the runner itself spawns — a lock file, a todo
+list or a shell snapshot written there is the runner's own machinery, never
+worker product, and must not fail a node. Nested paths such as
+`src/.claude/…` are ordinary files and stay inside the snapshot.
+
 Validation rejects the old `prompt`/`promptFile` fields, malformed packets,
 unknown fields, escaping paths, and missing execution read files. The runner
 renders a deterministic worker prompt from the packet. Execution prompts state
