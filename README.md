@@ -18,7 +18,7 @@ live inside the skill so it stays a single copyable unit.
 
 ```bash
 npx github:feliperun/skills             # every `mine` skill → .claude/skills/ of the current repo
-npx github:feliperun/skills plan-runner # one named skill
+npx github:feliperun/skills intent-factory # one named skill
 npx github:feliperun/skills list        # show the catalog
 npx github:feliperun/skills --global    # install into ~/.claude/skills/ instead
 npx github:feliperun/skills --force     # replace skills that already exist
@@ -29,13 +29,13 @@ credentials). Without npx, copy or symlink a skill folder into
 `~/.claude/skills/` or `.claude/skills/`:
 
 ```bash
-cp -r skills/mine/plan-runner ~/.claude/skills/plan-runner
+cp -r skills/mine/intent-factory ~/.claude/skills/intent-factory
 ln -s "$(pwd)/skills/mine/init-agentkit" ~/.claude/skills/init-agentkit
 ```
 
 ## Skills
 
-### plan-runner
+### intent-factory
 
 Executes large implementation plans as observable multi-model DAGs outside the
 orchestrator's context: declarative routing (Claude or Codex workers, including
@@ -48,7 +48,7 @@ CI, or another agent), with no dependency on the orchestrator's runtime.
 Quickstart, in the repository that will receive the implementation:
 
 ```bash
-PLAN_RUNNER=/path/to/skills/skills/mine/plan-runner/scripts/runner.mjs
+PLAN_RUNNER=/path/to/skills/skills/mine/intent-factory/scripts/runner.mjs
 TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"
@@ -78,8 +78,8 @@ node "$PLAN_RUNNER" supervise --detach "$TARGET/.runs/<run-id>"   # unattended r
 | Resume an interrupted run | `resume --detach <run-dir>` |
 | Keep a dead controller alive | `supervise --detach <run-dir> [--interval 30]` |
 
-Operational detail: [SKILL.md](skills/mine/plan-runner/SKILL.md) and the
-[contract reference](skills/mine/plan-runner/references/contract.md).
+Operational detail: [SKILL.md](skills/mine/intent-factory/SKILL.md) and the
+[contract reference](skills/mine/intent-factory/references/contract.md).
 
 ### init-agentkit
 

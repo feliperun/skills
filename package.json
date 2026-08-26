@@ -14,9 +14,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "for f in bin/*.mjs .claude/hooks/*.mjs skills/mine/plan-runner/scripts/*.mjs skills/mine/plan-runner/scripts/drivers/*.mjs skills/mine/plan-runner/test/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
+    "check": "for f in bin/*.mjs .claude/hooks/*.mjs skills/mine/intent-factory/scripts/*.mjs skills/mine/intent-factory/scripts/drivers/*.mjs skills/mine/intent-factory/test/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
     "typecheck": "tsc",
-    "test": "node --test skills/mine/plan-runner/scripts/runner.test.mjs skills/mine/plan-runner/test/*.mjs test/*.mjs"
+    "test": "node --test skills/mine/intent-factory/scripts/runner.test.mjs skills/mine/intent-factory/test/*.mjs test/*.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -30,13 +30,12 @@ test("installs the mine bucket into .claude/skills by default", () => {
   const cwd = mkdtempSync(join(tmpdir(), "skills-install-"));
   const result = run([], cwd);
   assert.equal(result.status, 0, result.stderr);
-  for (const name of ["plan-runner", "init-agentkit", "session-memory"]) {
+  for (const name of ["intent-factory", "init-agentkit"]) {
     assert.ok(existsSync(join(cwd, ".claude", "skills", name, "SKILL.md")), `${name} missing`);
   }
-  assert.match(result.stdout, /installed plan-runner/);
+  assert.match(result.stdout, /installed intent-factory/);
   assert.match(result.stdout, /installed init-agentkit/);
-  assert.match(result.stdout, /installed session-memory/);
-  assert.match(result.stdout, /3 installed, 0 skipped/);
+  assert.match(result.stdout, /2 installed, 0 skipped/);
 });
 
 test("installs only named skills", () => {
@@ -44,7 +43,7 @@ test("installs only named skills", () => {
   const result = run(["init-agentkit"], cwd);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(cwd, ".claude", "skills", "init-agentkit", "SKILL.md")));
-  assert.ok(!existsSync(join(cwd, ".claude", "skills", "plan-runner")));
+  assert.ok(!existsSync(join(cwd, ".claude", "skills", "intent-factory")));
 });
 
 test("keeps an existing skill unless --force", () => {
@@ -65,7 +64,7 @@ test("list prints buckets and names", () => {
   const result = run(["list"], tmpdir());
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /mine ⭐/);
-  assert.match(result.stdout, /plan-runner/);
+  assert.match(result.stdout, /intent-factory/);
   assert.match(result.stdout, /init-agentkit/);
 });
 
