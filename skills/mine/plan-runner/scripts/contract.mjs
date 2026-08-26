@@ -82,15 +82,27 @@ const USAGE_FIELDS = new Set(["inputTokens", "outputTokens", "cacheReadInputToke
 /** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, phase?: string, attempt?: number, runtime?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number}} EventRecord */
 
+/** Ceiling applied when loading a persisted contract that predates mandatory
+ * budgets: older runs stay inspectable and resumable, still under a hard cap. */
+export const DEFAULT_MAX_INPUT_TOKENS = 1_000_000;
+
 /**
  * Validate and canonicalize the versioned contract. Runtime JSON remains
  * authoritative; JSDoc types document the validated shape only.
  *
+ * Authoring entry points (validate, run, preflight, doctor) use the default
+ * strict mode: `maxInputTokens` is required. Commands that load a contract
+ * persisted inside a run directory pass `{persisted: true}` so runs written
+ * before a schema tightening remain readable; a missing budget then defaults
+ * to DEFAULT_MAX_INPUT_TOKENS instead of refusing to inspect finished work.
+ *
  * @param {JsonObject} raw
  * @param {string} contractPath
+ * @param {{persisted?: boolean}} [options]
  * @returns {ValidatedContract}
  */
-export function validateContract(raw, contractPath) {
+export function validateContract(raw, contractPath, options = {}) {
+  const { persisted = false } = options;
   assertObject(raw, "contract");
   rejectUnknown(raw, CONTRACT_FIELDS, "contract");
   validateMetadata(raw, "contract");
@@ -213,10 +225,12 @@ export function validateContract(raw, contractPath) {
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
     timeoutSec: positiveNumber(raw.timeoutSec ?? 2_400, "contract.timeoutSec"),
-    // Mandatory: a contract without a hard token budget is exactly how the
-    // 2026-08 usage incident happened (workers burned 1.2M+ input tokens
-    // unbounded). Authors must state the ceiling explicitly.
-    maxInputTokens: positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
+    // Mandatory at authoring time: a contract without a hard token budget is
+    // exactly how the 2026-08 usage incident happened (workers burned 1.2M+
+    // input tokens unbounded). Authors must state the ceiling explicitly.
+    maxInputTokens: raw.maxInputTokens === undefined && persisted
+      ? DEFAULT_MAX_INPUT_TOKENS
+      : positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
     warnings,
   });
 }

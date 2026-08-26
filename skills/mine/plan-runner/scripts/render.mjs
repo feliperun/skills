@@ -162,7 +162,7 @@ export function renderFindings(runDir) {
  */
 function loadRun(runDir) {
   const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(/** @type {import("./contract.mjs").JsonObject} */ (JSON.parse(readFileSync(contractPath, "utf8"))), contractPath);
+  const contract = validateContract(/** @type {import("./contract.mjs").JsonObject} */ (JSON.parse(readFileSync(contractPath, "utf8"))), contractPath, { persisted: true });
   validateRunMetadata(readJson(join(runDir, "run.json")));
   return { contract, nodes: readNodes(runDir, contract) };
 }

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_MAX_INPUT_TOKENS,
   PLAN_RUNNER_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   hashPacket,
@@ -93,6 +94,15 @@ test("input-token budgets are mandatory at contract level and optional per node"
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), maxInputTokens: 25_000, gate: false }],
   }), path);
   assert.equal(valid.nodes[0].maxInputTokens, 25_000);
+});
+
+test("persisted loading defaults a missing budget so older runs stay readable", () => {
+  const { path } = writeFixture();
+  const { maxInputTokens: _omitted, ...raw } = fixture();
+  const loaded = validateContract(raw, path, { persisted: true });
+  assert.equal(loaded.maxInputTokens, DEFAULT_MAX_INPUT_TOKENS);
+  // An invalid explicit value still fails under persisted loading.
+  assert.throws(() => validateContract(fixture({ maxInputTokens: 0 }), path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
 });
 
 function snapshot(overrides = {}) {

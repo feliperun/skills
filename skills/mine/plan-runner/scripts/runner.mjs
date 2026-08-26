@@ -235,7 +235,7 @@ export async function runContract(contractPath) {
 export async function resumeRun(runDirPath) {
   const runDir = resolve(runDirPath);
   const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   const lease = acquireControllerLease(runDir, {
     contractVersion: PLAN_RUNNER_VERSION,
     processStartToken: processStartToken(process.pid),
@@ -1757,7 +1757,7 @@ function serializableContract(contract) {
 export async function cancelRun(runDirPath) {
   const runDir = resolve(runDirPath);
   const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   writeJsonAtomic(join(runDir, "cancel.request.json"), { requestedAt: new Date().toISOString(), pid: process.pid });
   const lease = readLease(runDir);
   const healthyLease = lease && leaseHealthy(lease) ? /** @type {LeaseRecord} */ (lease) : null;
@@ -1906,7 +1906,7 @@ async function waitForTerminal(runDir, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const contractPath = join(runDir, "contract.json");
-    const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+    const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
     const states = readRunNodes(runDir, contract);
     if (states.every((state) => TERMINAL.has(state.status)) && states.every((state) => (state.invocations ?? []).every((invocation) => !invocationAlive(invocation)))) return true;
     await delay(100);
@@ -1962,7 +1962,7 @@ function reusedDoneWarnings(contract) {
     if (otherRunDir === ownRunDir || !existsSync(nodeDir)) continue;
     const otherContractPath = join(otherRunDir, "contract.json");
     if (!existsSync(otherContractPath)) throw new TypeError(`missing persisted contract ${otherContractPath}`);
-    const otherContract = validateContract(JSON.parse(readFileSync(otherContractPath, "utf8")), otherContractPath);
+    const otherContract = validateContract(JSON.parse(readFileSync(otherContractPath, "utf8")), otherContractPath, { persisted: true });
     for (const node of contract.nodes) {
       const statePath = join(nodeDir, `${node.id}.json`);
       if (!existsSync(statePath)) continue;
@@ -1986,7 +1986,7 @@ function reusedDoneWarnings(contract) {
 export async function superviseRun(runDir, intervalSec) {
   if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
   const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   const supervisorLease = acquireSupervisorLease(runDir, {
     contractVersion: PLAN_RUNNER_VERSION,
     processStartToken: processStartToken(process.pid),
@@ -2240,7 +2240,7 @@ function sameProcessStartToken(actual, expected) {
 function runIsNonterminal(runDir) {
   try {
     const contractPath = join(runDir, "contract.json");
-    const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+    const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
     const nodes = readRunNodes(runDir, contract);
     return nodes.length > 0 && nodes.some((node) => !TERMINAL.has(node.status));
   } catch (error) {
