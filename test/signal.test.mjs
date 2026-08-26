@@ -7,11 +7,11 @@ import {
   SIGNAL_END,
   SIGNAL_START,
   syncAgentSignal,
-} from "../skills/mine/plan-runner/scripts/signal.mjs";
+} from "../skills/mine/intent-factory/scripts/signal.mjs";
 import {
   closeCampaign,
   initializeCampaign,
-} from "../skills/mine/plan-runner/scripts/campaign.mjs";
+} from "../skills/mine/intent-factory/scripts/campaign.mjs";
 
 /**
  * @returns {{repo: string, runsDir: string, agentsPath: string}}
@@ -43,7 +43,7 @@ test("writes a signal block for an active campaign and an active run", () => {
   writeRunNodes(runsDir, "run-a", ["done", "running"]);
   assert.equal(syncAgentSignal(runsDir), true);
   const text = readFileSync(agentsPath, "utf8");
-  assert.match(text, /^# Rules\n\nline one\n\n<!-- plan-runner-active:start/, "original content kept on top");
+  assert.match(text, /^# Rules\n\nline one\n\n<!-- intent-factory-active:start/, "original content kept on top");
   assert.match(text, /campaign `demo`: active/);
   assert.match(text, /run `run-a`: active \(1\/2 nodes done\)/);
   assert.match(text, /deterministic detached process/u);

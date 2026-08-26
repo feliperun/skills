@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": [".claude/hooks/**/*.mjs", "skills/mine/plan-runner/scripts/**/*.mjs", "skills/mine/plan-runner/test/**/*.mjs", "bin/**/*.mjs", "test/**/*.mjs"]
+  "include": [".claude/hooks/**/*.mjs", "skills/mine/intent-factory/scripts/**/*.mjs", "skills/mine/intent-factory/test/**/*.mjs", "bin/**/*.mjs", "test/**/*.mjs"]
 }
