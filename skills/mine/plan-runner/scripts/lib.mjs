@@ -122,8 +122,8 @@ export function judgePrompt(node, workerResult, context = {}) {
   }
   const diff = Array.isArray(context.diff) ? /** @type {unknown[]} */ (context.diff).slice(0, 64) : [];
   const verificationResult = context.verification ?? { passed: false, commands: [] };
-  return `Review node ${node.id} independently. The review context is closed: inspect only the write files below, run only the verification commands below, and do not perform repository-wide discovery.\n\n` +
-    `Write files:\n${writeFiles}\n\nVerification:\n${verification}\n\n` +
+  return `Review node ${node.id} independently. The review context is closed: inspect only the write files below and do not perform repository-wide discovery. Do not re-run the verification commands — the controller already executed them and attached the results; re-running suites duplicates cost without adding evidence.\n\n` +
+    `Write files:\n${writeFiles}\n\nVerification commands (already executed by the controller):\n${verification}\n\n` +
     `Task brief:\n${node.taskPacket.objective}\n\nInstructions:\n${taskInstructions}\n\nDefinition of Done:\n${criteria}\n\n` +
     `Worker result (structured):\n${structured ? JSON.stringify(structured) : "(invalid worker result withheld)"}\n\n` +
     `Controller diff paths:\n${diff.length ? diff.map((path) => `- ${path}`).join("\n") : "- (none)"}\n\n` +

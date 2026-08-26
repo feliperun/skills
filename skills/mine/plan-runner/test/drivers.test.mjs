@@ -9,7 +9,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "../scripts/drivers/index.mjs";
-import { EXEC_JSONL_PROTOCOL, normalizeExecJsonlResult, parseVersion } from "../scripts/drivers/exec-jsonl.mjs";
+import { EXEC_JSONL_PROTOCOL, liveInputTokens, normalizeExecJsonlResult, parseVersion } from "../scripts/drivers/exec-jsonl.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
@@ -416,4 +416,26 @@ test("normalizes Codex cached token naming", () => {
     { type: "turn.completed", usage: { input_tokens: 8, cached_input_tokens: 5, output_tokens: 2 } },
   ].map((event) => JSON.stringify(event)).join("\n");
   assert.equal(normalizeProviderResult("codex", stream, 0, null).usage.cacheReadInputTokens, 5);
+});
+
+test("live metering reads cumulative Codex usage from a growing transcript", () => {
+  const stream = [
+    { type: "thread.started", thread_id: "t" },
+    { type: "turn.completed", usage: { input_tokens: 400, output_tokens: 10 } },
+    { type: "turn.completed", usage: { input_tokens: 1200, output_tokens: 30 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.equal(liveInputTokens("codex", stream), 1200);
+  assert.equal(liveInputTokens("codex", `${stream}\n{"type":"turn.compl`), 1200, "partial trailing line is ignored");
+  assert.equal(liveInputTokens("codex", "not json at all"), 0);
+});
+
+test("live metering sums per-request Claude usage and prefers the terminal total", () => {
+  const partial = [
+    { type: "assistant", message: { usage: { input_tokens: 100 } } },
+    { type: "assistant", message: { usage: { input_tokens: 250 } } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.equal(liveInputTokens("claude", partial), 350, "mid-run sum of per-request usage");
+  const terminal = `${partial}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 320 } })}`;
+  assert.equal(liveInputTokens("claude", terminal), 320, "terminal session total wins");
+  assert.equal(liveInputTokens("exec-jsonl", partial), 0, "completion-only drivers meter as zero mid-run");
 });

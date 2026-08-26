@@ -94,6 +94,7 @@ export function fixture(overrides = {}) {
     campaignId: "test-campaign",
     goal: "Prove the runner works",
     cwd: ".",
+    maxInputTokens: 1_000_000,
     runtimeDefaults: { worker: "luna", judge: "sol" },
     runtimes: {
       luna: { driver: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
@@ -212,6 +213,19 @@ if (process.argv.includes("--version")) {
       return;
     }
     if (mode === "silent") setTimeout(() => {}, 60_000);
+    else if (mode === "token-flood") {
+      // Streams cumulative turn.completed usage events while staying alive:
+      // lets tests observe live metering, per-node caps, and budget kills.
+      // No SIGTERM handler: a budget kill must surface as a signaled death.
+      let total = 0;
+      const step = () => {
+        total += 600;
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: total, output_tokens: 1 } }));
+        if (total < 10_000_000) timer = setTimeout(step, 10);
+      };
+      let timer = setTimeout(step, 5);
+      return;
+    }
     else if (mode === "heartbeat") setInterval(() => console.error("working"), 10);
     else if (prompt.includes("FAIL_WORKER") || (mode === "worker-fail" && !prompt.startsWith("Review node")) || (mode === "judge-fail" && prompt.startsWith("Review node"))) {
       console.log(JSON.stringify({type:"turn.failed",error:{message:"deliberate failure"}}));

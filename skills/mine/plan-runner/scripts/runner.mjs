@@ -32,7 +32,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { PLAN_RUNNER_VERSION, PROTOCOL_SCHEMA_VERSION, probeRuntime } from "./drivers/index.mjs";
-import { extractJson } from "./drivers/exec-jsonl.mjs";
+import { extractJson, liveInputTokens } from "./drivers/exec-jsonl.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   captureSourceIdentity,
@@ -483,6 +483,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       if (canceled) {
         const jobs = [...running.values()];
         await Promise.all(jobs.map((job) => terminateProcess(job)));
+        for (const job of jobs) recordInvocationUsage(job);
         for (const job of jobs) {
           if (job.phase === "worker") checkWorkerScope(contract, runDir, job, lease);
         }
@@ -495,11 +496,12 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
 
       await finalizeClosedJobs(contract, runDir, states, running, lease);
       await detectStalls(contract, running, async (job, status, error) => {
+        recordInvocationUsage(job);
         if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) return;
         transition(runDir, job.state, status, { phase: job.phase, error }, lease);
       });
       blockDependents(contract, runDir, states, lease);
-      enforceTokenBudget(contract, runDir, states, lease);
+      enforceTokenBudget(contract, runDir, states, running, lease);
 
       const slots = contract.maxParallel - running.size;
       if (slots > 0) {
@@ -914,42 +916,32 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease) {
     running.delete(nodeId);
     const state = states.get(nodeId);
     if (!state) continue;
-    if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) continue;
-    if (TERMINAL.has(state.status)) continue;
+    // Usage is extracted and persisted BEFORE any outcome-specific handling:
+    // a scope-gate failure, a killed process, or an invalid stream must never
+    // lose the tokens its invocation already spent (the 2026-08 incident
+    // persisted zero usage for 1.2M+ token workers on exactly this path).
+    if (TERMINAL.has(state.status)) {
+      recordInvocationUsage(job, { accumulate: false });
+      writeNode(runDir, state, lease);
+      continue;
+    }
+    const envelope = recordInvocationUsage(job);
     if (job.spawnError) {
       transition(runDir, state, "failed", { phase: job.phase, error: { code: "spawn_error", message: job.spawnError.message } }, lease);
       continue;
     }
-    /** @type {ProviderEnvelope} */
-    let envelope;
-    try {
-      const boundedStdout = readBoundedTail(job.paths.stdout);
-      const boundedStderr = readBoundedTail(job.paths.stderr, 512 * 1024);
-      envelope = normalizeProviderResult(job.runtime, boundedStdout, job.exitCode, job.signal, { preferStructured: job.phase === "judge" });
-    } catch (error) {
-      envelope = {
-        status: "failed",
-        result: null,
-        continuationId: null,
-        usage: { inputTokens: null, outputTokens: null, cacheReadInputTokens: null },
-        costUsd: null,
-        error: { code: "invalid_output", message: errorMessage(error) },
-      };
-    }
-    state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === job.invocation.id
-      ? { ...invocation, usage: envelope.usage }
-      : invocation);
+    if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) continue;
     if (envelope.status !== "done") {
-      transition(runDir, state, envelope.status, {
+      transition(runDir, state, job.budgetStop ? "exhausted" : envelope.status, {
         phase: job.phase,
         result: state.result,
-        error: envelope.error,
-        usage: addUsage(state.usage, envelope.usage),
+        error: job.budgetStop
+          ? budgetStopError(job.budgetStop, job.state)
+          : envelope.error,
       }, lease);
       continue;
     }
     if (job.phase === "worker") {
-      state.usage = addUsage(state.usage, envelope.usage);
       /** @type {WorkerResult} */
       let workerResult;
       try {
@@ -986,9 +978,66 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease) {
       else transition(runDir, state, "done", { phase: "complete", result: workerResult }, lease);
       continue;
     }
-    state.usage = addUsage(state.usage, envelope.usage);
     applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running);
   }
+}
+
+/**
+ * Extract the invocation's provider envelope from the bounded transcript tail
+ * and persist its usage into the matching invocation record. By default the
+ * usage is also accumulated into `state.usage` (the caller then transitions or
+ * continues); with `accumulate: false` only the invocation record is updated,
+ * for jobs whose node already reached a terminal state that already counted
+ * this spend.
+ *
+ * @param {Job} job
+ * @param {{accumulate?: boolean}} [options]
+ * @returns {ProviderEnvelope}
+ */
+function recordInvocationUsage(job, options = {}) {
+  const { state } = job;
+  /** @type {ProviderEnvelope} */
+  let envelope;
+  let boundedStdout = "";
+  try {
+    boundedStdout = readBoundedTail(job.paths.stdout);
+    const boundedStderr = readBoundedTail(job.paths.stderr, 512 * 1024);
+    envelope = normalizeProviderResult(job.runtime, boundedStdout, job.exitCode, job.signal, { preferStructured: job.phase === "judge" });
+  } catch (error) {
+    envelope = {
+      status: "failed",
+      result: null,
+      continuationId: null,
+      usage: { inputTokens: null, outputTokens: null, cacheReadInputTokens: null },
+      costUsd: null,
+      error: { code: "invalid_output", message: errorMessage(error) },
+    };
+  }
+  // Failure envelopes carry zeroed usage (a killed provider emits no terminal
+  // event), yet its transcript holds real per-turn counters. Backfill the
+  // input side from the live meter so kills, timeouts, and scope failures
+  // still report what they spent.
+  if (envelope.usage.inputTokens === null && boundedStdout) {
+    const observed = liveInputTokens(job.runtime.driver, boundedStdout);
+    if (observed > 0) envelope = { ...envelope, usage: { ...envelope.usage, inputTokens: observed } };
+  }
+  state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === job.invocation.id
+    ? { ...invocation, usage: envelope.usage }
+    : invocation);
+  if (options.accumulate !== false) state.usage = addUsage(state.usage, envelope.usage);
+  return envelope;
+}
+
+/**
+ * @param {"node"|"campaign"} scope
+ * @param {NodeSnapshot} state
+ * @returns {{code: string, message: string}}
+ */
+function budgetStopError(scope, state) {
+  const observed = state.usage?.inputTokens ?? 0;
+  return scope === "node"
+    ? { code: "token_budget_exceeded", message: `worker exceeded its per-node input-token cap (observed ${observed})` }
+    : { code: "budget_exceeded", message: `run input-token budget exhausted (spent ${observed})` };
 }
 
 /**
@@ -1125,13 +1174,69 @@ function blockDependents(contract, runDir, states, lease) {
  * @param {Map<string, NodeSnapshot>} states
  * @param {LeaseHandle} lease
  */
-function enforceTokenBudget(contract, runDir, states, lease) {
-  if (contract.maxInputTokens === undefined) return;
-  const spent = [...states.values()].reduce((total, state) => total + (state.usage?.inputTokens ?? 0), 0);
+/**
+ * Live token-budget enforcement. Persisted `state.usage` lags behind reality
+ * until an invocation closes, so active jobs are metered by scanning their
+ * still-growing transcripts (bounded tail) every tick. Two ceilings:
+ *
+ * - per-node `maxInputTokens`: terminate that worker the moment its observed
+ *   input tokens pass the cap (finalize labels the node exhausted);
+ * - contract `maxInputTokens`: persisted spend plus every active job's
+ *   observed spend — once reached, ALL active workers are terminated and
+ *   pending nodes are blocked. A budget that cannot stop a running worker is
+ *   not a budget.
+ *
+ * @param {ValidatedContract} contract
+ * @param {string} runDir
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {Map<string, Job>} running
+ * @param {LeaseHandle} lease
+ */
+function enforceTokenBudget(contract, runDir, states, running, lease) {
+  const observed = new Map();
+  let liveSpent = 0;
+  for (const [nodeId, job] of running) {
+    if (job.closed) continue;
+    const seen = observeLiveInputTokens(job);
+    observed.set(nodeId, seen);
+    liveSpent += seen;
+    if (job.node.maxInputTokens !== undefined && seen > job.node.maxInputTokens && !job.budgetStop) {
+      job.budgetStop = "node";
+      void terminateProcess(job).catch(() => {});
+      process.stdout.write(`[node] ${nodeId} input-token cap reached (${seen} > ${job.node.maxInputTokens}) · terminating\n`);
+    }
+  }
+  const persisted = [...states.values()].reduce((total, state) => total + (state.usage?.inputTokens ?? 0), 0);
+  const spent = persisted + liveSpent;
   if (spent < contract.maxInputTokens) return;
+  for (const job of running.values()) {
+    if (!job.budgetStop && !job.closed) {
+      job.budgetStop = "campaign";
+      void terminateProcess(job).catch(() => {});
+    }
+  }
   for (const state of states.values()) {
     if (state.status === "pending") transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `total input tokens (${spent}) reached the ${contract.maxInputTokens} budget` } }, lease);
   }
+}
+
+/**
+ * Meter one active invocation from its transcript tail. A monotonic
+ * high-water mark guards against providers whose counters reset or partial
+ * reads that split a line.
+ *
+ * @param {Job} job
+ * @returns {number}
+ */
+function observeLiveInputTokens(job) {
+  try {
+    const seen = liveInputTokens(job.runtime.driver, readBoundedTail(job.paths.stdout));
+    job.liveInputTokens = Math.max(job.liveInputTokens ?? 0, seen);
+  } catch {
+    // An unreadable transcript meters as zero this tick; wall-clock and stall
+    // detection remain the backstop.
+  }
+  return job.liveInputTokens ?? 0;
 }
 
 /**
@@ -1546,6 +1651,10 @@ function readRunNodes(runDir, contract) {
 }
 
 /**
+ * Capture the run's source identity, including one version-only probe per
+ * distinct routed runtime (a local binary call, no model tokens) so a later
+ * resume can refuse a driver that was upgraded or broke mid-campaign.
+ *
  * @param {ValidatedContract} contract
  * @returns {Promise<SourceIdentity>}
  */

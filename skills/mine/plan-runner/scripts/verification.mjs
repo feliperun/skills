@@ -302,7 +302,10 @@ export function validateVerificationCommand(command, label = "verification comma
   if (record.cwd !== undefined) validateRelativeCwd(record.cwd, label);
   const timeoutSec = record.timeoutSec === undefined ? 120 : record.timeoutSec;
   if (typeof timeoutSec !== "number" || !Number.isFinite(timeoutSec) || timeoutSec <= 0 || timeoutSec > VERIFICATION_LIMITS.maxTimeoutSec) throw new TypeError(`${label}.timeoutSec must be between 0 and ${VERIFICATION_LIMITS.maxTimeoutSec}`);
-  const repeat = record.repeat === undefined ? 2 : record.repeat;
+  // Default single attempt: the worker already ran these commands inside its
+  // session and the controller run is the independent confirmation; repeating
+  // by default doubled suite cost for no extra signal.
+  const repeat = record.repeat === undefined ? 1 : record.repeat;
   if (typeof repeat !== "number" || !Number.isInteger(repeat) || repeat <= 0 || repeat > VERIFICATION_LIMITS.maxRepeat) throw new TypeError(`${label}.repeat must be between 1 and ${VERIFICATION_LIMITS.maxRepeat}`);
   const env = record.env ?? [];
   if (!Array.isArray(env) || env.some((name) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))) throw new TypeError(`${label}.env must be an array of environment-variable names`);
@@ -343,7 +346,7 @@ export async function runVerification(commands, baseCwd, options = {}) {
   for (const [commandIndex, command] of validated.entries()) {
     /** @type {VerificationAttemptResult[]} */
     const attempts = [];
-    const repeat = command.repeat ?? 2;
+    const repeat = command.repeat ?? 1;
     for (let attempt = 1; attempt <= repeat; attempt += 1) {
       attempts.push(await runCommand(command, baseCwd, command.cwd ?? ".", attempt, options.signal, options, commandIndex));
     }

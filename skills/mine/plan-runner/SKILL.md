@@ -167,8 +167,14 @@ Run a plan outside the main context while keeping the current session as the con
 
    A node that exhausts on `wall_clock_timeout` was killed mid-work, not
    judged insufficient: `resume` doubles its wall-clock budget and persists
-   the adjustment. Set `maxInputTokens` on the contract to stop the controller
-   from scheduling new nodes once the cumulative input-token budget is spent.
+   the adjustment. `maxInputTokens` is mandatory on every contract and may be
+   tightened per node. The controller meters active workers live from their
+   transcripts: a node over its own cap is terminated immediately
+   (`token_budget_exceeded`), and once cumulative input tokens reach the
+   contract budget every running worker is stopped and pending nodes become
+   `blocked` (`budget_exceeded`). Usage is persisted even when an invocation
+   dies by kill, timeout, stall, or scope-gate failure — backfilled from the
+   transcript when the provider emitted no terminal event.
 
 13. Interrupt the user only for `blocked`, `failed`, `exhausted`, or `stalled`, or when the whole run finishes. Use the node error and gate summary; keep raw logs on disk.
 14. If the run process dies, resume it instead of starting a new one:
@@ -220,8 +226,12 @@ Set `maxRevisions` explicitly. A failing gate retries the worker in place with s
 
 Put deterministic checks before an LLM judge. The controller runs each
 declared argv command itself, captures bounded stdout/stderr, duration, and
-exit code, and repeats evidence-producing commands (default twice) before any
-judge. A controller interrupted mid-verification re-runs the phase on resume;
+exit code (once by default; set `repeat` explicitly for flaky evidence), before
+any judge — and the judge does NOT re-run them; it reviews the attached
+results so suites execute once per attempt instead of three times. Instruct
+workers in the packet to keep command output bounded (`| tail -n 200`); a full
+fuzz or test log pasted into worker context costs more than the work itself. A
+controller interrupted mid-verification re-runs the phase on resume;
 only a real command failure or timeout is a deterministic failure. A judge must
 return `pass` only with no findings and `maxSeverity: none`; findings below
 `failOn` are advisory but still require a `fail` verdict in the structured
@@ -230,8 +240,9 @@ judge output so trailing prose cannot replace the verdict.
 
 Make deterministic checks safe under the test runner's actual concurrency.
 Concurrent checks must use unique temporary/output paths; otherwise serialize
-them explicitly. Run evidence-producing checks twice before accepting a gate so
-shared-artifact races and non-idempotent verifiers surface early.
+them explicitly. Commands run once per attempt by default; set `repeat`
+explicitly when a verifier is flaky or leaves shared artifacts behind and the
+extra run is worth its cost.
 
 If a product gate has a falsification or STOP condition, require a durable
 machine-readable stop artifact and make the product verifier fail closed when

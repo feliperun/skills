@@ -100,6 +100,7 @@ export function renderWorkerPrompt(packet, nodeId) {
     ...bulletOrNone(packet.nonGoals),
     "",
     "## Verification",
+    "Run each command yourself before reporting done. Keep command output bounded: pipe long output through `| tail -n 200` (or similar) and never paste full test or fuzz logs into your context or results.",
     ...packet.verification.map((command) => `- ${command.argv.join(" ")}`),
     "",
     "## Required output",

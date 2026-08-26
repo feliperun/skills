@@ -453,6 +453,53 @@ function classifyFailure(message) {
 }
 
 /**
+ * Best-effort input-token meter over a still-growing transcript. The
+ * controller never owns the provider stream (the gate writes stdout straight
+ * to the log fd), so budget enforcement polls this instead. Lenient by
+ * design: unparsable or partial lines count as zero, and providers that only
+ * report usage at completion (agy, exec-jsonl) meter as 0 mid-run.
+ *
+ * @param {string} driver
+ * @param {string} stdout bounded transcript tail
+ * @returns {number}
+ */
+export function liveInputTokens(driver, stdout) {
+  // A transcript tail can start or end mid-line; meter leniently by parsing
+  // each line independently and skipping anything unparseable.
+  const events = String(stdout).split(/\r?\n/u).flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+  if (driver === "codex") {
+    // turn.completed usage is cumulative for the session; the last one wins.
+    const values = events
+      .filter((event) => event?.type === "turn.completed" && event.usage && typeof event.usage === "object")
+      .map((event) => finite(event.usage.input_tokens ?? event.usage.inputTokens))
+      .filter((value) => value !== null);
+    return values.length ? Math.max(...values) : 0;
+  }
+  if (driver === "claude" || driver === "glm") {
+    // The terminal result event carries the session total; before it lands,
+    // sum per-request assistant usage (each request re-reads full context).
+    const resultEvent = events.findLast((event) => event?.type === "result");
+    const resultUsage = resultEvent?.usage && typeof resultEvent.usage === "object"
+      ? finite(resultEvent.usage.input_tokens ?? resultEvent.usage.inputTokens)
+      : null;
+    if (resultUsage !== null) return resultUsage;
+    return events.reduce((sum, event) => {
+      if (event?.type !== "assistant") return sum;
+      const usage = event.message?.usage;
+      const value = usage && typeof usage === "object" ? finite(usage.input_tokens ?? usage.inputTokens) : null;
+      return sum + (value ?? 0);
+    }, 0);
+  }
+  return 0;
+}
+
+/**
  * @param {unknown} usage
  * @returns {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}}
  */

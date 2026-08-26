@@ -36,6 +36,7 @@ function fixture(overrides = {}) {
     campaignId: "campaign-test",
     goal: "validate protocol",
     cwd: ".",
+    maxInputTokens: 1_000_000,
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: { worker: { driver: "codex", model: "test-model" } },
     runtimeRules: [],
@@ -81,6 +82,17 @@ test("validation rejects unsupported protocol versions and stale packet hashes",
   assert.throws(() => validateContract(JSON.parse(readFileSync(versioned.path, "utf8")), versioned.path), /schemaVersion must be 1/u);
   const stale = writeFixture({ nodes: [{ id: "build", type: "backend", taskPacket: packet(), packetHash: "0".repeat(64), gate: false }] });
   assert.throws(() => validateContract(JSON.parse(readFileSync(stale.path, "utf8")), stale.path), /packetHash does not match/u);
+});
+
+test("input-token budgets are mandatory at contract level and optional per node", () => {
+  const { path } = writeFixture();
+  const { maxInputTokens: _omitted, ...raw } = fixture();
+  assert.throws(() => validateContract(raw, path), /contract\.maxInputTokens must be a positive integer/u);
+  assert.throws(() => validateContract(fixture({ maxInputTokens: 0 }), path), /contract\.maxInputTokens must be a positive integer/u);
+  const valid = validateContract(fixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), maxInputTokens: 25_000, gate: false }],
+  }), path);
+  assert.equal(valid.nodes[0].maxInputTokens, 25_000);
 });
 
 function snapshot(overrides = {}) {

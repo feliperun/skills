@@ -115,7 +115,7 @@ at validation time. Write paths are also relative and may name new files.
 Each `verification` entry is an argv command object: `argv` is required (a
 non-empty array of strings, at most 32 commands per packet, 64 argv items and
 32 KiB of argv bytes per command), with optional `cwd`, `timeoutSec` (default
-120, at most 600), `repeat` (default 2, at most 8), and `env` (declared
+120, at most 600), `repeat` (default 1, at most 8), and `env` (declared
 environment-variable names; values never travel in the packet).
 Discovery packets are read-only: `writeFiles` must be empty, and the generated
 prompt requires the worker to return an execution packet rather than edit the
@@ -251,9 +251,17 @@ A node that exhausts its
 wall-clock budget is restarted by `resume` with a doubled budget (persisted in
 the run's stored contract).
 
-`maxInputTokens` (optional) stops the controller from scheduling new nodes
-once the cumulative input tokens across all nodes reach the budget; running
-nodes finish, pending ones become `blocked` with `budget_exceeded`.
+`maxInputTokens` is mandatory on every contract and may be tightened per node.
+The controller meters active invocations live from their transcript tails each
+poll tick: a node whose observed input tokens pass its own cap is terminated
+immediately and labeled `exhausted` with `token_budget_exceeded`; once
+cumulative spend (persisted plus live-observed) reaches the contract budget,
+every running worker is stopped and pending nodes become `blocked` with
+`budget_exceeded`. A budget that cannot stop a running worker is not a budget.
+Usage is persisted before scope-gate evaluation, so kills, timeouts, stalls,
+and scope failures still report their real token cost — backfilled from the
+transcript when a provider died without a terminal usage event (agy and
+exec-jsonl only report at completion and meter as zero mid-run).
 
 Both limits are measured on a monotonic clock that does not advance while the
 host is suspended. A closed laptop lid pauses a run instead of killing whichever

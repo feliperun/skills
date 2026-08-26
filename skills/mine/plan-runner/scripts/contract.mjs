@@ -23,7 +23,7 @@ const DEFAULTS_FIELDS = new Set(["worker", "judge"]);
 const RULE_FIELDS = new Set(["match", "runtime"]);
 const NODE_FIELDS = new Set([
   "id", "type", "runtime", "dependsOn", "taskPacket", "taskPacketFile", "prompt", "promptFile",
-  "definitionOfDone", "gate", "timeoutSec", "requiredCapabilities", "packetHash", "sourceIdentity",
+  "definitionOfDone", "gate", "timeoutSec", "maxInputTokens", "requiredCapabilities", "packetHash", "sourceIdentity",
 ]);
 const RUNTIME_FIELDS = new Set([
   "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout",
@@ -61,9 +61,9 @@ const USAGE_FIELDS = new Set(["inputTokens", "outputTokens", "cacheReadInputToke
 
 /** @typedef {{enabled: boolean, runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
-/** @typedef {{id: string, type: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: string[], gate: ValidatedGate, timeoutSec?: number, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity}} ValidatedNode */
+/** @typedef {{id: string, type: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: string[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity}} ValidatedNode */
 
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens?: number, warnings: string[]}} ValidatedContract */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
 /** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
@@ -169,6 +169,9 @@ export function validateContract(raw, contractPath) {
     const timeoutSec = node.timeoutSec === undefined
       ? undefined
       : positiveNumber(node.timeoutSec, `nodes[${index}].timeoutSec`);
+    const maxInputTokens = node.maxInputTokens === undefined
+      ? undefined
+      : positiveInteger(node.maxInputTokens, `nodes[${index}].maxInputTokens`);
     return /** @type {ValidatedNode} */ ({
       ...node,
       dependsOn,
@@ -180,6 +183,7 @@ export function validateContract(raw, contractPath) {
       prompt,
       gate,
       timeoutSec,
+      maxInputTokens,
     });
   });
 
@@ -209,9 +213,10 @@ export function validateContract(raw, contractPath) {
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
     timeoutSec: positiveNumber(raw.timeoutSec ?? 2_400, "contract.timeoutSec"),
-    maxInputTokens: raw.maxInputTokens === undefined
-      ? undefined
-      : positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
+    // Mandatory: a contract without a hard token budget is exactly how the
+    // 2026-08 usage incident happened (workers burned 1.2M+ input tokens
+    // unbounded). Authors must state the ceiling explicitly.
+    maxInputTokens: positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
     warnings,
   });
 }

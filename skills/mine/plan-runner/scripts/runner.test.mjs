@@ -89,6 +89,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
     campaignId: "doctor-campaign",
     goal: "doctor",
     cwd: ".",
+    maxInputTokens: 1_000_000,
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
     runtimes: { wrapped: { driver: "exec-jsonl", model: "m", executable: "./my-worker.mjs" } },
     runtimeRules: [],
@@ -406,11 +407,13 @@ test("fails deterministic verification before the judge", async () => {
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
   assert.ok(state.verification, "verification state persisted");
   assert.ok(state.verification.commands, "verification commands persisted");
-  assert.equal(state.verification.commands[0].attempts.length, 2);
+  // Default repeat is 1: the last worker attempt's single command run replaces
+  // the phase state.
+  assert.equal(state.verification.commands[0].attempts.length, 1);
   assert.equal(state.verification.completed, true);
   assert.ok(state.verification.attempts, "verification attempts persisted");
-  assert.equal(state.verification.attempts.length, 2);
-  assert.equal(new Set(state.verification.attempts.map((attempt) => attempt.invocationId)).size, 2);
+  assert.equal(state.verification.attempts.length, 1);
+  assert.equal(new Set(state.verification.attempts.map((attempt) => attempt.invocationId)).size, 1);
   assert.ok(state.verification.attempts.every((attempt) => attempt.status === "failed" && Number.isInteger(attempt.pid) && Number.isInteger(attempt.processGroupId)));
   assert.equal(state.attempt, 2);
   assert.equal(state.revisions, 1);
@@ -965,7 +968,9 @@ test("resume terminates an interrupted verification attempt and re-runs the phas
     assert.equal(final.verification.passed, true);
     assert.ok(final.verification.attempts, "verification attempts persisted");
     assert.equal(final.verification.attempts[0].status, "crashed");
-    assert.equal(final.verification.attempts.length, 3);
+    // The fabricated crashed attempt is preserved and the phase re-runs once
+    // (default repeat 1).
+    assert.equal(final.verification.attempts.length, 2);
     assert.equal(final.revisions, 0);
     assert.equal(invocationAlive({ pid: childPid(verificationProcess), processStartToken: processStartToken(childPid(verificationProcess)) }), false);
   } finally {
@@ -1407,6 +1412,75 @@ test("maxInputTokens blocks pending nodes once the budget is spent", async () =>
   assert.equal(blocked.status, "blocked");
   assert.ok(blocked.error, "budget block records an error");
   assert.equal(blocked.error.code, "budget_exceeded");
+});
+
+test("a scope-gate failure still persists the usage its invocation spent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-usage-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-usage-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write");
+  assert.equal(state.usage?.inputTokens, 10, "transcript usage survives the scope failure");
+  const invocation = state.invocations?.at(-1);
+  assert.equal(invocation?.usage?.inputTokens, 10, "invocation record carries the same usage");
+});
+
+test("a wall-clock kill persists usage backfilled from the transcript", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-timeout-usage-"));
+  const path = writeContract(directory, fixture({
+    id: "timeout-usage-run",
+    pollIntervalMs: 10,
+    timeoutSec: 1,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood tokens" }), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.error?.code, "wall_clock_timeout");
+  assert.ok((state.usage?.inputTokens ?? 0) > 0, "killed worker reports its observed input tokens");
+});
+
+test("per-node maxInputTokens terminates an active worker over its cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-node-cap-"));
+  const path = writeContract(directory, fixture({
+    id: "node-cap-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Flood tokens" }),
+      maxInputTokens: 500,
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "token_budget_exceeded");
+  assert.ok((state.usage?.inputTokens ?? 0) >= 500, "usage observed before the kill is persisted");
+});
+
+test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cap-"));
+  const path = writeContract(directory, fixture({
+    id: "campaign-cap-run",
+    maxInputTokens: 2000,
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood tokens" }), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "budget_exceeded");
+  assert.equal(result.ok, false);
+  assert.ok((state.usage?.inputTokens ?? 0) > 0, "stopped worker still reports its spend");
 });
 
 test("a finished run prints the token report", async () => {
