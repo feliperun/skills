@@ -103,63 +103,103 @@ capsule produced only from a settled checkpoint. Its minimum shape is:
 
 ```json
 {
-  "schemaVersion": 1,
-  "capsuleId": "opaque-id",
-  "checkpoint": { "id": "opaque-id", "sequence": 3, "settledAt": "ISO-8601" },
-  "source": { "driver": "codex" },
-  "intent": { "id": "opaque-id", "summary": "What was requested" },
-  "settlement": { "status": "settled", "summary": "What is known" },
-  "context": {
-    "objective": "The continuing objective",
-    "decisions": [],
-    "nextAction": "The next safe action",
-    "openQuestions": []
-  },
-  "cost": { "status": "known", "currency": "USD", "amount": "0" },
-  "redaction": { "applied": true, "categories": [] },
-  "digest": { "algorithm": "sha-256", "value": "lowercase-hex" }
+  "capsuleVersion": 1,
+  "runId": "opaque-id",
+  "nodeId": "opaque-id",
+  "attemptId": "opaque-id",
+  "objective": "The continuing objective",
+  "constraints": [],
+  "decisions": [],
+  "nonGoals": [],
+  "changedFiles": [],
+  "worktreeIdentity": { "gitHead": "full-sha", "dirty": false },
+  "receipts": [],
+  "verifications": [],
+  "artifacts": [],
+  "blockers": [],
+  "nextAction": "The next safe action",
+  "usage": { "inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0 },
+  "costUsd": 0,
+  "budgetRemaining": 0,
+  "continuationHint": null,
+  "digest": "lowercase-hex"
 }
 ```
 
-The canonical UTF-8 JSON is at most 32 KiB. `capsuleId`, `checkpoint.id`, and
-`intent.id` are opaque strings of at most 128 bytes; `summary`, `objective`,
-and `nextAction` are at most 4 KiB each; and decisions, open questions, and
-redaction categories are at most 32 entries per list and 2 KiB per entry. The
-capsule carries bounded context and evidence only: no transcripts, logs,
-binaries, private hosts, recipients, credentials, authorization headers, or
-employer-specific relay details. Reject malformed or oversized capsules.
+The canonical UTF-8 JSON is at most 16 KiB; the builder never emits a capsule
+above the bound and throws when even a fully truncated capsule cannot fit.
+`runId`, `nodeId`, and `attemptId` are opaque identity strings; `objective` is
+at most 4 KiB, `nextAction` 1 KiB, and `continuationHint` 2 KiB; each
+string-list item is at most 1 KiB; receipts, verifications, and artifacts are
+capped at 64, 64, and 32 entries. The capsule carries bounded context and
+evidence only: no transcripts, logs, binaries, private hosts, recipients,
+credentials, authorization headers, or employer-specific relay details.
+Reject malformed capsules, unknown top-level fields, and digest mismatches.
 
-Redact before canonicalizing and digesting. Replace secret-like values and
-private routing data with a stable marker, and record only the redaction
-categories. Compute the lowercase hexadecimal SHA-256 digest over the
-canonical redacted JSON with `digest` omitted. Verify the digest before using a
-capsule; the digest authenticates the capsule contents, not an external effect.
+Redact before canonicalizing and digesting. Small deterministic rules replace
+environment assignments (`KEY=value`), bearer credential schemes, and
+high-entropy runs of 32 or more `[A-Za-z0-9_-]` characters that mix letters
+and digits with a stable `[redacted]` marker; the rules never read the
+building host's environment. Opaque identity fields (`runId`, `nodeId`,
+`attemptId`, `gitHead`, artifact `sha256`) are exempt, and free text is
+redacted before bounding so a secret cannot be shortened below its detector
+threshold first. Compute the lowercase hexadecimal SHA-256 digest over the
+canonical redacted JSON with `digest` omitted. Verify the digest before using
+a capsule; the digest authenticates the capsule contents, not an external
+effect.
+
+Oversize reduction is deterministic and explicit: artifact previews drop
+first, then list fields halve, replace items with the truncation marker, or
+empty (in artifacts, receipts, verifications, changedFiles, constraints,
+decisions, nonGoals, blockers order), then scalar fields shorten or remove
+(`continuationHint`, `nextAction`, `gitHead`, usage values, `costUsd`,
+`budgetRemaining`, then `objective`). List-field cuts and artifact-preview
+drops are flagged with a `*Truncated` boolean, shortened text carries an
+inline `…[truncated]` marker, and removed optional scalars become `null`, so a
+consumer can see exactly what was bounded.
+
+### Intents and settlements
 
 The intent/settlement lifecycle is:
 
 ```text
 intent -> executing -> settled
-                  \-> unknown_effect -> reconciled settled
+                  \-> unknown_effect -> safe_replay | reconciled
 ```
 
-Record the intent before dispatch. `settled` requires a known driver outcome;
-`unknown_effect` means the request may have run without proof of its outcome
-and must not be blindly retried. Reconciliation reuses the same intent and
-evidence, is idempotent, and either records a settled result with
-`resolution: "reconciled"` or leaves the intent unresolved. It must not create
-a second intent or invent service evidence.
+Record the intent before dispatch. Each provider invocation reserves a durable
+operation record (`operations/<invocationId>.intent.json`) before the provider
+process is released: operation and invocation identity, run, campaign, node,
+role, phase, attempt, runtime fingerprint, prompt fingerprint, and scope
+snapshot reference. The invocation identity written before spawn is the only
+identity later accepted for settlement or recovery.
 
-Cost status is independent of effect status and is one of:
+Settlement (`operations/<invocationId>.settlement.json`) is exact-once and
+idempotent: the operation keeps its first `settledAt`, merges receipts
+(provider continuation/session identity plus prompt, stdout, stderr, and — for
+workers — scope-snapshot paths, deduplicated by kind and reference), and never
+downgrades a resolved outcome. A preliminary `closed` observation or an
+`unknown_effect` may be replaced by the final envelope outcome; a resolved
+status is terminal. `settled` requires a known driver outcome; `unknown_effect`
+means the request may have run without proof of its outcome and must not be
+blindly retried. Replaying an unknown-effect window is gated by the node's
+`replayPolicy` (default `safe`): only a clean persisted workspace scope across
+the ambiguous window plus passing deterministic controller verification allows
+`safe_replay`; anything else settles as `reconciled` and blocks the node with
+`unknown_effect_reconciled` — a durable manual-stop boundary for terminal
+attention. Reconciliation reuses the same intent and evidence, is idempotent,
+and must not create a second intent or invent service evidence.
 
-- `known`: an authoritative amount returned by the driver.
-- `estimated`: an amount derived from reported usage and an explicit rate
-  basis.
-- `ambiguous`: the amount is unavailable or conflicting and must not be given
-  false precision.
+Cost is independent of effect status and travels as a plain nullable USD
+amount (`costUsd`) with the remaining campaign allowance (`budgetRemaining`)
+and raw usage token counts. Usage is persisted even when an invocation dies by
+kill, timeout, stall, or scope-gate failure; no amount is fabricated or
+promoted by a handoff.
 
-Preserve the status through export, import, and handoff. Only `known` may be
-presented as an authoritative amount; `estimated` and `ambiguous` remain
-labelled and do not become known merely because a session continues.
+All intent, settlement, and capsule writes happen under the controller lease,
+so the handoff between controllers is serialized: a second controller is
+rejected while a healthy lease is held, and `resume` takes over the lease
+before recovering any operation.
 
 ## Driver protocol and handoff
 
@@ -470,12 +510,18 @@ judge.schema.json
 nodes/<id>.json
 logs/<id>.<attempt>.<worker|judge>[.r<n>].jsonl
 logs/<id>.<attempt>.<worker|judge>[.r<n>].err
+operations/<invocationId>.intent.json
+operations/<invocationId>.settlement.json
+capsules/<nodeId>.<attempt>.json
 events.jsonl
 STATUS.md
 findings.json
 ```
 
 Use `STATUS.md` for normal status queries. Read logs only to diagnose an actionable failure. A provider or judge failure preserves the latest worker report in node state so completed work remains inspectable.
+`operations/` holds the exact-once intent and settlement records for every
+provider invocation; `capsules/` holds the portable continuation capsule
+written at each settled worker boundary. Both are state, not diagnostics.
 
 When a run finishes with any non-done node, the controller writes
 `findings.json`: a consolidated snapshot with per-node status, error,
@@ -549,7 +595,10 @@ controller or supervisor is rejected while a healthy lease is held, so
 simultaneous `resume` calls cannot double-run a node. `STATUS.md` treats a
 `running` node as an orphan when the lease is missing, expired, or invalid —
 the process is gone, so the node is not live work. `cancel` takes over a stale
-lease after confirming the previous controller is dead.
+lease after confirming the previous controller is dead. The lease also
+serializes the handoff: intents, settlements, node transitions, and capsule
+writes are made only by the lease holder, so two controllers cannot double-run
+or double-settle a node.
 
 ## Environment doctor
 
@@ -591,6 +640,10 @@ the runner CLI:
 The campaign plan schema, transition table, safety boundary, notification
 outbox, and autonomous operational workflow live in
 [campaign-autonomy.md](campaign-autonomy.md).
+Notifications are controller-only: the controller and the supervisor enqueue
+bounded events into the outbox and drain them through the configured generic
+executable; the provider protocol carries no notification surface, and live
+preflight probes strip the notification executable from their environment.
 
 ```bash
 node <skill-dir>/scripts/runner.mjs campaign list [--cwd <dir>]

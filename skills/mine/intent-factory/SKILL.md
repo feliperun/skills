@@ -15,53 +15,77 @@ boundary between sessions and drivers. Its minimum fields are:
 
 ```json
 {
-  "schemaVersion": 1,
-  "capsuleId": "opaque-id",
-  "checkpoint": { "id": "opaque-id", "sequence": 3, "settledAt": "ISO-8601" },
-  "source": { "driver": "codex" },
-  "intent": { "id": "opaque-id", "summary": "What was requested" },
-  "settlement": { "status": "settled", "summary": "What is known" },
-  "context": {
-    "objective": "The continuing objective",
-    "decisions": [],
-    "nextAction": "The next safe action",
-    "openQuestions": []
-  },
-  "cost": { "status": "known", "currency": "USD", "amount": "0" },
-  "redaction": { "applied": true, "categories": [] },
-  "digest": { "algorithm": "sha-256", "value": "lowercase-hex" }
+  "capsuleVersion": 1,
+  "runId": "opaque-id",
+  "nodeId": "opaque-id",
+  "attemptId": "opaque-id",
+  "objective": "The continuing objective",
+  "constraints": [],
+  "decisions": [],
+  "nonGoals": [],
+  "changedFiles": [],
+  "worktreeIdentity": { "gitHead": "full-sha", "dirty": false },
+  "receipts": [],
+  "verifications": [],
+  "artifacts": [],
+  "blockers": [],
+  "nextAction": "The next safe action",
+  "usage": { "inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0 },
+  "costUsd": 0,
+  "budgetRemaining": 0,
+  "continuationHint": null,
+  "digest": "lowercase-hex"
 }
 ```
 
-The capsule is bounded to 32 KiB of canonical UTF-8 JSON. `capsuleId`,
-`checkpoint.id`, and `intent.id` are opaque strings of at most 128 bytes;
-`summary`, `objective`, and `nextAction` are at most 4 KiB each; and each
-decision, question, or redaction category is at most 2 KiB, with at most 32
-entries in each list. It contains context, decisions, and bounded evidence—not
-transcripts, logs, binaries, credentials, authorization headers, private hosts,
-or recipients. Oversized or malformed capsules are rejected.
+The capsule is bounded to 16 KiB of canonical UTF-8 JSON and is never emitted
+larger; if even a fully truncated capsule cannot fit the bound, it is rejected
+instead of silently growing. `runId`, `nodeId`, and `attemptId` are opaque
+identity strings; `objective` is at most 4 KiB, `nextAction` 1 KiB, and
+`continuationHint` 2 KiB; each string-list item is at most 1 KiB; receipts,
+verifications, and artifacts are capped at 64, 64, and 32 entries. It contains
+context, decisions, and bounded evidence—not transcripts, logs, binaries,
+credentials, authorization headers, private hosts, or recipients. Oversized or
+malformed capsules are rejected.
 
-Redaction happens before canonicalization and digesting. Secret-like values and
-private routing data are replaced by a stable redaction marker; the capsule
-records only redaction categories, never the removed value. The digest is
-SHA-256 over the canonical redacted JSON with the `digest` field omitted. A
-consumer verifies the digest before using the capsule and never treats a
-digest as proof that an external effect occurred.
+Redaction happens before canonicalization and digesting. Small deterministic
+rules—environment assignments (`KEY=value`), bearer credential schemes, and
+high-entropy runs of 32 or more `[A-Za-z0-9_-]` characters that mix letters
+and digits—replace secret-shaped values with a stable `[redacted]` marker, and
+never depend on the building host's environment. Opaque identity fields
+(`runId`, `nodeId`, `attemptId`, `gitHead`, and artifact `sha256`) are exempt,
+so a valid identity survives the handoff; free text is redacted before
+bounding so a secret cannot be shortened below its detector threshold first.
+The digest is SHA-256 over the canonical redacted JSON with the `digest` field
+omitted. A consumer verifies the digest before using the capsule and never
+treats a digest as proof that an external effect occurred.
 
-An intent is recorded before work starts. The lifecycle is
-`intent -> executing -> settled` or `intent -> executing -> unknown_effect`.
-`settled` means the driver has a known outcome. `unknown_effect` means the
-request may have been applied even though the driver or transport did not
-prove the outcome; it is not permission to retry. Reconciliation uses the same
-intent and evidence to produce a new settled record marked `reconciled`, or
-leaves the intent unresolved. Reconcile is idempotent and does not invent
-service evidence or create a second intent.
+An intent is recorded before work starts. Each provider invocation reserves a
+durable operation identity before the provider is released, and the settlement
+that follows is exact-once and idempotent: it keeps the first `settledAt`,
+merges provider receipts (continuation/session identity plus prompt, stdout,
+stderr, and scope-snapshot paths) without duplication, and never downgrades a
+resolved outcome. The lifecycle is `intent -> executing -> settled` or
+`intent -> executing -> unknown_effect`. `settled` means the driver has a known
+outcome. `unknown_effect` means the request may have been applied even though
+the driver or transport did not prove the outcome; it is not permission to
+retry. An unknown-effect window is replayed only when the node's `replayPolicy`
+is `safe` and the persisted workspace scope is clean across the ambiguous
+window and deterministic controller verification passes; anything else settles
+as `reconciled` and blocks the node with `unknown_effect_reconciled` — a
+durable manual-stop boundary for terminal attention. Reconcile is idempotent,
+uses the same intent and evidence, and never invents service evidence or
+creates a second intent.
 
-Cost is reported separately from effect settlement. `known` is an authoritative
-amount from the driver, `estimated` is derived from reported usage and an
-explicit rate basis, and `ambiguous` means the amount cannot be resolved
-without risking false precision. An estimated or ambiguous amount must remain
-labelled as such; it is never promoted to known by a handoff.
+Cost is reported separately from effect settlement as a plain nullable USD
+amount with the remaining campaign budget, and usage is persisted even when an
+invocation dies by kill, timeout, stall, or scope-gate failure; no amount is
+fabricated or promoted by a handoff.
+
+Intent, settlement, and capsule records are written only by the lease-holding
+controller, so the handoff between controllers is serialized: a second
+controller is rejected while a healthy lease is held, and `resume` takes over
+the lease before recovering any operation.
 
 Drivers use a narrow protocol: one request carries the closed task packet, the
 intent identifier, an optional portable capsule, and an optional explicit
@@ -79,6 +103,13 @@ and a Claude session cannot be resumed by Codex. To hand off from Codex to
 Claude, settle the Codex intent, export and verify the capsule, and start a new
 Claude session from that capsule; the reverse handoff follows the same rule.
 No handoff is valid from an executing or unknown-effect checkpoint.
+
+Notifications are controller-only by construction: only the controller and
+supervisor code paths can enqueue bounded `node.terminal`, `run.terminal`, or
+attention events into the campaign outbox and drain them through the
+configured generic executable; the provider protocol carries no notification
+surface, and live preflight probes strip the notification executable from
+their environment.
 
 This release ends at the continuity kernel. Service-driver adapters,
 service-specific reconciliation, and a transactional store are later phases;
@@ -111,8 +142,16 @@ the public contract must not depend on them.
    [references/session-memory.md](references/session-memory.md). The
    campaign also mirrors its active state into a managed block at the bottom
    of the target repo's `AGENTS.md`, so any agent that takes over — whatever
-   the harness — sees that active work exists before its first prompt. Read
-   the block, never edit it; it is rewritten by the runner.
+   the harness — sees that active work exists before its first prompt. The
+   block is delimited by `<!-- intent-factory-active:start (managed by
+   intent-factory — read, never edit) -->` and
+   `<!-- intent-factory-active:end -->` HTML comments and lists the active
+   campaign and run with their `HANDOFF.md`/`STATUS.md` pointers. Read the
+   block, never edit it; the runner rewrites it at run start, run end,
+   resume, and cancel. The workspace snapshot hashes `AGENTS.md` with only
+   that complete block normalized, so the runner's own refresh is never
+   mistaken for worker scope drift, while human-authored guidance outside
+   the block still changes the file identity.
 3. Inspect the target repository exactly once, then turn the approved plan into one JSON contract. Author one closed task packet per node instead of leaving workers to discover the repository themselves. Workers do not own repository discovery; the orchestrator owns it once and amortizes that inspection across workers, judges, and retries. Use an explicit `mode: "discovery"` node only when you genuinely cannot produce an execution packet yet.
 
    One contract covers one whole approved plan step: every node of the step with its `dependsOn` edges, authored in a single turn. Never split a step into one contract per node or per function — each extra contract is another orchestrator turn spent dispatching instead of planning, and serial micro-contracts keep the expensive control session active for the entire physical runtime. The only legitimate single-node contract is a targeted fix node after gate exhaustion; `validate` warns on any other single-node contract.
