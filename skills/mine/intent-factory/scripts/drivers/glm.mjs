@@ -31,7 +31,7 @@ export const glmDriver = {
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
-    return process.env.PLAN_RUNNER_GLM_BIN ?? runtime.executable ?? "claude";
+    return process.env.INTENT_FACTORY_GLM_BIN ?? runtime.executable ?? "claude";
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */

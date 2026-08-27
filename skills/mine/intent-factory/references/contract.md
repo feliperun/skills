@@ -386,10 +386,12 @@ Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule
 `permissionMode` (default `acceptEdits`); a node that must execute commands
 (builds, tests, smoke scripts) needs `bypassPermissions`, because headless
 `acceptEdits` denies every non-trivial command and the worker can only return
-`blocked_context`. An agy runtime uses the
-installed `agy` CLI (or `PLAN_RUNNER_AGY_BIN`) and may set `printTimeout`; omit
-`reasoning` for models that do not accept `--effort`. A Codex runtime may
-provide arbitrary `config` entries; the adapter serializes each one as a
+`blocked_context`. The default executable is `claude`; override it with
+`executable` or `INTENT_FACTORY_CLAUDE_BIN`. An agy runtime uses the
+installed `agy` CLI (or `INTENT_FACTORY_AGY_BIN`) and may set `printTimeout`; omit
+`reasoning` for models that do not accept `--effort`. A Codex runtime defaults
+to the `codex` binary (override with `executable` or `INTENT_FACTORY_CODEX_BIN`)
+and may provide arbitrary `config` entries; the adapter serializes each one as a
 `-c key=value` override. Store environment variable names, never secret values.
 
 A glm runtime runs GLM models (for example `glm-5.3[1m]`, the 1M-context tier)
@@ -401,7 +403,7 @@ and `ANTHROPIC_AUTH_TOKEN` into the worker environment and removes any ambient
 named by `config["auth_token.env_key"]` (default `ZAI_API_KEY`, falling back to
 `ANTHROPIC_AUTH_TOKEN`); declaring the key in `config` also makes preflight
 report a missing credential. The default executable is `claude`; override it
-with `executable` or `PLAN_RUNNER_GLM_BIN`. Omit `reasoning` for models that do
+with `executable` or `INTENT_FACTORY_GLM_BIN`. Omit `reasoning` for models that do
 not accept `--effort`. The CLI may log an `unrecognized_model` warning on
 stderr for models outside its local catalog; the request still goes through
 and the result normalizes normally.
@@ -410,7 +412,7 @@ and the result normalizes normally.
 JSONL protocol: it receives one `run.request` line on stdin, including
 `continuationId` and (when declared) `maxInvocationTokens`, and writes
 `run.started`/`message`/`run.completed`/`run.failed` events to stdout, in that
-order, with no unknown fields. Set `executable` (or `PLAN_RUNNER_EXEC_JSONL_BIN`)
+order, with no unknown fields. Set `executable` (or `INTENT_FACTORY_EXEC_JSONL_BIN`)
 for the binary, `args` for fixed arguments, and `versionArgs` when it does not
 accept `--version`. It supports structured output, continuation, and usage
 reporting, but neither monetary-budget enforcement, sandbox, nor permission

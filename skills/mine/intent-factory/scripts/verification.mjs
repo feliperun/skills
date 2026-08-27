@@ -323,7 +323,7 @@ export function validateWorkspaceScopeBoundary(cwd, boundary, declared = {}) {
  */
 function captureIgnoreSources(root) {
   /** @type {Set<string>} */
-  const paths = new Set([".planrunnerignore", ".gitignore", ".git/config"]);
+  const paths = new Set([".intentfactoryignore", ".gitignore", ".git/config"]);
   try {
     if (lstatSync(resolve(root, ".git")).isFile()) paths.add(".git");
   } catch (error) {
@@ -449,11 +449,11 @@ function resolveScopePath(root, path) {
 function relevantWorkspacePaths(cwd) {
   const args = ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard"];
   try {
-    lstatSync(resolve(cwd, ".planrunnerignore"));
-    args.push("--exclude-from=.planrunnerignore");
+    lstatSync(resolve(cwd, ".intentfactoryignore"));
+    args.push("--exclude-from=.intentfactoryignore");
   } catch (error) {
     if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
-      throw fail("snapshot_read_error", `cannot inspect .planrunnerignore: ${error instanceof Error ? error.message : String(error)}`);
+      throw fail("snapshot_read_error", `cannot inspect .intentfactoryignore: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   args.push("-z");

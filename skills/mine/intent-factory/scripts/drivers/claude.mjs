@@ -18,7 +18,7 @@ export const claudeDriver = {
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
-    return process.env.PLAN_RUNNER_CLAUDE_BIN ?? runtime.executable ?? "claude";
+    return process.env.INTENT_FACTORY_CLAUDE_BIN ?? runtime.executable ?? "claude";
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */

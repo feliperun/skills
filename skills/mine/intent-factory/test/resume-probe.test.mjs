@@ -54,16 +54,16 @@ test("resume retries a transient driver probe failure instead of refusing as dri
   orphan(runDir, "build");
 
   const flaky = fakeCodexProbe({ failures: 1 });
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = flaky;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = flaky;
   try {
     const resumed = await resumeRun(runDir);
     assert.equal(resumed.ok, true);
     assert.equal(nodeState(resumed).status, "done");
     assert.equal(nodeState(resumed).attempt, 1);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -86,15 +86,15 @@ test("resume still refuses concrete driver version changes as drift", async () =
   orphan(runDir, "build");
 
   const upgraded = fakeCodexProbe({ failures: 0, version: "fake-codex 9.9.9" });
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = upgraded;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = upgraded;
   try {
     await assert.rejects(
       () => resumeRun(runDir),
       /source drift detected in driverVersions/u,
     );
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });

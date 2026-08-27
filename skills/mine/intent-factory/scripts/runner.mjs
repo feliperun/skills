@@ -35,7 +35,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import {
-  PLAN_RUNNER_VERSION,
+  INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   driverCapabilities,
   probeRuntime,
@@ -216,7 +216,7 @@ export async function runContract(contractPath) {
     throw error;
   }
   const lease = acquireControllerLease(runDir, {
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     processStartToken: processStartToken(process.pid),
   });
   lease.startHeartbeat();
@@ -240,7 +240,7 @@ export async function runContract(contractPath) {
       /** @type {NodeSnapshot} */
       const state = {
         schemaVersion: PROTOCOL_SCHEMA_VERSION,
-        contractVersion: PLAN_RUNNER_VERSION,
+        contractVersion: INTENT_FACTORY_VERSION,
         id: node.id,
         type: node.type,
         sourceIdentity: node.sourceIdentity,
@@ -286,7 +286,7 @@ export async function resumeRun(runDirPath) {
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   assertCostCapability(contract);
   const lease = acquireControllerLease(runDir, {
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     processStartToken: processStartToken(process.pid),
   });
   lease.startHeartbeat();
@@ -876,7 +876,7 @@ function createRunMetadata(lease, sourceIdentity) {
   const current = lease.current;
   const metadata = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     pid: process.pid,
     processStartToken: processStartToken(process.pid),
     startedAt: new Date().toISOString(),
@@ -3177,7 +3177,7 @@ function appendTransitionEvent(runDir, state, from, to, details = {}, lease = nu
   /** @type {Record<string, unknown>} */
   const event = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     at: state.updatedAt,
     node: state.id,
     sourceIdentity: state.sourceIdentity,
@@ -4093,7 +4093,7 @@ export async function cancelRun(runDirPath) {
 async function acquireStaleControllerLease(runDir) {
   for (;;) {
     try {
-      return acquireControllerLease(runDir, { contractVersion: PLAN_RUNNER_VERSION, processStartToken: processStartToken(process.pid) });
+      return acquireControllerLease(runDir, { contractVersion: INTENT_FACTORY_VERSION, processStartToken: processStartToken(process.pid) });
     } catch (error) {
       const record = /** @type {Record<string, unknown>} */ (error);
       const lease = /** @type {LeaseRecord|undefined} */ (record.lease);
@@ -4162,7 +4162,7 @@ async function waitForTerminal(runDir, timeoutMs) {
   return false;
 }
 
-const LIVE_PREFLIGHT_PROMPT = "Respond with exactly PLAN_RUNNER_PREFLIGHT_OK and do not use tools.";
+const LIVE_PREFLIGHT_PROMPT = "Respond with exactly INTENT_FACTORY_PREFLIGHT_OK and do not use tools.";
 const LIVE_PREFLIGHT_OUTPUT_LIMIT_BYTES = 512 * 1024;
 
 /**
@@ -4220,9 +4220,9 @@ export async function preflightContract(contractPath, options = {}) {
 
 /** @param {number|undefined} configured */
 function livePreflightTimeout(configured) {
-  const raw = configured ?? (process.env.PLAN_RUNNER_PREFLIGHT_TIMEOUT_SEC === undefined
+  const raw = configured ?? (process.env.INTENT_FACTORY_PREFLIGHT_TIMEOUT_SEC === undefined
     ? 15
-    : Number(process.env.PLAN_RUNNER_PREFLIGHT_TIMEOUT_SEC));
+    : Number(process.env.INTENT_FACTORY_PREFLIGHT_TIMEOUT_SEC));
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
     throw new TypeError("preflight live timeout must be a positive number of seconds");
   }
@@ -4280,7 +4280,7 @@ function livePreflight(runtime, cwd, timeoutSec) {
         if (value === null) delete env[key];
         else env[key] = value;
       }
-      delete env.PLAN_RUNNER_NOTIFY_BIN;
+      delete env.INTENT_FACTORY_NOTIFY_BIN;
       child = /** @type {import("node:child_process").ChildProcessWithoutNullStreams} */ (spawn(command.executable, command.args, {
         cwd,
         env,
@@ -4521,7 +4521,7 @@ export async function superviseRun(runDir, intervalSec) {
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   const campaign = resolveCampaign(join(contract.cwd, ".runs"), contract.campaignId);
   const supervisorLease = acquireSupervisorLease(runDir, {
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     processStartToken: processStartToken(process.pid),
   });
   try {
@@ -4631,7 +4631,7 @@ function detachSelf(command, target, extraArgs = []) {
   const nonce = randomUUID();
   const child = /** @type {DetachedChild} */ (spawn(process.execPath, [fileURLToPath(import.meta.url), command, target, ...extraArgs], {
     cwd: process.cwd(),
-    env: { ...process.env, PLAN_RUNNER_BOOTSTRAP_NONCE: nonce },
+    env: { ...process.env, INTENT_FACTORY_BOOTSTRAP_NONCE: nonce },
     detached: process.platform !== "win32", stdio: "ignore",
   }));
   child.unref();
@@ -4862,7 +4862,7 @@ function bootstrapRunDir(command, target) {
 function writeBootstrapFailure(command, target, error) {
   const runDir = bootstrapRunDir(command, target);
   if (!runDir || !existsSync(runDir)) return;
-  const nonce = validBootstrapNonce(process.env.PLAN_RUNNER_BOOTSTRAP_NONCE) ? process.env.PLAN_RUNNER_BOOTSTRAP_NONCE : null;
+  const nonce = validBootstrapNonce(process.env.INTENT_FACTORY_BOOTSTRAP_NONCE) ? process.env.INTENT_FACTORY_BOOTSTRAP_NONCE : null;
   const failure = { status: "failed", pid: process.pid, processStartToken: processStartToken(process.pid), runDir, nonce, at: new Date().toISOString(), error: error.message };
   if (command === "run" && existsSync(join(runDir, "contract.json"))) return;
   /** @type {BootstrapRecord|null} */
@@ -4915,7 +4915,7 @@ function validBootstrapNonce(value) {
 
 /** @returns {boolean} */
 function hasDetachedBootstrapNonce() {
-  if (!validBootstrapNonce(process.env.PLAN_RUNNER_BOOTSTRAP_NONCE)) return false;
+  if (!validBootstrapNonce(process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)) return false;
   try {
     return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
   } catch {
@@ -4927,8 +4927,8 @@ function hasDetachedBootstrapNonce() {
  * @returns {string}
  */
 function bootstrapNonceForProcess() {
-  return validBootstrapNonce(process.env.PLAN_RUNNER_BOOTSTRAP_NONCE)
-    ? /** @type {string} */ (process.env.PLAN_RUNNER_BOOTSTRAP_NONCE)
+  return validBootstrapNonce(process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)
+    ? /** @type {string} */ (process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)
     : randomUUID();
 }
 
@@ -5144,7 +5144,7 @@ export async function handoffRun(target, values = {}) {
   if (!planNode) throw new Error(`unknown node: ${nodeId}`);
   if (!contract.runtimes[runtimeId]) throw new Error(`unknown runtime: ${runtimeId}`);
   const lease = acquireControllerLease(runDir, {
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     processStartToken: processStartToken(process.pid),
   });
   lease.startHeartbeat();
@@ -5213,11 +5213,11 @@ async function handoffCommand(target, values) {
 }
 
 const DRIVER_BIN_OVERRIDES = Object.freeze({
-  codex: "PLAN_RUNNER_CODEX_BIN",
-  claude: "PLAN_RUNNER_CLAUDE_BIN",
-  agy: "PLAN_RUNNER_AGY_BIN",
-  glm: "PLAN_RUNNER_GLM_BIN",
-  "exec-jsonl": "PLAN_RUNNER_EXEC_JSONL_BIN",
+  codex: "INTENT_FACTORY_CODEX_BIN",
+  claude: "INTENT_FACTORY_CLAUDE_BIN",
+  agy: "INTENT_FACTORY_AGY_BIN",
+  glm: "INTENT_FACTORY_GLM_BIN",
+  "exec-jsonl": "INTENT_FACTORY_EXEC_JSONL_BIN",
 });
 
 /**
@@ -5244,7 +5244,7 @@ async function doctorCommand(contractPath, values) {
     const found = findExecutable(binary);
     checks.push({ name: `binary ${binary}`, ok: found !== null, detail: found ?? "not found on PATH" });
   }
-  checks.push({ name: "runner schema", ok: true, detail: `protocol ${PROTOCOL_SCHEMA_VERSION} · runner ${PLAN_RUNNER_VERSION}` });
+  checks.push({ name: "runner schema", ok: true, detail: `protocol ${PROTOCOL_SCHEMA_VERSION} · runner ${INTENT_FACTORY_VERSION}` });
   /** @type {Set<string>} */
   let usedDrivers = new Set();
   /** @type {Set<string>} */
@@ -5273,7 +5273,7 @@ async function doctorCommand(contractPath, values) {
     checks.push({ name: "contract", ok: true, detail: "no contract.json provided; skipping runtime probes" });
   }
   // A PATH-only check must not fail a runtime whose binary is supplied through
-  // an explicit executable or a PLAN_RUNNER_*_BIN override; the driver probe above
+  // an explicit executable or a INTENT_FACTORY_*_BIN override; the driver probe above
   // already validated whatever the runtime actually resolves to.
   for (const binary of ["codex", "claude", "agy", "glm", "exec-jsonl"]) {
     const overrideName = /** @type {Record<string, string>} */ (DRIVER_BIN_OVERRIDES)[binary];

@@ -18,7 +18,7 @@ export const codexDriver = {
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
-    return process.env.PLAN_RUNNER_CODEX_BIN ?? runtime.executable ?? "codex";
+    return process.env.INTENT_FACTORY_CODEX_BIN ?? runtime.executable ?? "codex";
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */

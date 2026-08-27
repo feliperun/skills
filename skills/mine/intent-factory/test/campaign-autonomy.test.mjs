@@ -183,7 +183,7 @@ test("fake execution reaches automatic completion", async () => {
 
 test("notification outbox is bounded, deduplicated, and retried", async () => {
   const value = tempRepo();
-  const previous = process.env.PLAN_RUNNER_NOTIFY_BIN;
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
   try {
     enqueueNotification(value.campaignPath, "campaign.attention", "same", "attention");
     enqueueNotification(value.campaignPath, "campaign.attention", "same", "attention");
@@ -192,39 +192,39 @@ test("notification outbox is bounded, deduplicated, and retried", async () => {
     const counter = join(value.root, "notify.count");
     writeFileSync(notify, `#!/usr/bin/env node\nimport { existsSync, writeFileSync } from "node:fs"; process.stdin.resume(); process.stdin.on("end", () => { if (!existsSync(${JSON.stringify(counter)})) { writeFileSync(${JSON.stringify(counter)}, "1"); process.exit(1); } process.exit(0); });\n`);
     chmodSync(notify, 0o755);
-    process.env.PLAN_RUNNER_NOTIFY_BIN = notify;
+    process.env.INTENT_FACTORY_NOTIFY_BIN = notify;
     assert.equal((await drainNotifications(value.campaignPath)).pending, 1);
     assert.equal((await drainNotifications(value.campaignPath)).pending, 0);
     assert.equal(readNotificationOutbox(value.campaignPath)[0].attempts, 2);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
-    else process.env.PLAN_RUNNER_NOTIFY_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
     cleanup(value);
   }
 });
 
 test("campaign supervision drains notifications automatically", async () => {
   const value = tempRepo();
-  const previous = process.env.PLAN_RUNNER_NOTIFY_BIN;
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
   try {
     const delivered = join(value.root, "campaign-delivered.json");
     const notify = join(value.root, "campaign-notify.mjs");
     writeFileSync(notify, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs"; let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { input += chunk; }); process.stdin.on("end", () => { writeFileSync(${JSON.stringify(delivered)}, input); });\n`);
     chmodSync(notify, 0o755);
-    process.env.PLAN_RUNNER_NOTIFY_BIN = notify;
+    process.env.INTENT_FACTORY_NOTIFY_BIN = notify;
     enqueueNotification(value.campaignPath, "campaign.attention", "automatic", "attention");
     await superviseCampaignOnce(value.campaignPath, { executor: async () => {} });
     assert.equal(JSON.parse(readFileSync(delivered, "utf8")).type, "campaign.attention");
     assert.equal(readNotificationOutbox(value.campaignPath)[0].deliveredAt !== null, true);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
-    else process.env.PLAN_RUNNER_NOTIFY_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
     cleanup(value);
   }
 });
 
 test("detached supervisor reports readiness from the pinned runner", async () => {
-  const value = tempRepo(`import { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const id = process.argv[4]; const cwd = process.argv[process.argv.indexOf("--cwd") + 1]; const nonce = process.env.PLAN_RUNNER_CAMPAIGN_BOOTSTRAP_NONCE; const path = join(cwd, ".runs", "campaigns", id); mkdirSync(path, { recursive: true }); writeFileSync(join(path, "controller-bootstrap.json." + nonce + ".json"), JSON.stringify({ status: "ready", pid: process.pid })); setInterval(() => {}, 1000);\n`);
+  const value = tempRepo(`import { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const id = process.argv[4]; const cwd = process.argv[process.argv.indexOf("--cwd") + 1]; const nonce = process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE; const path = join(cwd, ".runs", "campaigns", id); mkdirSync(path, { recursive: true }); writeFileSync(join(path, "controller-bootstrap.json." + nonce + ".json"), JSON.stringify({ status: "ready", pid: process.pid })); setInterval(() => {}, 1000);\n`);
   try {
     const result = await detachSelf(value.campaignPath, { intervalMs: 100 });
     assert.ok(result.pid > 0);
@@ -237,7 +237,7 @@ test("public campaign CLI continues a detached controller after the launcher exi
   const campaignId = "cli-campaign";
   const contractPath = join(root, "initial.json");
   const provider = fakeCampaignProvider(root);
-  const env = { PLAN_RUNNER_CODEX_BIN: provider };
+  const env = { INTENT_FACTORY_CODEX_BIN: provider };
   try {
     execFileSync("git", ["init", "-q", root]);
     writeFileSync(join(root, ".gitignore"), ".runs/\n");

@@ -103,7 +103,7 @@ Terminal campaign events are appended to
 attempt count, delivery timestamp, and last error. Duplicate event keys are
 ignored; delivered entries are evicted first when the bounded outbox is full.
 
-Set `PLAN_RUNNER_NOTIFY_BIN` to an executable that accepts one JSON event on
+Set `INTENT_FACTORY_NOTIFY_BIN` to an executable that accepts one JSON event on
 stdin and exits zero on successful delivery. `campaign drain` retries pending
 events. At-least-once delivery is expected: a transport may receive an event
 again after a process crash, so consumers should deduplicate by `eventId`.

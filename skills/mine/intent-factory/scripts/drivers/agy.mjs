@@ -19,7 +19,7 @@ export const agyDriver = {
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
-    return process.env.PLAN_RUNNER_AGY_BIN ?? runtime.executable ?? "agy";
+    return process.env.INTENT_FACTORY_AGY_BIN ?? runtime.executable ?? "agy";
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */

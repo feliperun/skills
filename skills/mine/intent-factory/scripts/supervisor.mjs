@@ -10,10 +10,10 @@ const DEFAULT_GRACE_MS = 2_000;
 const GATE_SCRIPT = String.raw`
 import { existsSync, readFileSync, statSync, openSync, closeSync, readSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
-const config = JSON.parse(readFileSync(process.env.PLAN_RUNNER_GATE_CONFIG, "utf8"));
-const releasePath = process.env.PLAN_RUNNER_GATE_RELEASE;
-const parentPid = Number(process.env.PLAN_RUNNER_GATE_PARENT_PID);
-const parentToken = process.env.PLAN_RUNNER_GATE_PARENT_TOKEN || null;
+const config = JSON.parse(readFileSync(process.env.INTENT_FACTORY_GATE_CONFIG, "utf8"));
+const releasePath = process.env.INTENT_FACTORY_GATE_RELEASE;
+const parentPid = Number(process.env.INTENT_FACTORY_GATE_PARENT_PID);
+const parentToken = process.env.INTENT_FACTORY_GATE_PARENT_TOKEN || null;
 const maxLogBytes = 512 * 1024;
 function startToken(pid) {
   if (process.platform !== "linux" || !pid) return null;
@@ -91,7 +91,7 @@ function childEnv() {
   }
   // Worker providers are not a notification surface: strip the controller-only
   // transport after the driver overlay so no driver can reintroduce it.
-  delete merged.PLAN_RUNNER_NOTIFY_BIN;
+  delete merged.INTENT_FACTORY_NOTIFY_BIN;
   return merged;
 }
 process.on("SIGTERM", () => stopProvider());
@@ -158,10 +158,10 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
       cwd: contract.cwd,
       env: {
         ...process.env,
-        PLAN_RUNNER_GATE_CONFIG: gateConfigPath,
-        PLAN_RUNNER_GATE_RELEASE: gateReleasePath,
-        PLAN_RUNNER_GATE_PARENT_PID: String(process.pid),
-        PLAN_RUNNER_GATE_PARENT_TOKEN: processStartToken(process.pid) ?? "",
+        INTENT_FACTORY_GATE_CONFIG: gateConfigPath,
+        INTENT_FACTORY_GATE_RELEASE: gateReleasePath,
+        INTENT_FACTORY_GATE_PARENT_PID: String(process.pid),
+        INTENT_FACTORY_GATE_PARENT_TOKEN: processStartToken(process.pid) ?? "",
       },
       detached: process.platform !== "win32",
       stdio: ["pipe", "ignore", "ignore"],

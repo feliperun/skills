@@ -146,21 +146,21 @@ test("judge results are bounded, consistent, and require concrete evidence", () 
 
 test("verification passes only the declared controller environment names", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-env-"));
-  const previous = process.env.PLAN_RUNNER_TEST_ALLOWED;
-  const secret = process.env.PLAN_RUNNER_TEST_FORBIDDEN;
-  process.env.PLAN_RUNNER_TEST_ALLOWED = "controller-value";
-  process.env.PLAN_RUNNER_TEST_FORBIDDEN = "must-not-leak";
+  const previous = process.env.INTENT_FACTORY_TEST_ALLOWED;
+  const secret = process.env.INTENT_FACTORY_TEST_FORBIDDEN;
+  process.env.INTENT_FACTORY_TEST_ALLOWED = "controller-value";
+  process.env.INTENT_FACTORY_TEST_FORBIDDEN = "must-not-leak";
   try {
     const result = await runVerification([{
-      argv: [process.execPath, "-e", "process.exit(process.env.PLAN_RUNNER_TEST_ALLOWED === 'controller-value' && !process.env.PLAN_RUNNER_TEST_FORBIDDEN ? 0 : 1)"],
-      env: ["PLAN_RUNNER_TEST_ALLOWED"],
+      argv: [process.execPath, "-e", "process.exit(process.env.INTENT_FACTORY_TEST_ALLOWED === 'controller-value' && !process.env.INTENT_FACTORY_TEST_FORBIDDEN ? 0 : 1)"],
+      env: ["INTENT_FACTORY_TEST_ALLOWED"],
     }], cwd);
     assert.equal(result.passed, true);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_TEST_ALLOWED;
-    else process.env.PLAN_RUNNER_TEST_ALLOWED = previous;
-    if (secret === undefined) delete process.env.PLAN_RUNNER_TEST_FORBIDDEN;
-    else process.env.PLAN_RUNNER_TEST_FORBIDDEN = secret;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_TEST_ALLOWED;
+    else process.env.INTENT_FACTORY_TEST_ALLOWED = previous;
+    if (secret === undefined) delete process.env.INTENT_FACTORY_TEST_FORBIDDEN;
+    else process.env.INTENT_FACTORY_TEST_FORBIDDEN = secret;
   }
 });
 
@@ -256,17 +256,17 @@ test("workspace snapshots use nested ignore rules, negation, and tracked ignored
   assert.ok(!paths.includes("nested/drop.tmp"));
 });
 
-test("workspace snapshots apply optional .planrunnerignore rules", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "runner-verification-planrunnerignore-"));
+test("workspace snapshots apply optional .intentfactoryignore rules", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "runner-verification-intentfactoryignore-"));
   writeFileSync(join(cwd, "README.md"), "read");
   initializeGit(cwd);
-  writeFileSync(join(cwd, ".planrunnerignore"), "generated/*\n!generated/keep.txt\n");
+  writeFileSync(join(cwd, ".intentfactoryignore"), "generated/*\n!generated/keep.txt\n");
   mkdirSync(join(cwd, "generated"));
   writeFileSync(join(cwd, "generated", "drop.txt"), "ignored");
   writeFileSync(join(cwd, "generated", "keep.txt"), "kept");
 
   const paths = captureWorkspaceSnapshot(cwd).entries.map((entry) => entry.path);
-  assert.ok(paths.includes(".planrunnerignore"));
+  assert.ok(paths.includes(".intentfactoryignore"));
   assert.ok(paths.includes("generated/keep.txt"));
   assert.ok(!paths.includes("generated/drop.txt"));
 });
@@ -290,11 +290,11 @@ test("ignore-source changes fail closed before mutable rules can hide files", ()
   writeFileSync(join(cwd, "README.md"), "read");
   initializeGit(cwd);
   const before = captureWorkspaceSnapshot(cwd);
-  writeFileSync(join(cwd, ".planrunnerignore"), "*\n");
+  writeFileSync(join(cwd, ".intentfactoryignore"), "*\n");
   writeFileSync(join(cwd, "undeclared.txt"), "hidden");
 
   assert.throws(
-    () => compareWorkspaceSnapshot(before, cwd, { files: [".planrunnerignore"], roots: [] }),
+    () => compareWorkspaceSnapshot(before, cwd, { files: [".intentfactoryignore"], roots: [] }),
     /ignore sources changed/u,
   );
 });

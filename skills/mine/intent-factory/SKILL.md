@@ -359,7 +359,7 @@ Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or a
 - Route to `exec-jsonl` when the runtime is an existing executable that speaks
   the generic JSONL protocol: one `run.request` line on stdin and
   `run.started`/`message`/`run.completed`/`run.failed` events on stdout. Point
-  at it with `executable` (or `PLAN_RUNNER_EXEC_JSONL_BIN`) and set `versionArgs`
+  at it with `executable` (or `INTENT_FACTORY_EXEC_JSONL_BIN`) and set `versionArgs`
   when it does not accept `--version`.
 - Route to the `glm` driver for GLM 5.3 (`glm-5.3[1m]`): it drives a
   Claude-Code-compatible CLI pinned to the Z.ai Anthropic-compatible endpoint,
