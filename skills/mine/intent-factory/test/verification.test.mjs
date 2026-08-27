@@ -396,6 +396,38 @@ test("scope comparison computes forbidden paths beyond the evidence window", () 
   assert.deepEqual(comparison.unexpectedPaths, ["forbidden.txt"]);
 });
 
+test("only the complete runner-managed AGENTS.md signal block is scope-neutral", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "runner-verification-agent-signal-"));
+  const agents = join(cwd, "AGENTS.md");
+  const managedStart = "<!-- intent-factory-active:start (managed by intent-factory — read, never edit) -->";
+  const managedEnd = "<!-- intent-factory-active:end -->";
+  writeFileSync(agents, `# Guidance\nHuman guidance stays protected.\n\n${managedStart}\n- intent-factory run \`old-run\`: active\n${managedEnd}\n`);
+  writeFileSync(join(cwd, "README.md"), "read\n");
+  initializeGit(cwd);
+  const before = captureWorkspaceSnapshot(cwd);
+
+  // The runner rewriting only the managed block (new active run lines) is not
+  // worker scope drift and must not trip unexpected-write protection.
+  writeFileSync(agents, `# Guidance\nHuman guidance stays protected.\n\n${managedStart}\n- intent-factory run \`new-run\`: active\n- intent-factory campaign \`other-campaign\`: active\n${managedEnd}\n`);
+  const managedOnly = compareWorkspaceSnapshot(before, cwd, { files: [], roots: [] });
+  assert.deepEqual(managedOnly.changedPaths, []);
+  assert.deepEqual(managedOnly.unexpectedPaths, []);
+
+  // Human-authored guidance outside the block still changes the identity and
+  // is protected as an unexpected write.
+  writeFileSync(agents, `# Guidance\nHuman edit outside the managed block.\n\n${managedStart}\n- intent-factory run \`new-run\`: active\n${managedEnd}\n`);
+  const humanEdit = compareWorkspaceSnapshot(before, cwd, { files: [], roots: [] });
+  assert.deepEqual(humanEdit.changedPaths, ["AGENTS.md"]);
+  assert.deepEqual(humanEdit.unexpectedPaths, ["AGENTS.md"]);
+
+  // A partial or malformed block is not runner-owned: it stays part of source
+  // identity and must still trigger protection.
+  writeFileSync(agents, `# Guidance\nHuman guidance stays protected.\n\n${managedStart}\n- intent-factory run \`partial\`: active\n`);
+  const partialBlock = compareWorkspaceSnapshot(before, cwd, { files: [], roots: [] });
+  assert.deepEqual(partialBlock.changedPaths, ["AGENTS.md"]);
+  assert.deepEqual(partialBlock.unexpectedPaths, ["AGENTS.md"]);
+});
+
 test("verification timeout and cancellation terminate process groups", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-descendants-"));
   const pidPath = join(cwd, "child.pid");
