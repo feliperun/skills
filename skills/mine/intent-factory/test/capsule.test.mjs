@@ -226,7 +226,7 @@ test("parseCapsule rejects malformed and unknown-field capsules", () => {
   delete rest.runId;
   assert.throws(() => parseCapsule(JSON.stringify(rest)), /capsule\.runId/u);
 
-  const missingConstraints = { ...withoutDigest };
+  const missingConstraints = /** @type {Record<string, unknown>} */ ({ ...withoutDigest });
   delete missingConstraints.constraints;
   assert.throws(() => parseCapsule(JSON.stringify(missingConstraints)), /capsule\.constraints/u);
 

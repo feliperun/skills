@@ -132,11 +132,12 @@ export function renderReportJson(runDir) {
   const campaign = readCampaignUsage(runDir, contract);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
+  /** @type {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null, costStatus: string}} */
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, costUsd: null, costStatus: "ambiguous" };
   const costs = nodes.map(costProjection);
   const listed = nodes.map((node, index) => {
     const usage = node.usage ?? { inputTokens: null, outputTokens: null, cacheReadInputTokens: null };
-    for (const key of ["inputTokens", "outputTokens", "cacheReadInputTokens"]) totals[key] = (totals[key] ?? 0) + (usage[key] ?? 0);
+    for (const key of /** @type {("inputTokens"|"outputTokens"|"cacheReadInputTokens")[]} */ (["inputTokens", "outputTokens", "cacheReadInputTokens"])) totals[key] = (totals[key] ?? 0) + (usage[key] ?? 0);
     const cost = costs[index];
     return {
       id: node.id,

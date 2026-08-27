@@ -348,7 +348,7 @@ export async function resumeRun(runDirPath) {
         );
         state.costUsd = invocationCost(state);
         writeNode(runDir, state, lease);
-        settleInvocation(runDir, invocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (invocation ?? recovery.invocationId), {
           status: "exhausted",
           usage: invocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : recovery.costUsd ?? null,
@@ -385,7 +385,7 @@ export async function resumeRun(runDirPath) {
           hadCost ? undefined : recovery.costUsd,
         );
         state.costUsd = invocationCost(state);
-        settleInvocation(runDir, invocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (invocation ?? recovery.invocationId), {
           status: "stalled",
           usage: invocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : recovery.costUsd ?? null,
@@ -462,13 +462,13 @@ export async function resumeRun(runDirPath) {
           hadCost ? undefined : recovery.costUsd,
         );
         state.costUsd = invocationCost(state);
-        settleInvocation(runDir, recoveredInvocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (recoveredInvocation ?? recovery.invocationId), {
           status: recovery.kind,
           usage: recoveredInvocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof recoveredInvocation?.costUsd === "number" ? recoveredInvocation.costUsd : recovery.costUsd ?? null,
           structuredResult: recovery.result !== null && recovery.result !== undefined,
           result: recovery.result ?? null,
-          receipts: providerReceipts(recovery),
+          receipts: providerReceipts(/** @type {{continuationId?: string|null}|null|undefined} */ (/** @type {unknown} */ (recovery))),
         });
         if (!persistedRecovery) recordExecutionOverride(runDir, state, {
           kind: "recovery",
@@ -519,7 +519,7 @@ export async function resumeRun(runDirPath) {
             const targetInvocation = unknownInvocation ?? workerInvocation ?? unknownEffectId;
             const targetUsage = unknownInvocation?.usage ?? recovery.usage ?? null;
             const targetCost = typeof unknownInvocation?.costUsd === "number" ? unknownInvocation.costUsd : recovery.costUsd ?? null;
-            settleInvocation(runDir, targetInvocation ?? unknownEffectId, {
+            settleInvocation(runDir, /** @type {string | Invocation} */ (targetInvocation ?? unknownEffectId), {
               status: resolution.action === "replay" ? "safe_replay" : "reconciled",
               usage: targetUsage,
               costUsd: targetCost,
@@ -1455,6 +1455,7 @@ function operationReceipts(invocationOrId, supplied, existing = []) {
   /** @type {Record<string, string>[]} */
   const receipts = [];
   const seen = new Set();
+  /** @type {(kind: string, ref: unknown) => void} */
   const add = (kind, ref) => {
     if (typeof ref !== "string" || ref.length === 0) return;
     const key = `${kind}\u0000${ref}`;
@@ -1464,7 +1465,8 @@ function operationReceipts(invocationOrId, supplied, existing = []) {
   };
   for (const receipt of existing) {
     if (receipt && typeof receipt === "object") {
-      add(String(receipt.kind ?? "operation"), String(receipt.ref ?? ""));
+      const record = /** @type {Record<string, unknown>} */ (receipt);
+      add(String(record.kind ?? "operation"), String(record.ref ?? ""));
     }
   }
   if (Array.isArray(supplied)) {
@@ -1656,6 +1658,7 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
   const usage = state.usage ?? emptyUsage();
   const sourceRuntime = sourceWorkerRuntime(state);
   const handoff = state.routing?.currentOverride;
+  const result = /** @type {Record<string, unknown> | null | undefined} */ (state.result);
   const budgetRemaining = contract.usagePolicy === false
     ? null
     : roundBudgetTokens(contract.usagePolicy.maxInputTokens - campaignUsage(campaignUsagePath(contract), contract.usagePolicy).budgetInputTokens);
@@ -1666,11 +1669,11 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
     objective: node.taskPacket.objective,
     decisions: node.taskPacket.decisions,
     nonGoals: node.taskPacket.nonGoals,
-    changedFiles: state.scope?.changedPaths ?? (Array.isArray(state.result?.changedFiles) ? state.result.changedFiles.map(String) : []),
+    changedFiles: state.scope?.changedPaths ?? (Array.isArray(result?.changedFiles) ? result.changedFiles.map(String) : []),
     worktreeIdentity: captureWorktreeIdentity(contract.cwd),
     verifications: (state.verification?.commands ?? []).map((command) => ({ argv: command.argv.join(" "), pass: command.passed === true })),
-    artifacts: Array.isArray(state.result?.artifacts)
-      ? /** @type {unknown[]} */ (state.result.artifacts).map((artifact) => {
+    artifacts: Array.isArray(result?.artifacts)
+      ? /** @type {unknown[]} */ (result.artifacts).map((artifact) => {
         const record = /** @type {Record<string, unknown>} */ (artifact);
         return {
           handle: String(record.handle ?? record.path ?? ""),
@@ -1689,7 +1692,7 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
     },
     costUsd: typeof state.costUsd === "number" ? state.costUsd : null,
     budgetRemaining,
-    continuationHint: isManualHandoff(state) && sourceRuntime
+    continuationHint: isManualHandoff(state) && sourceRuntime && handoff
       ? "handoff from " + sourceRuntime + " to " + handoff.runtime + ": " + handoff.reason
       : null,
   });
@@ -1723,7 +1726,7 @@ function persistNodeCapsule(contract, node, state, runDir, lease, nextAction) {
 function loadLatestCapsule(runDir, nodeId, attempt) {
   for (let candidate = attempt; candidate >= 0; candidate -= 1) {
     try {
-      return parseCapsule(readFileSync(join(runDir, "capsules", `${nodeId}.${candidate}.json`), "utf8"));
+      return /** @type {ReturnType<typeof buildCapsule>} */ (parseCapsule(readFileSync(join(runDir, "capsules", `${nodeId}.${candidate}.json`), "utf8")));
     } catch {}
   }
   return null;
@@ -2486,7 +2489,7 @@ function recordInvocationUsage(job, options = {}) {
 }
 
 /**
- * @param {"node"|"campaign"} scope
+ * @param {"node"|"campaign"|"wallclock"} scope
  * @param {NodeSnapshot} state
  * @returns {{code: string, message: string}}
  */
@@ -2865,7 +2868,7 @@ async function persistRecoveryUsage(campaignPath, policy, runDir, state, recover
 function invocationUsage(state) {
   return (state.invocations ?? []).reduce(
     (total, invocation) => addUsage(total, invocation.usage),
-    { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 },
+    /** @type {Usage} */ ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 }),
   );
 }
 
@@ -3089,7 +3092,7 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
   // cache reads); weight the cached portion exactly like the live meter so
   // the two sides are comparable.
   const persisted = [...states.values()].reduce((total, state) => {
-    const usage = state.usage ?? {};
+    const usage = state.usage ?? emptyUsage();
     return total + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
   }, 0);
   const spent = Math.round((persisted + liveSpent) * 1000) / 1000;
@@ -4570,8 +4573,8 @@ export async function superviseRun(runDir, intervalSec) {
         let pid = null;
         try {
           child = detachSelf("resume", runDir);
-          pid = child.pid;
-          if (pid === undefined) throw new Error("detached child has no pid");
+          pid = child.pid ?? null;
+          if (pid === null) throw new Error("detached child has no pid");
           process.stdout.write(`[supervise] controller lease expired · resumed · pid ${pid}\n`);
           await waitForBootstrap(runDir, pid, child);
         } catch (error) {
@@ -5176,7 +5179,7 @@ export async function handoffRun(target, values = {}) {
     // The capsule must be durable before the pending routing override becomes
     // schedulable: a crash at any write boundary leaves either the old safe
     // state or a complete handoff, never a pending node without its capsule.
-    const pendingState = { ...state, routing, status: "pending", phase: "waiting", error: null, blockedBy: [], updatedAt: at };
+    const pendingState = /** @type {NodeSnapshot} */ ({ ...state, routing, status: "pending", phase: "waiting", error: null, blockedBy: [], updatedAt: at });
     const capsule = persistNodeCapsule(contract, planNode, pendingState, runDir, lease, reason);
     const previousStatus = state.status;
     transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [], routing }, lease);

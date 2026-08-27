@@ -132,7 +132,7 @@ function deepRedact(value, key = "") {
     if (isOpaqueIdentity(value, key)) return value;
     return redactCapsuleString(value);
   }
-  if (Array.isArray(value)) return value.map(deepRedact);
+  if (Array.isArray(value)) return value.map((item) => deepRedact(item));
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(/** @type {Record<string, unknown>} */ (value)).map(([entryKey, entry]) => [entryKey, deepRedact(entry, entryKey)]));
   }
@@ -297,7 +297,9 @@ export function buildCapsule(input, options = {}) {
 
   /** @type {Record<string, unknown>} */
   let candidate = /** @type {Record<string, unknown>} */ (deepRedact(capsule));
+  /** @type {(value: Record<string, unknown>) => number} */
   const serializedSize = (value) => Buffer.byteLength(canonicalJson(value), "utf8");
+  /** @type {(value: Record<string, unknown>) => boolean} */
   const overBudget = (value) => serializedSize({ ...value, digest: "0".repeat(64) }) > maxBytes;
   if (overBudget(candidate)) {
     candidate = dropArtifactPreviews(candidate, serializedSize);
@@ -418,6 +420,7 @@ function normalizeReceipts(value) {
       const record = receipt && typeof receipt === "object" && !Array.isArray(receipt)
         ? /** @type {Record<string, unknown>} */ (receipt)
         : {};
+      /** @type {CapsuleReceipt} */
       const normalized = {
         kind: boundRedactedText(String(record.kind ?? ""), 128, "kind").text,
         ref: boundRedactedText(String(record.ref ?? ""), 2048, "ref").text,
@@ -455,6 +458,7 @@ function normalizeArtifacts(value) {
       const preview = artifact?.preview === null || artifact?.preview === undefined
         ? { text: null, truncated: false }
         : boundRedactedText(String(artifact.preview), 256, "preview");
+      /** @type {CapsuleArtifact} */
       const normalized = {
         handle: boundRedactedText(String(artifact?.handle ?? ""), 2048, "handle").text,
         sha256: boundRedactedText(String(artifact?.sha256 ?? ""), 128, "sha256").text,
@@ -570,6 +574,7 @@ function truncateListField(capsule, field, serializedSize) {
   const truncatedFlag = `${field}Truncated`;
   let best = capsule;
   let bestBytes = serializedSize(capsule);
+  /** @type {(candidate: Record<string, unknown>) => void} */
   const consider = (candidate) => {
     const bytes = serializedSize(candidate);
     if (bytes < bestBytes) {
@@ -582,7 +587,7 @@ function truncateListField(capsule, field, serializedSize) {
   if (kept < list.length) {
     consider({ ...capsule, [field]: list.slice(0, kept), [truncatedFlag]: true });
   }
-  if (STRING_LIST_FIELDS.includes(field)) {
+  if (STRING_LIST_FIELDS.includes(/** @type {(typeof STRING_LIST_FIELDS)[number]} */ (field))) {
     const replaced = markerReplaceBestItem(capsule, field, list);
     if (replaced !== capsule) consider(replaced);
   }

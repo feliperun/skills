@@ -126,18 +126,18 @@ test("an intent withheld from settlement classifies unknown_effect and resolves 
   assert.equal(settlement.unknownEffect, true);
   assert.equal(settlement.classification, "unknown_effect");
   assert.ok(
-    settlement.receipts.some((receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
+    settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
     "the adopted settlement from a controller-loss window must persist the provider receipt",
   );
 
   // The completed-turn log proved the effect; usage stays exact-once.
   const ledgerPath = join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json");
-  const recorded = Object.keys(JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[policy.epoch].invocations);
+  const recorded = Object.keys(JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[/** @type {string} */ (policy.epoch)].invocations);
   assert.equal(recorded.filter((id) => id === invocationId).length, 1);
 
   // A further resume must not duplicate anything.
   await withFakeCodex(directory, "pass", async () => resumeRun(runDir));
-  const reread = JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[policy.epoch].invocations;
+  const reread = JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[/** @type {string} */ (policy.epoch)].invocations;
   assert.deepEqual(Object.keys(reread).sort(), [...recorded].sort());
 });
 
@@ -158,10 +158,10 @@ test("the first terminal settlement from a scope failure persists provider recei
   const settlement = JSON.parse(readFileSync(join(runDir, "operations", `${invocationId}.settlement.json`), "utf8"));
   assert.equal(settlement.status, "failed");
   assert.ok(
-    settlement.receipts.some((receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
+    settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
     "the scope-failure settlement must persist the provider receipt from the close path",
   );
-  assert.ok(settlement.receipts.some((receipt) => receipt.kind === "stdout"));
+  assert.ok(settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "stdout"));
 });
 
 test("a controller-loss safe replay settlement persists the provider receipt from the surviving stream tail", async () => {
@@ -182,7 +182,7 @@ test("a controller-loss safe replay settlement persists the provider receipt fro
   const settlement = JSON.parse(readFileSync(join(runDir, "operations", `${invocationId}.settlement.json`), "utf8"));
   assert.equal(settlement.status, "safe_replay");
   assert.ok(
-    settlement.receipts.some((receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
+    settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
     "the safe replay settlement from a controller-loss window must persist the provider receipt from the surviving tail",
   );
 
@@ -217,7 +217,7 @@ test("a controller-loss reconciled settlement persists the provider receipt from
   const settlement = JSON.parse(readFileSync(join(runDir, "operations", `${invocationId}.settlement.json`), "utf8"));
   assert.equal(settlement.status, "reconciled");
   assert.ok(
-    settlement.receipts.some((receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
+    settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
     "the reconciled settlement from a controller-loss window must persist the provider receipt from the surviving tail",
   );
 });
