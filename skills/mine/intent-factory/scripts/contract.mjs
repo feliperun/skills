@@ -8,13 +8,13 @@ import { loadTaskPacket, renderWorkerPrompt } from "./task-packet.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 import {
-  PLAN_RUNNER_VERSION,
+  INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   driverCapabilities,
   validateCapabilityRequirements,
 } from "./drivers/index.mjs";
 
-export { PLAN_RUNNER_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index.mjs";
+export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index.mjs";
 
 const CONTRACT_FIELDS = new Set([
   "schemaVersion", "contractVersion", "id", "campaignId", "goal", "cwd", "sourceIdentity",
@@ -622,8 +622,8 @@ function validateMetadata(value, label) {
   if (value.schemaVersion !== PROTOCOL_SCHEMA_VERSION) {
     throw new TypeError(`${label}.schemaVersion must be ${PROTOCOL_SCHEMA_VERSION}`);
   }
-  if (value.contractVersion !== PLAN_RUNNER_VERSION) {
-    throw new TypeError(`${label}.contractVersion must be ${PLAN_RUNNER_VERSION}`);
+  if (value.contractVersion !== INTENT_FACTORY_VERSION) {
+    throw new TypeError(`${label}.contractVersion must be ${INTENT_FACTORY_VERSION}`);
   }
 }
 
@@ -1333,15 +1333,15 @@ function gitDeclaredPathState(cwd, path, kind) {
     if (errorCode(error) !== 1) return "unknown";
   }
 
-  let hasPlanrunnerIgnore = false;
+  let hasIntentfactoryIgnore = false;
   try {
-    hasPlanrunnerIgnore = lstatSync(resolve(cwd, ".planrunnerignore")).isFile();
+    hasIntentfactoryIgnore = lstatSync(resolve(cwd, ".intentfactoryignore")).isFile();
   } catch (error) {
     if (errorCode(error) !== "ENOENT") return "unknown";
   }
-  const planrunnerIgnore = hasPlanrunnerIgnore ? resolve(cwd, ".planrunnerignore") : undefined;
+  const intentfactoryIgnore = hasIntentfactoryIgnore ? resolve(cwd, ".intentfactoryignore") : undefined;
   for (const literal of literals) {
-    const combined = checkCombinedGitIgnore(cwd, literal, planrunnerIgnore);
+    const combined = checkCombinedGitIgnore(cwd, literal, intentfactoryIgnore);
     if (combined === "unknown") return "unknown";
     if (combined === false) return "visible";
   }

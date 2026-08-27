@@ -48,21 +48,21 @@ CI, or another agent), with no dependency on the orchestrator's runtime.
 Quickstart, in the repository that will receive the implementation:
 
 ```bash
-PLAN_RUNNER=/path/to/skills/skills/mine/intent-factory/scripts/runner.mjs
+INTENT_FACTORY=/path/to/skills/skills/mine/intent-factory/scripts/runner.mjs
 TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"
-node "$PLAN_RUNNER" campaign init feature-42 --cwd "$TARGET" --goal "Deliver feature 42"
-node "$PLAN_RUNNER" campaign attach feature-42 --cwd "$TARGET" --tool codex --session-id <session-id> --no-transcript
+node "$INTENT_FACTORY" campaign init feature-42 --cwd "$TARGET" --goal "Deliver feature 42"
+node "$INTENT_FACTORY" campaign attach feature-42 --cwd "$TARGET" --tool codex --session-id <session-id> --no-transcript
 ```
 
 Inspect the target once, write the contract and its task packets, then:
 
 ```bash
-node "$PLAN_RUNNER" validate contract.json
-node "$PLAN_RUNNER" preflight contract.json
-node "$PLAN_RUNNER" run --detach contract.json
-node "$PLAN_RUNNER" supervise --detach "$TARGET/.runs/<run-id>"   # unattended resume
+node "$INTENT_FACTORY" validate contract.json
+node "$INTENT_FACTORY" preflight contract.json
+node "$INTENT_FACTORY" run --detach contract.json
+node "$INTENT_FACTORY" supervise --detach "$TARGET/.runs/<run-id>"   # unattended resume
 ```
 
 | Goal | Command |
@@ -90,15 +90,14 @@ Sentrux structural quality gate, a `create-adr` slash command, and githooks.
 Always ask which compatibility rule applies before running it — see
 [SKILL.md](skills/mine/init-agentkit/SKILL.md).
 
-### session-memory
+### Session continuity
 
-Keeps long sessions cheap across usage-limit resets: save a curated handoff to
-`.claude/session-handoff.md` while the session is warm (input cached, so the
-save costs little), then continue in a fresh session that reads only the
-handoff — instead of re-reading the whole conversation without cache. This
-repository wires the [SessionStart hook](.claude/hooks/session-start.mjs) that
-injects a fresh handoff automatically. See
-[SKILL.md](skills/mine/session-memory/SKILL.md).
+Long sessions stay cheap across usage-limit resets: a curated handoff is saved
+to `.claude/session-handoff.md` while the session is warm, and this
+repository's [SessionStart hook](.claude/hooks/session-start.mjs) injects a
+fresh handoff into every new session automatically. The save/resume protocol
+lives inside intent-factory as
+[references/session-memory.md](skills/mine/intent-factory/references/session-memory.md).
 
 ## Development
 

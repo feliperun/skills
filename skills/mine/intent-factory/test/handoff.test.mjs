@@ -154,7 +154,7 @@ test("handoff routes the next worker attempt to claude and composes its prompt f
   assert.match(renderStatus(runDir), /handoff→opus/u);
 
   orphan(runDir, "build");
-  const resumed = await withEnv({ PLAN_RUNNER_CODEX_BIN: codexBin, PLAN_RUNNER_CLAUDE_BIN: claudeBin }, () => resumeRun(runDir));
+  const resumed = await withEnv({ INTENT_FACTORY_CODEX_BIN: codexBin, INTENT_FACTORY_CLAUDE_BIN: claudeBin }, () => resumeRun(runDir));
   const replayed = nodeState(resumed);
   assert.equal(replayed.status, "done");
   assert.equal(replayed.attempt, 2, "the cross-harness replay must be a fresh attempt");
@@ -186,7 +186,7 @@ test("handoff routes the next worker attempt back to codex symmetrically", async
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "opus", judge: "sol" },
   }));
-  const first = await withEnv({ PLAN_RUNNER_CLAUDE_BIN: claudeBin }, () => runContract(path));
+  const first = await withEnv({ INTENT_FACTORY_CLAUDE_BIN: claudeBin }, () => runContract(path));
   const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
   assert.equal(nodeState(first).status, "done");
   assert.equal(nodeState(first).invocations?.at(-1)?.driver, "claude");
@@ -200,7 +200,7 @@ test("handoff routes the next worker attempt back to codex symmetrically", async
   assert.match(cli.stdout, /node build → luna/u);
 
   orphan(runDir, "build");
-  const resumed = await withEnv({ PLAN_RUNNER_CODEX_BIN: codexBin, PLAN_RUNNER_CLAUDE_BIN: claudeBin }, () => resumeRun(runDir));
+  const resumed = await withEnv({ INTENT_FACTORY_CODEX_BIN: codexBin, INTENT_FACTORY_CLAUDE_BIN: claudeBin }, () => resumeRun(runDir));
   const replayed = nodeState(resumed);
   assert.equal(replayed.status, "done");
   assert.equal(replayed.attempt, 2);
@@ -227,7 +227,7 @@ test("handoff keeps a same-runtime replay fresh and schedules it on resume", asy
   assert.match(cli.stdout, /digest [0-9a-f]{64}/u);
   assert.equal(JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).status, "pending");
 
-  const resumed = await withEnv({ PLAN_RUNNER_CODEX_BIN: codexBin }, () => resumeRun(runDir));
+  const resumed = await withEnv({ INTENT_FACTORY_CODEX_BIN: codexBin }, () => resumeRun(runDir));
   const replayed = nodeState(resumed);
   assert.equal(replayed.status, "done");
   assert.equal(replayed.attempt, 2);

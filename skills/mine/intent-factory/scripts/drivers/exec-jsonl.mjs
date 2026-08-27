@@ -54,7 +54,7 @@ export const execJsonlDriver = {
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
-    return process.env.PLAN_RUNNER_EXEC_JSONL_BIN ?? runtime.executable ?? "exec-jsonl";
+    return process.env.INTENT_FACTORY_EXEC_JSONL_BIN ?? runtime.executable ?? "exec-jsonl";
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */

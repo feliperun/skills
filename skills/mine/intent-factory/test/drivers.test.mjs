@@ -251,7 +251,7 @@ test("preflight still probes and reports version when an environment variable is
   const executable = join(directory, "versioned-wrapper.mjs");
   writeFileSync(executable, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('wrapper 3.1.4');\n");
   chmodSync(executable, 0o755);
-  const envName = "PLAN_RUNNER_TEST_REQUIRED_ENV_4F8D";
+  const envName = "INTENT_FACTORY_TEST_REQUIRED_ENV_4F8D";
   const previous = process.env[envName];
   delete process.env[envName];
   try {
@@ -267,7 +267,7 @@ test("preflight still probes and reports version when an environment variable is
     assert.equal(check.executable, executable);
     assert.equal(check.model, "pi-model");
     assert.equal(check.version, "wrapper 3.1.4");
-    assert.match(check.detail ?? "", /missing environment variable PLAN_RUNNER_TEST_REQUIRED_ENV_4F8D/u);
+    assert.match(check.detail ?? "", /missing environment variable INTENT_FACTORY_TEST_REQUIRED_ENV_4F8D/u);
     assert.doesNotMatch(check.detail ?? "", /secret-value/u);
   } finally {
     if (previous === undefined) delete process.env[envName];
@@ -353,13 +353,13 @@ test("builds glm commands pinned to the Z.ai endpoint", () => {
   const previous = {
     ZAI_API_KEY: process.env.ZAI_API_KEY,
     ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
-    PLAN_RUNNER_GLM_BIN: process.env.PLAN_RUNNER_GLM_BIN,
-    PLAN_RUNNER_TEST_GLM_TOKEN: process.env.PLAN_RUNNER_TEST_GLM_TOKEN,
+    INTENT_FACTORY_GLM_BIN: process.env.INTENT_FACTORY_GLM_BIN,
+    INTENT_FACTORY_TEST_GLM_TOKEN: process.env.INTENT_FACTORY_TEST_GLM_TOKEN,
   };
   process.env.ZAI_API_KEY = "test-zai-token";
   delete process.env.ANTHROPIC_AUTH_TOKEN;
-  delete process.env.PLAN_RUNNER_GLM_BIN;
-  delete process.env.PLAN_RUNNER_TEST_GLM_TOKEN;
+  delete process.env.INTENT_FACTORY_GLM_BIN;
+  delete process.env.INTENT_FACTORY_TEST_GLM_TOKEN;
   try {
     const command = providerCommand({ driver: "glm", model: "glm-5.3[1m]" }, "task", { schema: JUDGE_SCHEMA });
     assert.equal(command.executable, "claude");
@@ -385,16 +385,16 @@ test("builds glm commands pinned to the Z.ai endpoint", () => {
     const custom = providerCommand({
       driver: "glm",
       model: "glm-5.3",
-      config: { base_url: "https://custom.example/api", "auth_token.env_key": "PLAN_RUNNER_TEST_GLM_TOKEN" },
+      config: { base_url: "https://custom.example/api", "auth_token.env_key": "INTENT_FACTORY_TEST_GLM_TOKEN" },
     }, "task");
     assert.equal(custom.env?.ANTHROPIC_BASE_URL, "https://custom.example/api");
     assert.equal("ANTHROPIC_AUTH_TOKEN" in (custom.env ?? {}), false, "an unresolved token is omitted, not blanked");
 
-    process.env.PLAN_RUNNER_TEST_GLM_TOKEN = "custom-token";
+    process.env.INTENT_FACTORY_TEST_GLM_TOKEN = "custom-token";
     const resolved = providerCommand({
       driver: "glm",
       model: "glm-5.3",
-      config: { "auth_token.env_key": "PLAN_RUNNER_TEST_GLM_TOKEN" },
+      config: { "auth_token.env_key": "INTENT_FACTORY_TEST_GLM_TOKEN" },
     }, "task");
     assert.equal(resolved.env?.ANTHROPIC_AUTH_TOKEN, "custom-token");
 

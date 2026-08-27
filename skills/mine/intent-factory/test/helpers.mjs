@@ -55,13 +55,13 @@ export function orphan(runDir, nodeId, patch = {}) {
  * @returns {Promise<T>}
  */
 export async function withFakeCodex(directory, mode, body) {
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, mode);
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, mode);
   try {
     return await body();
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
 
@@ -72,13 +72,13 @@ export async function withFakeCodex(directory, mode, body) {
  * @returns {Promise<T>}
  */
 export async function withFakeAgy(directory, body) {
-  const previous = process.env.PLAN_RUNNER_AGY_BIN;
-  process.env.PLAN_RUNNER_AGY_BIN = fakeAgy(directory);
+  const previous = process.env.INTENT_FACTORY_AGY_BIN;
+  process.env.INTENT_FACTORY_AGY_BIN = fakeAgy(directory);
   try {
     return await body();
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_AGY_BIN;
-    else process.env.PLAN_RUNNER_AGY_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_AGY_BIN;
+    else process.env.INTENT_FACTORY_AGY_BIN = previous;
   }
 }
 
@@ -322,7 +322,7 @@ if (process.argv.includes("--version")) {
   process.stdin.on("end", () => {
     const request = JSON.parse(input);
     if (mode === "402" || mode === "secret") {
-      console.log(JSON.stringify({ schemaVersion: 1, type: "run.failed", error: { code: "payment_required", message: "402 Payment Required " + (process.env.PLAN_RUNNER_TEST_LIVE_SECRET ?? "") } }));
+      console.log(JSON.stringify({ schemaVersion: 1, type: "run.failed", error: { code: "payment_required", message: "402 Payment Required " + (process.env.INTENT_FACTORY_TEST_LIVE_SECRET ?? "") } }));
       return;
     }
     const judge = request.prompt.includes("Review node");
@@ -339,7 +339,7 @@ if [ "\${1:-}" = "--version" ]; then
 fi
 request=$(cat)
 if [ ${JSON.stringify(mode)} = "402" ] || [ ${JSON.stringify(mode)} = "secret" ]; then
-  printf '%s\\n' '{"schemaVersion":1,"type":"run.failed","error":{"code":"payment_required","message":"402 Payment Required '"\${PLAN_RUNNER_TEST_LIVE_SECRET:-}"'"}}'
+  printf '%s\\n' '{"schemaVersion":1,"type":"run.failed","error":{"code":"payment_required","message":"402 Payment Required '"\${INTENT_FACTORY_TEST_LIVE_SECRET:-}"'"}}'
   exit 0
 fi
 case "$request" in

@@ -261,16 +261,16 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
     }],
   });
   const path = writeContract(directory, contract);
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory);
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory);
   try {
     const result = await runContract(path);
     assert.equal(result.ok, true);
     assert.equal(nodeState(result).status, "done");
     assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -623,15 +623,15 @@ test("marks a silent provider stalled", async () => {
     stallTimeoutSec: 0.05,
     nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"] }), gate: false }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "silent");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "silent");
   try {
     const result = await runContract(path);
     assert.equal(result.ok, false);
     assert.equal(nodeState(result).status, "stalled");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -642,8 +642,8 @@ test("preserves the worker report when the judge provider fails", async () => {
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "judge-fail");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "judge-fail");
   try {
     const result = await runContract(path);
     const state = nodeState(result);
@@ -651,8 +651,8 @@ test("preserves the worker report when the judge provider fails", async () => {
     assert.equal(state.phase, "judge");
     assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -664,8 +664,8 @@ test("enforces the wall-clock cap even while output changes", async () => {
     stallTimeoutSec: 1,
     timeoutSec: 0.05,
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "heartbeat");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "heartbeat");
   try {
     const result = await runContract(path);
     assert.equal(nodeState(result).status, "exhausted");
@@ -673,8 +673,8 @@ test("enforces the wall-clock cap even while output changes", async () => {
     assert.ok(timedOut.error, "timeout records an error");
     assert.equal(timedOut.error.code, "wall_clock_timeout");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -707,16 +707,16 @@ test("bounds gate retries and reports exhausted", async () => {
       gate: { failOn: ["critical"], maxRevisions: 1 },
     }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "critical");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
   try {
     const result = await runContract(path);
     assert.equal(result.ok, false);
     assert.equal(nodeState(result).status, "exhausted");
     assert.equal(nodeState(result).attempt, 2);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -992,7 +992,7 @@ test("simultaneous resumes allow one controller and reject the other", async () 
   const runner = fileURLToPath(new URL("./runner.mjs", import.meta.url));
   const slow = fakeCodex(directory, "slow");
   const first = spawn(process.execPath, [runner, "resume", runDir], {
-    env: { ...process.env, PLAN_RUNNER_CODEX_BIN: slow },
+    env: { ...process.env, INTENT_FACTORY_CODEX_BIN: slow },
     stdio: ["ignore", "pipe", "pipe"],
   });
   try {
@@ -1004,7 +1004,7 @@ test("simultaneous resumes allow one controller and reject the other", async () 
       }
     }, 5_000);
     const second = spawn(process.execPath, [runner, "resume", runDir], {
-      env: { ...process.env, PLAN_RUNNER_CODEX_BIN: fakeCodex(directory, "pass") },
+      env: { ...process.env, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const [firstResult, secondResult] = await Promise.all([closeResult(first), closeResult(second)]);
@@ -1549,8 +1549,8 @@ test("events record attempt, runtime, and gate verdict", async () => {
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "critical");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
   try {
     const result = await runContract(path);
     const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8")
@@ -1563,8 +1563,8 @@ test("events record attempt, runtime, and gate verdict", async () => {
     assert.equal(rejected.error, "revision_cap");
     assert.equal(rejected.phase, "judge");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -1650,8 +1650,8 @@ test("live preflight proves generation, redacts failures, and static mode stays 
     runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
-  const previous = process.env.PLAN_RUNNER_TEST_LIVE_SECRET;
-  process.env.PLAN_RUNNER_TEST_LIVE_SECRET = "preflight-secret-value";
+  const previous = process.env.INTENT_FACTORY_TEST_LIVE_SECRET;
+  process.env.INTENT_FACTORY_TEST_LIVE_SECRET = "preflight-secret-value";
   try {
     const checks = await preflightContract(path);
     assert.equal(checks.length, 1);
@@ -1675,8 +1675,8 @@ test("live preflight proves generation, redacts failures, and static mode stays 
     assert.equal(staticChecks[0].live, undefined);
     assert.equal(existsSync(join(directory, ".runs")), false);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_TEST_LIVE_SECRET;
-    else process.env.PLAN_RUNNER_TEST_LIVE_SECRET = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_TEST_LIVE_SECRET;
+    else process.env.INTENT_FACTORY_TEST_LIVE_SECRET = previous;
   }
 });
 
@@ -1690,8 +1690,8 @@ if (process.argv.includes("--version")) {
   console.log("preflight-provider 1.0.0");
 } else {
   writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
-    notify: process.env.PLAN_RUNNER_NOTIFY_BIN ?? null,
-    ambient: process.env.PLAN_RUNNER_AMBIENT ?? null,
+    notify: process.env.INTENT_FACTORY_NOTIFY_BIN ?? null,
+    ambient: process.env.INTENT_FACTORY_AMBIENT ?? null,
   }));
   const result = JSON.stringify({ status: "done", summary: "ok", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
   console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "fake-thread", usage: { inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 1 }, costUsd: 0.01 }));
@@ -1705,21 +1705,21 @@ if (process.argv.includes("--version")) {
     runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
-  const previousNotify = process.env.PLAN_RUNNER_NOTIFY_BIN;
-  const previousAmbient = process.env.PLAN_RUNNER_AMBIENT;
-  process.env.PLAN_RUNNER_NOTIFY_BIN = provider;
-  process.env.PLAN_RUNNER_AMBIENT = "ambient-value";
+  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  const previousAmbient = process.env.INTENT_FACTORY_AMBIENT;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = provider;
+  process.env.INTENT_FACTORY_AMBIENT = "ambient-value";
   try {
     const checks = await preflightContract(path);
     assert.equal(checks[0].ok, true, checks[0].detail ?? undefined);
     const observed = JSON.parse(readFileSync(marker, "utf8"));
-    assert.equal(observed.notify, null, "PLAN_RUNNER_NOTIFY_BIN must not reach the live preflight provider");
+    assert.equal(observed.notify, null, "INTENT_FACTORY_NOTIFY_BIN must not reach the live preflight provider");
     assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
   } finally {
-    if (previousNotify === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
-    else process.env.PLAN_RUNNER_NOTIFY_BIN = previousNotify;
-    if (previousAmbient === undefined) delete process.env.PLAN_RUNNER_AMBIENT;
-    else process.env.PLAN_RUNNER_AMBIENT = previousAmbient;
+    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
+    if (previousAmbient === undefined) delete process.env.INTENT_FACTORY_AMBIENT;
+    else process.env.INTENT_FACTORY_AMBIENT = previousAmbient;
   }
 });
 
@@ -2020,8 +2020,8 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "critical");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
   try {
     const result = await runContract(path);
     const rendered = renderFindings(result.runDir);
@@ -2029,8 +2029,8 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
     assert.match(rendered, /\[critical\] broken/u);
     assert.match(rendered, /Evidence: test failed/u);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -2046,8 +2046,8 @@ test("a finished run with non-done nodes writes a findings.json handoff", async 
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "critical");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
   try {
     const result = await runContract(path);
     const artifact = JSON.parse(readFileSync(join(result.runDir, "findings.json"), "utf8"));
@@ -2062,8 +2062,8 @@ test("a finished run with non-done nodes writes a findings.json handoff", async 
     assert.equal(node.gate.maxSeverity, "critical");
     assert.equal(node.gate.findings[0].evidence, "test failed");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -2440,8 +2440,8 @@ test("retains a live Codex continuation before capped logs are truncated", async
     pollIntervalMs: 5,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "thread-large-timeout");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "thread-large-timeout");
   try {
     const first = await runContract(path);
     const firstState = nodeState(first);
@@ -2456,8 +2456,8 @@ test("retains a live Codex continuation before capped logs are truncated", async
     assert.equal(Object.keys(finalLedger.epochs["live-continuation"].invocations).length, 2, "resumed invocation is ledgered once");
     assert.match(readFileSync(join(directory, ".runs", "resume-continuation.txt"), "utf8"), /resume --json .* fake-thread /u);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
 
@@ -2478,8 +2478,8 @@ test("ordinary runs deliver bounded node and run terminal notifications", async 
   const notifier = join(directory, "notify.mjs");
   writeFileSync(notifier, `#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { input += chunk; }); process.stdin.on("end", () => { appendFileSync(${JSON.stringify(delivered)}, input); });\n`);
   chmodSync(notifier, 0o755);
-  const previous = process.env.PLAN_RUNNER_NOTIFY_BIN;
-  process.env.PLAN_RUNNER_NOTIFY_BIN = notifier;
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
   try {
     await withFakeCodex(directory, "pass", () => runContract(path));
     const events = readFileSync(delivered, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -2487,8 +2487,8 @@ test("ordinary runs deliver bounded node and run terminal notifications", async 
     assert.ok(events.some((event) => event.type === "run.terminal" && event.data.runId === "run-notifications"));
     assert.ok(events.every((event) => event.deliveredAt === null), "delivery payload is the durable pre-delivery event");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
-    else process.env.PLAN_RUNNER_NOTIFY_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
   }
 });
 test("run warns when a node id is already done in another run", async () => {
@@ -2534,8 +2534,8 @@ test("supervise resumes a run whose controller died", async () => {
 
   // The supervisor's resumed controller inherits the supervisor's environment, so
   // the fake provider must stay installed for the whole supervise lifetime.
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "pass");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
   const supervisor = spawn(
     process.execPath,
     [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
@@ -2551,8 +2551,8 @@ test("supervise resumes a run whose controller died", async () => {
     assert.equal(finished, "done", stdout);
     assert.equal(readStatus(join(runDir, "nodes", "build.json")), "done");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
     supervisor.kill("SIGTERM");
   }
 });
@@ -2587,8 +2587,8 @@ test("supervise continues when a stale-lease resume loses to a concurrently heal
     expiresAt: new Date(Date.now() + 4_000).toISOString(),
   })}\n`, { flag: "wx", mode: 0o600 });
 
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "pass");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
   const supervisor = spawn(
     process.execPath,
     [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
@@ -2619,8 +2619,8 @@ test("supervise continues when a stale-lease resume loses to a concurrently heal
     assert.equal(contended, "contended", stdout);
     assert.equal(existsSync(join(runDir, "supervisor-attention.json")), false, "benign lease contention must not raise attention");
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
     try { unlinkSync(lockPath); } catch {}
     supervisor.kill("SIGTERM");
   }
@@ -2638,10 +2638,10 @@ test("supervisor persists and delivers attention when resume is refused", async 
   const notifier = join(directory, "notify-attention.mjs");
   writeFileSync(notifier, `#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { input += chunk; }); process.stdin.on("end", () => { appendFileSync(${JSON.stringify(delivered)}, input); });\n`);
   chmodSync(notifier, 0o755);
-  const previousNotify = process.env.PLAN_RUNNER_NOTIFY_BIN;
-  const previousCodex = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_NOTIFY_BIN = notifier;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "pass");
+  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  const previousCodex = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
   try {
     await superviseRun(runDir, 0.01);
     const attention = JSON.parse(readFileSync(join(runDir, "supervisor-attention.json"), "utf8"));
@@ -2649,10 +2649,10 @@ test("supervisor persists and delivers attention when resume is refused", async 
     const events = readFileSync(delivered, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.ok(events.some((event) => event.type === "run.attention" && event.data.code === "resume_failed"));
   } finally {
-    if (previousNotify === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
-    else process.env.PLAN_RUNNER_NOTIFY_BIN = previousNotify;
-    if (previousCodex === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previousCodex;
+    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
+    if (previousCodex === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previousCodex;
   }
 });
 
@@ -2664,7 +2664,7 @@ test("detached resume surfaces bootstrap failure before reporting success", asyn
   metadata.sourceIdentity.cwd = "/unexpected-source";
   writeFileSync(join(runDir, "run.json"), JSON.stringify(metadata));
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "resume", "--detach", runDir], {
-    env: { ...process.env, PLAN_RUNNER_CODEX_BIN: fakeCodex(directory, "pass") },
+    env: { ...process.env, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") },
     encoding: "utf8",
   });
   assert.notEqual(result.status, 0);
@@ -2703,7 +2703,7 @@ test("detached ACK timeout and parse errors clean only their nonce attempt and A
   const errorResult = spawnSync(
     process.execPath,
     [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "resume", runDir],
-    { env: { ...process.env, PLAN_RUNNER_BOOTSTRAP_NONCE: errorNonce, PLAN_RUNNER_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
+    { env: { ...process.env, INTENT_FACTORY_BOOTSTRAP_NONCE: errorNonce, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
   );
   assert.notEqual(errorResult.status, 0);
   assert.equal(existsSync(join(runDir, `bootstrap.json.${errorNonce}`)), false);
@@ -2713,7 +2713,7 @@ test("detached ACK timeout and parse errors clean only their nonce attempt and A
   const timeoutResult = spawnSync(
     process.execPath,
     [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "resume", runDir],
-    { env: { ...process.env, PLAN_RUNNER_BOOTSTRAP_NONCE: timeoutNonce, PLAN_RUNNER_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
+    { env: { ...process.env, INTENT_FACTORY_BOOTSTRAP_NONCE: timeoutNonce, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
   );
   assert.equal(timeoutResult.status, 0, timeoutResult.stderr);
   assert.equal(existsSync(join(runDir, `bootstrap.json.${timeoutNonce}`)), false);
@@ -2730,8 +2730,8 @@ test("blocks downstream nodes after a failed dependency", async () => {
       { id: "second", type: "backend", taskPacket: packet({ objective: "Never run" }), dependsOn: ["first"], gate: false },
     ],
   }));
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "worker-fail");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "worker-fail");
   try {
     const result = await runContract(path);
     assert.equal(nodeState(result, "first").status, "failed");
@@ -2743,7 +2743,7 @@ test("blocks downstream nodes after a failed dependency", async () => {
     assert.equal(blockedNode.error.code, "dependency_failed");
     assert.deepEqual(blockedNode.blockedBy, ["first"]);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });

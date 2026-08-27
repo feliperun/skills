@@ -13,7 +13,7 @@ import {
   readSupervisorLease,
   writeJsonAtomic,
 } from "../scripts/store.mjs";
-import { PLAN_RUNNER_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
 import { detectStalls, invocationAlive, processStartToken, startProcess, terminateInvocation } from "../scripts/supervisor.mjs";
 import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
@@ -39,7 +39,7 @@ function nodeSnapshot(node, executionOverrides) {
   const now = new Date().toISOString();
   return validateNodeSnapshot({
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: PLAN_RUNNER_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
     id: node.id,
     type: node.type,
     sourceIdentity: node.sourceIdentity,
@@ -189,12 +189,12 @@ test("stall supervision uses the latest persisted timeout override", async () =>
   mkdirSync(logs);
   const marker = join(runDir, "provider-started");
   const provider = join(runDir, "provider.mjs");
-  writeFileSync(provider, "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.PLAN_RUNNER_MARKER, \"started\"); process.stdin.resume(); setTimeout(() => {}, 1000);\n");
+  writeFileSync(provider, "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.INTENT_FACTORY_MARKER, \"started\"); process.stdin.resume(); setTimeout(() => {}, 1000);\n");
   chmodSync(provider, 0o755);
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  const previousMarker = process.env.PLAN_RUNNER_MARKER;
-  process.env.PLAN_RUNNER_CODEX_BIN = provider;
-  process.env.PLAN_RUNNER_MARKER = marker;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  const previousMarker = process.env.INTENT_FACTORY_MARKER;
+  process.env.INTENT_FACTORY_CODEX_BIN = provider;
+  process.env.INTENT_FACTORY_MARKER = marker;
   const { contract, node } = validatedRun(runDir);
   const state = nodeSnapshot(node, [
     { kind: "timeout", timeoutSec: 5, at: new Date().toISOString(), reason: "old" },
@@ -225,10 +225,10 @@ test("stall supervision uses the latest persisted timeout override", async () =>
     assert.equal(timeout.status, "exhausted");
     assert.match(timeout.error.message, /0\.05s/u);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
-    if (previousMarker === undefined) delete process.env.PLAN_RUNNER_MARKER;
-    else process.env.PLAN_RUNNER_MARKER = previousMarker;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+    if (previousMarker === undefined) delete process.env.INTENT_FACTORY_MARKER;
+    else process.env.INTENT_FACTORY_MARKER = previousMarker;
     try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
   }
 });
@@ -241,7 +241,7 @@ test("a glm worker runs with the driver's endpoint env overlay applied", async (
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
-writeFileSync(process.env.PLAN_RUNNER_MARKER, JSON.stringify({
+writeFileSync(process.env.INTENT_FACTORY_MARKER, JSON.stringify({
   baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
   model: process.env.ANTHROPIC_MODEL ?? null,
   token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
@@ -251,14 +251,14 @@ process.stdin.resume();
 `);
   chmodSync(provider, 0o755);
   const previous = {
-    PLAN_RUNNER_GLM_BIN: process.env.PLAN_RUNNER_GLM_BIN,
-    PLAN_RUNNER_MARKER: process.env.PLAN_RUNNER_MARKER,
+    INTENT_FACTORY_GLM_BIN: process.env.INTENT_FACTORY_GLM_BIN,
+    INTENT_FACTORY_MARKER: process.env.INTENT_FACTORY_MARKER,
     ZAI_API_KEY: process.env.ZAI_API_KEY,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   };
-  process.env.PLAN_RUNNER_GLM_BIN = provider;
-  process.env.PLAN_RUNNER_MARKER = marker;
+  process.env.INTENT_FACTORY_GLM_BIN = provider;
+  process.env.INTENT_FACTORY_MARKER = marker;
   process.env.ZAI_API_KEY = "glm-test-token";
   process.env.ANTHROPIC_API_KEY = "ambient-anthropic-key";
   process.env.ANTHROPIC_BASE_URL = "https://ambient.example/api";
@@ -303,9 +303,9 @@ test("worker providers never receive the controller-only notification transport"
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
-writeFileSync(process.env.PLAN_RUNNER_MARKER, JSON.stringify({
-  notify: process.env.PLAN_RUNNER_NOTIFY_BIN ?? null,
-  ambient: process.env.PLAN_RUNNER_AMBIENT ?? null,
+writeFileSync(process.env.INTENT_FACTORY_MARKER, JSON.stringify({
+  notify: process.env.INTENT_FACTORY_NOTIFY_BIN ?? null,
+  ambient: process.env.INTENT_FACTORY_AMBIENT ?? null,
   baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
   model: process.env.ANTHROPIC_MODEL ?? null,
   token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
@@ -315,17 +315,17 @@ process.stdin.resume();
 `);
   chmodSync(provider, 0o755);
   const previous = {
-    PLAN_RUNNER_GLM_BIN: process.env.PLAN_RUNNER_GLM_BIN,
-    PLAN_RUNNER_MARKER: process.env.PLAN_RUNNER_MARKER,
-    PLAN_RUNNER_AMBIENT: process.env.PLAN_RUNNER_AMBIENT,
-    PLAN_RUNNER_NOTIFY_BIN: process.env.PLAN_RUNNER_NOTIFY_BIN,
+    INTENT_FACTORY_GLM_BIN: process.env.INTENT_FACTORY_GLM_BIN,
+    INTENT_FACTORY_MARKER: process.env.INTENT_FACTORY_MARKER,
+    INTENT_FACTORY_AMBIENT: process.env.INTENT_FACTORY_AMBIENT,
+    INTENT_FACTORY_NOTIFY_BIN: process.env.INTENT_FACTORY_NOTIFY_BIN,
     ZAI_API_KEY: process.env.ZAI_API_KEY,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   };
-  process.env.PLAN_RUNNER_GLM_BIN = provider;
-  process.env.PLAN_RUNNER_MARKER = marker;
-  process.env.PLAN_RUNNER_AMBIENT = "ambient-value";
-  process.env.PLAN_RUNNER_NOTIFY_BIN = provider;
+  process.env.INTENT_FACTORY_GLM_BIN = provider;
+  process.env.INTENT_FACTORY_MARKER = marker;
+  process.env.INTENT_FACTORY_AMBIENT = "ambient-value";
+  process.env.INTENT_FACTORY_NOTIFY_BIN = provider;
   process.env.ZAI_API_KEY = "glm-notify-test-token";
   process.env.ANTHROPIC_API_KEY = "ambient-anthropic-key";
   const { contract, node } = validatedRun(runDir);
@@ -348,7 +348,7 @@ process.stdin.resume();
     const deadline = Date.now() + 5_000;
     while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
     const observed = JSON.parse(readFileSync(marker, "utf8"));
-    assert.equal(observed.notify, null, "PLAN_RUNNER_NOTIFY_BIN must not reach the worker provider");
+    assert.equal(observed.notify, null, "INTENT_FACTORY_NOTIFY_BIN must not reach the worker provider");
     assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
     assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "driver env overlay must still apply");
     assert.equal(observed.model, "glm-5.3[1m]");
@@ -369,12 +369,12 @@ test("a persistence failure leaves the gated provider unstarted and terminates i
   mkdirSync(logs);
   const marker = join(runDir, "provider-started");
   const provider = join(runDir, "provider.mjs");
-  writeFileSync(provider, "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.PLAN_RUNNER_MARKER, \"started\"); setInterval(() => {}, 1000);\n");
+  writeFileSync(provider, "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.INTENT_FACTORY_MARKER, \"started\"); setInterval(() => {}, 1000);\n");
   chmodSync(provider, 0o755);
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  const previousMarker = process.env.PLAN_RUNNER_MARKER;
-  process.env.PLAN_RUNNER_CODEX_BIN = provider;
-  process.env.PLAN_RUNNER_MARKER = marker;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  const previousMarker = process.env.INTENT_FACTORY_MARKER;
+  process.env.INTENT_FACTORY_CODEX_BIN = provider;
+  process.env.INTENT_FACTORY_MARKER = marker;
   const { contract, node } = validatedRun(runDir);
   const state = nodeSnapshot(node, []);
   let persistedInvocation;
@@ -400,10 +400,10 @@ test("a persistence failure leaves the gated provider unstarted and terminates i
     assert.equal(existsSync(marker), false);
     assert.equal(invocationAlive(persistedInvocation), false);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
-    if (previousMarker === undefined) delete process.env.PLAN_RUNNER_MARKER;
-    else process.env.PLAN_RUNNER_MARKER = previousMarker;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+    if (previousMarker === undefined) delete process.env.INTENT_FACTORY_MARKER;
+    else process.env.INTENT_FACTORY_MARKER = previousMarker;
   }
 });
 
@@ -417,8 +417,8 @@ test("autonomous progress stalls on unchanged allowed scope despite noisy stdout
   chmodSync(provider, 0o755);
   const autonomousPacket = packet({ mode: "autonomous", writeRoots: ["src"] });
   delete autonomousPacket.writeFiles;
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = provider;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = provider;
   const contractPath = writeContract(runDir, fixture({
     pollIntervalMs: 5,
     stallTimeoutSec: 30,
@@ -480,8 +480,8 @@ test("autonomous progress stalls on unchanged allowed scope despite noisy stdout
     assert.equal(stalledOutcome.error.code, "progress_stalled");
     assert.equal(job.closed, true);
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
     try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
   }
 });
@@ -494,8 +494,8 @@ test("progress deadline and dry count survive a worker restart while judges rema
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, "process.stdin.resume(); setInterval(() => {}, 1000);\n");
   chmodSync(provider, 0o755);
-  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
-  process.env.PLAN_RUNNER_CODEX_BIN = provider;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = provider;
   const autonomousPacket = packet({ mode: "autonomous", writeRoots: ["src"] });
   delete autonomousPacket.writeFiles;
   const contractPath = writeContract(runDir, fixture({
@@ -553,8 +553,8 @@ test("progress deadline and dry count survive a worker restart while judges rema
       await terminateInvocation(judge.invocation, { graceMs: 25, killGraceMs: 500 });
     }
   } finally {
-    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
-    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
     try { await terminateInvocation(worker.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
   }
 });

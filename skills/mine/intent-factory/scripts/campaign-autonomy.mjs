@@ -558,7 +558,7 @@ export function campaignStatus(campaignPath) {
  */
 export async function drainNotifications(campaignPath) {
   const outbox = readNotificationOutbox(campaignPath);
-  const executable = process.env.PLAN_RUNNER_NOTIFY_BIN;
+  const executable = process.env.INTENT_FACTORY_NOTIFY_BIN;
   if (!executable) return { delivered: 0, pending: outbox.filter((event) => !event.deliveredAt).length };
   let delivered = 0;
   for (const event of outbox) {
@@ -593,7 +593,7 @@ export async function detachSelf(campaignPath, options = {}) {
   const nonce = randomUUID();
   const child = spawn(process.execPath, [runnerPath, "campaign", "supervise", campaignId, "--cwd", cwd, "--interval", String(options.intervalMs ?? DEFAULT_INTERVAL_MS)], {
     cwd,
-    env: { ...process.env, PLAN_RUNNER_CAMPAIGN_BOOTSTRAP_NONCE: nonce },
+    env: { ...process.env, INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE: nonce },
     detached: process.platform !== "win32",
     stdio: "ignore",
   });
@@ -868,7 +868,7 @@ async function waitForBootstrap(campaignPath, nonce, pid) {
 
 /** @param {string} campaignPath @returns {string|null} */
 function detachedBootstrap(campaignPath) {
-  const nonce = process.env.PLAN_RUNNER_CAMPAIGN_BOOTSTRAP_NONCE;
+  const nonce = process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE;
   return nonce ? join(campaignPath, `${CAMPAIGN_BOOTSTRAP_FILE}.${nonce}.json`) : null;
 }
 
@@ -877,7 +877,7 @@ function writeBootstrap(campaignPath, bootstrapPath, status, error, lease) {
   const record = {
     status,
     pid: process.pid,
-    nonce: process.env.PLAN_RUNNER_CAMPAIGN_BOOTSTRAP_NONCE,
+    nonce: process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE,
     holderId: lease && "holderId" in lease ? lease.holderId : null,
     generation: lease && "generation" in lease ? lease.generation : null,
     error,
