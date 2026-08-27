@@ -797,6 +797,22 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
       enforceCostBudget(contract, runDir, states, lease, campaign.path);
 
+      // A provider that finishes its turn but never exits must not pin the
+      // run forever: enforce each invocation's wall-clock deadline in the
+      // live loop, not only on resume.
+      const now = Date.now();
+      for (const [nodeId, job] of running) {
+        if (job.closed || job.budgetStop) continue;
+        const startedAt = Date.parse(job.invocation.startedAt);
+        const timeoutSec = latestTimeoutSec(job.state, job.node.timeoutSec ?? contract.timeoutSec);
+        if (!Number.isFinite(startedAt) || !Number.isFinite(timeoutSec)) continue;
+        if (now - startedAt > timeoutSec * 1000) {
+          job.budgetStop = "wallclock";
+          process.stdout.write(`[node] ${nodeId} wall-clock budget reached (${timeoutSec}s) · terminating\n`);
+          void terminateProcess(job).catch(() => {});
+        }
+      }
+
       const slots = contract.maxParallel - running.size;
       if (slots > 0) {
         const ready = contract.nodes.filter((node) => {
@@ -2476,7 +2492,9 @@ function recordInvocationUsage(job, options = {}) {
  */
 function budgetStopError(scope, state) {
   const observed = state.usage?.inputTokens ?? 0;
-  return scope === "node"
+  return scope === "wallclock"
+    ? { code: "wall_clock_timeout", message: "worker exceeded its wall-clock deadline" }
+    : scope === "node"
     ? { code: "token_budget_exceeded", message: `worker exceeded its per-node input-token cap (observed ${observed})` }
     : { code: "budget_exceeded", message: `run input-token budget exhausted (spent ${observed})` };
 }
