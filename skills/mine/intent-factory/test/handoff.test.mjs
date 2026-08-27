@@ -149,7 +149,7 @@ test("handoff routes the next worker attempt to claude and composes its prompt f
   assert.match(handoffCapsule.continuationHint, /handoff from luna to opus/u);
 
   const statusPayload = JSON.parse(renderStatusJson(runDir));
-  const listed = /** @type {{id: string, pendingHandoff: {runtime: string, reason: string}|null}} */ (statusPayload.nodes.find((entry) => entry.id === "build"));
+  const listed = /** @type {{id: string, pendingHandoff: {runtime: string, reason: string}|null}} */ (statusPayload.nodes.find((/** @type {{id: string}} */ entry) => entry.id === "build"));
   assert.equal(listed.pendingHandoff?.runtime, "opus");
   assert.match(renderStatus(runDir), /handoff→opus/u);
 
@@ -374,7 +374,7 @@ test("a crash between the capsule write and the state publish leaves the old saf
     .map((line) => /** @type {Record<string, unknown>} */ (JSON.parse(line)))
     .filter((event) => event.from === "done" && event.to === "pending")
     .at(-1);
-  assert.equal(handoffEvent?.override?.capsuleDigest, capsuleFile.digest, "the published handoff must reference the durable capsule digest");
+  assert.equal((/** @type {Record<string, unknown>|undefined} */ (handoffEvent?.override))?.capsuleDigest, capsuleFile.digest, "the published handoff must reference the durable capsule digest");
 });
 
 test("handoff refuses without a settled checkpoint and without flags", async () => {

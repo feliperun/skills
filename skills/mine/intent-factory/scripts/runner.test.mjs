@@ -15,7 +15,7 @@ import { renderReportJson, renderStatusJson } from "./render.mjs";
 import { cancelRun, preflightContract, runContract, resumeRun, superviseRun } from "./runner.mjs";
 import { invocationAlive, invocationResult, processStartToken } from "./supervisor.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
-import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts } from "./store.mjs";
+import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import {
   closeResult,
@@ -1680,6 +1680,49 @@ test("live preflight proves generation, redacts failures, and static mode stays 
   }
 });
 
+test("live preflight providers never receive the controller-only notification transport", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-live-preflight-notify-env-"));
+  const marker = join(directory, "preflight-env.json");
+  const provider = join(directory, "preflight-provider.mjs");
+  writeFileSync(provider, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("preflight-provider 1.0.0");
+} else {
+  writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
+    notify: process.env.PLAN_RUNNER_NOTIFY_BIN ?? null,
+    ambient: process.env.PLAN_RUNNER_AMBIENT ?? null,
+  }));
+  const result = JSON.stringify({ status: "done", summary: "ok", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "fake-thread", usage: { inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 1 }, costUsd: 0.01 }));
+}
+`);
+  chmodSync(provider, 0o755);
+  const path = join(directory, "contract.json");
+  writeFileSync(path, `${JSON.stringify(fixture({
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
+    runtimeRules: [],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }), null, 2)}\n`);
+  const previousNotify = process.env.PLAN_RUNNER_NOTIFY_BIN;
+  const previousAmbient = process.env.PLAN_RUNNER_AMBIENT;
+  process.env.PLAN_RUNNER_NOTIFY_BIN = provider;
+  process.env.PLAN_RUNNER_AMBIENT = "ambient-value";
+  try {
+    const checks = await preflightContract(path);
+    assert.equal(checks[0].ok, true, checks[0].detail ?? undefined);
+    const observed = JSON.parse(readFileSync(marker, "utf8"));
+    assert.equal(observed.notify, null, "PLAN_RUNNER_NOTIFY_BIN must not reach the live preflight provider");
+    assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
+  } finally {
+    if (previousNotify === undefined) delete process.env.PLAN_RUNNER_NOTIFY_BIN;
+    else process.env.PLAN_RUNNER_NOTIFY_BIN = previousNotify;
+    if (previousAmbient === undefined) delete process.env.PLAN_RUNNER_AMBIENT;
+    else process.env.PLAN_RUNNER_AMBIENT = previousAmbient;
+  }
+});
+
 test("preflight deduplicates initial runtimes and follows failover targets", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-preflight-reachable-"));
   const executable = fakeExecJsonl(directory, "pass");
@@ -2510,6 +2553,75 @@ test("supervise resumes a run whose controller died", async () => {
   } finally {
     if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
     else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    supervisor.kill("SIGTERM");
+  }
+});
+
+test("supervise continues when a stale-lease resume loses to a concurrently healthy controller", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-supervise-lease-race-"));
+  const path = writeContract(directory, fixture({ id: "supervise-lease-race-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  orphan(runDir, "build");
+  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...metadata, pid: 2_147_483_647 }));
+
+  // The supervisor sees a stale controller lease and spawns a detached resume.
+  writeJsonAtomic(join(runDir, "controller-lease.json"), {
+    schemaVersion: 1,
+    contractVersion: "0.1.0",
+    holderId: "stale-holder",
+    generation: 1,
+    pid: 2_147_483_647,
+    processStartToken: null,
+    acquiredAt: "2026-01-01T00:00:00.000Z",
+    renewedAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-01T00:00:01.000Z",
+  });
+  // Hold the controller lease mutation lock before the supervisor starts so the
+  // detached resume deterministically loses the takeover instead of stealing the
+  // stale lease while the test installs the concurrent healthy controller.
+  const lockPath = join(runDir, "controller-lease.json.lock");
+  writeFileSync(lockPath, `${JSON.stringify({
+    pid: process.pid,
+    holderId: "test-lock-holder",
+    expiresAt: new Date(Date.now() + 4_000).toISOString(),
+  })}\n`, { flag: "wx", mode: 0o600 });
+
+  const previous = process.env.PLAN_RUNNER_CODEX_BIN;
+  process.env.PLAN_RUNNER_CODEX_BIN = fakeCodex(directory, "pass");
+  const supervisor = spawn(
+    process.execPath,
+    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  try {
+    let stdout = "";
+    supervisor.stdout.on("data", (chunk) => { stdout += chunk; });
+    const resumed = await waitForValue(() => (stdout.includes("controller lease expired · resumed") ? "resumed" : null), 20_000);
+    assert.equal(resumed, "resumed", stdout);
+
+    // A concurrently healthy controller owns the run lease. The detached resume
+    // loses the lease race and supervision must continue without attention.
+    writeJsonAtomic(join(runDir, "controller-lease.json"), {
+      schemaVersion: 1,
+      contractVersion: "0.1.0",
+      holderId: "concurrent-controller",
+      generation: 2,
+      pid: process.pid,
+      processStartToken: processStartToken(process.pid),
+      acquiredAt: new Date().toISOString(),
+      renewedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    unlinkSync(lockPath);
+
+    const contended = await waitForValue(() => (stdout.includes("lease contended") ? "contended" : null), 20_000);
+    assert.equal(contended, "contended", stdout);
+    assert.equal(existsSync(join(runDir, "supervisor-attention.json")), false, "benign lease contention must not raise attention");
+  } finally {
+    if (previous === undefined) delete process.env.PLAN_RUNNER_CODEX_BIN;
+    else process.env.PLAN_RUNNER_CODEX_BIN = previous;
+    try { unlinkSync(lockPath); } catch {}
     supervisor.kill("SIGTERM");
   }
 });

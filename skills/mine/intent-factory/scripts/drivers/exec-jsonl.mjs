@@ -473,9 +473,9 @@ function classifyFailure(message) {
  *
  * @param {string} driver
  * @param {string} stdout bounded transcript tail
- * @returns {number}
+ * @returns {{inputTokens: number|null, cacheReadInputTokens: number|null}}
  */
-export function liveInputTokens(driver, stdout) {
+export function liveUsage(driver, stdout) {
   // A transcript tail can start or end mid-line; meter leniently by parsing
   // each line independently and skipping anything unparseable.
   const events = String(stdout).split(/\r?\n/u).flatMap((line) => {
@@ -487,28 +487,66 @@ export function liveInputTokens(driver, stdout) {
   });
   if (driver === "codex") {
     // turn.completed usage is cumulative for the session; the last one wins.
-    const values = events
+    // Codex counts input_tokens with their cached portion included, so the
+    // uncached total is what the ledger calls `inputTokens`.
+    const records = events
       .filter((event) => event?.type === "turn.completed" && event.usage && typeof event.usage === "object")
-      .map((event) => finite(event.usage.input_tokens ?? event.usage.inputTokens))
-      .filter((value) => value !== null);
-    return values.length ? Math.max(...values) : 0;
+      .map((event) => {
+        const rawInput = finite(event.usage.input_tokens ?? event.usage.inputTokens);
+        if (rawInput === null) return null;
+        const cacheReadInputTokens = finite(
+          event.usage.cached_input_tokens ?? event.usage.cacheReadInputTokens ?? event.usage.cache_read_tokens,
+        ) ?? 0;
+        return { inputTokens: Math.max(0, rawInput - cacheReadInputTokens), cacheReadInputTokens };
+      })
+      .filter((record) => record !== null);
+    if (!records.length) return { inputTokens: null, cacheReadInputTokens: null };
+    return records.reduce((best, record) => (
+      record.inputTokens + record.cacheReadInputTokens > best.inputTokens + best.cacheReadInputTokens ? record : best
+    ));
   }
   if (driver === "claude" || driver === "glm") {
     // The terminal result event carries the session total; before it lands,
     // sum per-request assistant usage (each request re-reads full context).
+    // Claude's input_tokens already exclude cache reads.
     const resultEvent = events.findLast((event) => event?.type === "result");
     const resultUsage = resultEvent?.usage && typeof resultEvent.usage === "object"
       ? finite(resultEvent.usage.input_tokens ?? resultEvent.usage.inputTokens)
       : null;
-    if (resultUsage !== null) return resultUsage;
-    return events.reduce((sum, event) => {
-      if (event?.type !== "assistant") return sum;
-      const usage = event.message?.usage;
-      const value = usage && typeof usage === "object" ? finite(usage.input_tokens ?? usage.inputTokens) : null;
-      return sum + (value ?? 0);
-    }, 0);
+    if (resultUsage !== null) {
+      return {
+        inputTokens: resultUsage,
+        cacheReadInputTokens: finite(resultEvent.usage.cache_read_input_tokens ?? resultEvent.usage.cacheReadInputTokens) ?? null,
+      };
+    }
+    return {
+      inputTokens: events.reduce((sum, event) => {
+        if (event?.type !== "assistant") return sum;
+        const usage = event.message?.usage;
+        const value = usage && typeof usage === "object" ? finite(usage.input_tokens ?? usage.inputTokens) : null;
+        return sum + (value ?? 0);
+      }, 0) || null,
+      cacheReadInputTokens: null,
+    };
   }
-  return 0;
+  return { inputTokens: null, cacheReadInputTokens: null };
+}
+
+/**
+ * Budgeted live meter: one number, with cache reads weighted by the campaign
+ * policy so it is comparable with the persisted ledger. A provider that only
+ * reports usage at completion (agy, exec-jsonl) meters as 0 mid-run.
+ *
+ * @param {string} driver
+ * @param {string} stdout bounded transcript tail
+ * @param {number} [cacheReadWeight] cached-to-uncached rate ratio, default 1
+ * @returns {number}
+ */
+export function liveInputTokens(driver, stdout, cacheReadWeight = 1) {
+  const usage = liveUsage(driver, stdout);
+  if (usage.inputTokens === null) return 0;
+  const weighted = usage.inputTokens + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
+  return Math.round(weighted * 1000) / 1000;
 }
 
 /**

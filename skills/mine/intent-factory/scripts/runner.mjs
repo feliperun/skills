@@ -41,7 +41,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "./drivers/index.mjs";
-import { extractJson, liveInputTokens } from "./drivers/exec-jsonl.mjs";
+import { extractJson, liveInputTokens, liveUsage } from "./drivers/exec-jsonl.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   captureSourceIdentity,
@@ -348,7 +348,7 @@ export async function resumeRun(runDirPath) {
         );
         state.costUsd = invocationCost(state);
         writeNode(runDir, state, lease);
-        settleInvocation(runDir, invocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (invocation ?? recovery.invocationId), {
           status: "exhausted",
           usage: invocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : recovery.costUsd ?? null,
@@ -385,7 +385,7 @@ export async function resumeRun(runDirPath) {
           hadCost ? undefined : recovery.costUsd,
         );
         state.costUsd = invocationCost(state);
-        settleInvocation(runDir, invocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (invocation ?? recovery.invocationId), {
           status: "stalled",
           usage: invocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : recovery.costUsd ?? null,
@@ -462,13 +462,13 @@ export async function resumeRun(runDirPath) {
           hadCost ? undefined : recovery.costUsd,
         );
         state.costUsd = invocationCost(state);
-        settleInvocation(runDir, recoveredInvocation ?? recovery.invocationId, {
+        settleInvocation(runDir, /** @type {string | Invocation} */ (recoveredInvocation ?? recovery.invocationId), {
           status: recovery.kind,
           usage: recoveredInvocation?.usage ?? recovery.usage ?? null,
           costUsd: typeof recoveredInvocation?.costUsd === "number" ? recoveredInvocation.costUsd : recovery.costUsd ?? null,
           structuredResult: recovery.result !== null && recovery.result !== undefined,
           result: recovery.result ?? null,
-          receipts: providerReceipts(recovery),
+          receipts: providerReceipts(/** @type {{continuationId?: string|null}|null|undefined} */ (/** @type {unknown} */ (recovery))),
         });
         if (!persistedRecovery) recordExecutionOverride(runDir, state, {
           kind: "recovery",
@@ -519,7 +519,7 @@ export async function resumeRun(runDirPath) {
             const targetInvocation = unknownInvocation ?? workerInvocation ?? unknownEffectId;
             const targetUsage = unknownInvocation?.usage ?? recovery.usage ?? null;
             const targetCost = typeof unknownInvocation?.costUsd === "number" ? unknownInvocation.costUsd : recovery.costUsd ?? null;
-            settleInvocation(runDir, targetInvocation ?? unknownEffectId, {
+            settleInvocation(runDir, /** @type {string | Invocation} */ (targetInvocation ?? unknownEffectId), {
               status: resolution.action === "replay" ? "safe_replay" : "reconciled",
               usage: targetUsage,
               costUsd: targetCost,
@@ -562,7 +562,7 @@ export async function resumeRun(runDirPath) {
         if (recovery.phase === "worker" || restartInvocation?.phase === "worker") {
           const invocation = restartInvocation
             ?? [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker");
-          if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease)) continue;
+          if (reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lease)) continue;
         }
         const recoveredInvocation = state.invocations?.find((invocation) => invocation.id === recovery.invocationId);
         const hadUsage = Boolean(recoveredInvocation?.usage);
@@ -579,6 +579,7 @@ export async function resumeRun(runDirPath) {
               status: "restarted",
               usage: recoveredInvocation?.usage ?? recovery.usage ?? null,
               costUsd: typeof recoveredInvocation?.costUsd === "number" ? recoveredInvocation.costUsd : recovery.costUsd ?? null,
+              receipts: providerReceiptsFromInvocationTail(contract, recoveredInvocation ?? restartInvocation),
               error: recovery.error ?? null,
               reason: recovery.reason,
             });
@@ -741,13 +742,15 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       if (canceled) {
         const jobs = [...running.values()];
         await Promise.all(jobs.map((job) => terminateProcess(job)));
-        for (const job of jobs) recordInvocationUsage(job, { accumulate: false });
+        const envelopes = new Map();
+        for (const job of jobs) envelopes.set(job.invocation.id, recordInvocationUsage(job, { accumulate: false }));
         for (const job of jobs) {
           const scopeOk = job.phase !== "worker" || checkWorkerScope(contract, runDir, job, lease);
           settleInvocation(runDir, job.invocation, {
             status: scopeOk ? "canceled" : "failed",
             usage: job.invocation.usage ?? null,
             costUsd: typeof job.invocation.costUsd === "number" ? job.invocation.costUsd : null,
+            receipts: providerReceipts(envelopes.get(job.invocation.id)),
             error: scopeOk ? null : job.state.error ?? { code: "scope_check_failed", message: "worker scope check failed" },
             nextState: operationNextState(job.state),
           });
@@ -762,7 +765,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       await finalizeClosedJobs(contract, runDir, states, running, lease, campaign.path);
       await detectStalls(contract, running, async (job, status, error) => {
         const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id);
-        recordInvocationUsage(job);
+        const envelope = recordInvocationUsage(job);
         job.state.usage = invocationUsage(job.state);
         job.state.costUsd = invocationCost(job.state);
         await recordCampaignUsage(campaign.path, contract.usagePolicy, invocation);
@@ -771,6 +774,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
             status: "failed",
             usage: invocation?.usage ?? null,
             costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : null,
+            receipts: providerReceipts(envelope),
             error: job.state.error ?? { code: "scope_check_failed", message: "worker scope check failed" },
             nextState: operationNextState(job.state),
           });
@@ -780,6 +784,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
           status,
           usage: invocation?.usage ?? null,
           costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : null,
+          receipts: providerReceipts(envelope),
           error,
           nextState: operationNextState(job.state),
         });
@@ -791,6 +796,22 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       enforceTokenBudget(contract, runDir, states, running, lease);
       enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
       enforceCostBudget(contract, runDir, states, lease, campaign.path);
+
+      // A provider that finishes its turn but never exits must not pin the
+      // run forever: enforce each invocation's wall-clock deadline in the
+      // live loop, not only on resume.
+      const now = Date.now();
+      for (const [nodeId, job] of running) {
+        if (job.closed || job.budgetStop) continue;
+        const startedAt = Date.parse(job.invocation.startedAt);
+        const timeoutSec = latestTimeoutSec(job.state, job.node.timeoutSec ?? contract.timeoutSec);
+        if (!Number.isFinite(startedAt) || !Number.isFinite(timeoutSec)) continue;
+        if (now - startedAt > timeoutSec * 1000) {
+          job.budgetStop = "wallclock";
+          process.stdout.write(`[node] ${nodeId} wall-clock budget reached (${timeoutSec}s) · terminating\n`);
+          void terminateProcess(job).catch(() => {});
+        }
+      }
 
       const slots = contract.maxParallel - running.size;
       if (slots > 0) {
@@ -1434,6 +1455,7 @@ function operationReceipts(invocationOrId, supplied, existing = []) {
   /** @type {Record<string, string>[]} */
   const receipts = [];
   const seen = new Set();
+  /** @type {(kind: string, ref: unknown) => void} */
   const add = (kind, ref) => {
     if (typeof ref !== "string" || ref.length === 0) return;
     const key = `${kind}\u0000${ref}`;
@@ -1443,7 +1465,8 @@ function operationReceipts(invocationOrId, supplied, existing = []) {
   };
   for (const receipt of existing) {
     if (receipt && typeof receipt === "object") {
-      add(String(receipt.kind ?? "operation"), String(receipt.ref ?? ""));
+      const record = /** @type {Record<string, unknown>} */ (receipt);
+      add(String(record.kind ?? "operation"), String(record.ref ?? ""));
     }
   }
   if (Array.isArray(supplied)) {
@@ -1635,6 +1658,7 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
   const usage = state.usage ?? emptyUsage();
   const sourceRuntime = sourceWorkerRuntime(state);
   const handoff = state.routing?.currentOverride;
+  const result = /** @type {Record<string, unknown> | null | undefined} */ (state.result);
   const budgetRemaining = contract.usagePolicy === false
     ? null
     : roundBudgetTokens(contract.usagePolicy.maxInputTokens - campaignUsage(campaignUsagePath(contract), contract.usagePolicy).budgetInputTokens);
@@ -1645,11 +1669,11 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
     objective: node.taskPacket.objective,
     decisions: node.taskPacket.decisions,
     nonGoals: node.taskPacket.nonGoals,
-    changedFiles: state.scope?.changedPaths ?? (Array.isArray(state.result?.changedFiles) ? state.result.changedFiles.map(String) : []),
+    changedFiles: state.scope?.changedPaths ?? (Array.isArray(result?.changedFiles) ? result.changedFiles.map(String) : []),
     worktreeIdentity: captureWorktreeIdentity(contract.cwd),
     verifications: (state.verification?.commands ?? []).map((command) => ({ argv: command.argv.join(" "), pass: command.passed === true })),
-    artifacts: Array.isArray(state.result?.artifacts)
-      ? /** @type {unknown[]} */ (state.result.artifacts).map((artifact) => {
+    artifacts: Array.isArray(result?.artifacts)
+      ? /** @type {unknown[]} */ (result.artifacts).map((artifact) => {
         const record = /** @type {Record<string, unknown>} */ (artifact);
         return {
           handle: String(record.handle ?? record.path ?? ""),
@@ -1668,7 +1692,7 @@ function buildNodeCapsule(contract, node, state, runDir, nextAction) {
     },
     costUsd: typeof state.costUsd === "number" ? state.costUsd : null,
     budgetRemaining,
-    continuationHint: isManualHandoff(state) && sourceRuntime
+    continuationHint: isManualHandoff(state) && sourceRuntime && handoff
       ? "handoff from " + sourceRuntime + " to " + handoff.runtime + ": " + handoff.reason
       : null,
   });
@@ -1702,7 +1726,7 @@ function persistNodeCapsule(contract, node, state, runDir, lease, nextAction) {
 function loadLatestCapsule(runDir, nodeId, attempt) {
   for (let candidate = attempt; candidate >= 0; candidate -= 1) {
     try {
-      return parseCapsule(readFileSync(join(runDir, "capsules", `${nodeId}.${candidate}.json`), "utf8"));
+      return /** @type {ReturnType<typeof buildCapsule>} */ (parseCapsule(readFileSync(join(runDir, "capsules", `${nodeId}.${candidate}.json`), "utf8")));
     } catch {}
   }
   return null;
@@ -2030,6 +2054,57 @@ function evaluatePersistedWorkerScope(contract, node, state, invocation, options
   } catch (error) {
     return { ok: false, code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), detail: errorMessage(error) };
   }
+}
+
+/**
+ * Gate a worker restart behind proof that the replay cannot duplicate effects.
+ * Declared workspace changes are not proof of absence: any change across the
+ * ambiguous window (declared or unexpected) or a missing scope baseline is
+ * reconciled as terminal attention instead of silently replaying the attempt.
+ * Returns true when the restart must not proceed (the node was blocked).
+ *
+ * @param {ValidatedContract} contract
+ * @param {string} runDir
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {Invocation|undefined} invocation
+ * @param {RecoveryOutcome} recovery
+ * @param {Record<string, unknown>|undefined} persistedRecovery
+ * @param {LeaseHandle} lease
+ * @returns {boolean}
+ */
+function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lease) {
+  const evaluation = evaluatePersistedWorkerScope(contract, node, state, invocation, { strict: true });
+  if (evaluation.ok) return false;
+  const invocationId = recovery.invocationId ?? invocation?.id;
+  const reason = evaluation.code === "declared_paths_changed"
+    ? `declared workspace changes across the ambiguous window are not proof that replay cannot duplicate effects for node ${state.id}: ${evaluation.detail}`
+    : evaluation.code === "unexpected_write"
+      ? `workspace moved outside the declared write scope across the ambiguous window: ${evaluation.detail}`
+      : `the ambiguous worker window for node ${state.id} cannot prove replay safety: ${evaluation.detail}`;
+  if (invocationId) {
+    settleInvocation(runDir, invocationId, {
+      status: "reconciled",
+      usage: invocation?.usage ?? recovery.usage ?? null,
+      costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : recovery.costUsd ?? null,
+      receipts: providerReceiptsFromInvocationTail(contract, invocation),
+      unknownEffect: true,
+      classification: "unknown_effect",
+      reason,
+    });
+  }
+  if (!persistedRecovery) recordExecutionOverride(runDir, state, {
+    kind: "recovery",
+    decision: "reconciled",
+    invocationId,
+    phase: recovery.phase,
+    reason,
+  }, lease);
+  transition(runDir, state, "blocked", {
+    phase: recovery.phase,
+    error: { code: "unknown_effect_reconciled", message: excerpt(reason) },
+  }, lease);
+  return true;
 }
 
 /**
@@ -2398,11 +2473,13 @@ function recordInvocationUsage(job, options = {}) {
   }
   // Failure envelopes carry zeroed usage (a killed provider emits no terminal
   // event), yet its transcript holds real per-turn counters. Backfill the
-  // input side from the live meter so kills, timeouts, and scope failures
-  // still report what they spent.
+  // normalized usage components from the live meter so kills, timeouts, and
+  // scope failures still report what they spent, cache reads separated.
   if (envelope.usage.inputTokens === null && boundedStdout) {
-    const observed = liveInputTokens(job.runtime.driver, boundedStdout);
-    if (observed > 0) envelope = { ...envelope, usage: { ...envelope.usage, inputTokens: observed } };
+    const observed = liveUsage(job.runtime.driver, boundedStdout);
+    if (observed.inputTokens !== null) {
+      envelope = { ...envelope, usage: { ...envelope.usage, inputTokens: observed.inputTokens, cacheReadInputTokens: observed.cacheReadInputTokens } };
+    }
   }
   state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === job.invocation.id
     ? { ...invocation, usage: envelope.usage }
@@ -2412,13 +2489,15 @@ function recordInvocationUsage(job, options = {}) {
 }
 
 /**
- * @param {"node"|"campaign"} scope
+ * @param {"node"|"campaign"|"wallclock"} scope
  * @param {NodeSnapshot} state
  * @returns {{code: string, message: string}}
  */
 function budgetStopError(scope, state) {
   const observed = state.usage?.inputTokens ?? 0;
-  return scope === "node"
+  return scope === "wallclock"
+    ? { code: "wall_clock_timeout", message: "worker exceeded its wall-clock deadline" }
+    : scope === "node"
     ? { code: "token_budget_exceeded", message: `worker exceeded its per-node input-token cap (observed ${observed})` }
     : { code: "budget_exceeded", message: `run input-token budget exhausted (spent ${observed})` };
 }
@@ -2789,7 +2868,7 @@ async function persistRecoveryUsage(campaignPath, policy, runDir, state, recover
 function invocationUsage(state) {
   return (state.invocations ?? []).reduce(
     (total, invocation) => addUsage(total, invocation.usage),
-    { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 },
+    /** @type {Usage} */ ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 }),
   );
 }
 
@@ -2995,11 +3074,12 @@ function campaignCostSpent(contract, states, campaignPath) {
  * @param {LeaseHandle} lease
  */
 function enforceTokenBudget(contract, runDir, states, running, lease) {
+  const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
   const observed = new Map();
   let liveSpent = 0;
   for (const [nodeId, job] of running) {
     if (job.closed) continue;
-    const seen = observeLiveInputTokens(job);
+    const seen = observeLiveInputTokens(job, cacheReadWeight);
     observed.set(nodeId, seen);
     liveSpent += seen;
     if (job.node.maxInputTokens !== undefined && seen > job.node.maxInputTokens && !job.budgetStop) {
@@ -3008,8 +3088,14 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
       process.stdout.write(`[node] ${nodeId} input-token cap reached (${seen} > ${job.node.maxInputTokens}) · terminating\n`);
     }
   }
-  const persisted = [...states.values()].reduce((total, state) => total + (state.usage?.inputTokens ?? 0), 0);
-  const spent = persisted + liveSpent;
+  // Persisted usage is the normalized ledger shape (inputTokens excludes
+  // cache reads); weight the cached portion exactly like the live meter so
+  // the two sides are comparable.
+  const persisted = [...states.values()].reduce((total, state) => {
+    const usage = state.usage ?? emptyUsage();
+    return total + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
+  }, 0);
+  const spent = Math.round((persisted + liveSpent) * 1000) / 1000;
   if (spent < contract.maxInputTokens) return;
   for (const job of running.values()) {
     if (!job.budgetStop && !job.closed) {
@@ -3029,11 +3115,12 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
  * reads that split a line.
  *
  * @param {Job} job
+ * @param {number} [cacheReadWeight] cached-to-uncached rate ratio
  * @returns {number}
  */
-function observeLiveInputTokens(job) {
+function observeLiveInputTokens(job, cacheReadWeight = 1) {
   try {
-    const seen = liveInputTokens(job.runtime.driver, readBoundedTail(job.paths.stdout));
+    const seen = liveInputTokens(job.runtime.driver, readBoundedTail(job.paths.stdout), cacheReadWeight);
     job.liveInputTokens = Math.max(job.liveInputTokens ?? 0, seen);
   } catch {
     // An unreadable transcript meters as zero this tick; wall-clock and stall
@@ -4193,6 +4280,7 @@ function livePreflight(runtime, cwd, timeoutSec) {
         if (value === null) delete env[key];
         else env[key] = value;
       }
+      delete env.PLAN_RUNNER_NOTIFY_BIN;
       child = /** @type {import("node:child_process").ChildProcessWithoutNullStreams} */ (spawn(command.executable, command.args, {
         cwd,
         env,
@@ -4479,15 +4567,35 @@ export async function superviseRun(runDir, intervalSec) {
       }
       const lease = readLease(runDir);
       if (!leaseHealthy(lease)) {
+        /** @type {DetachedChild|null} */
+        let child = null;
+        /** @type {number|null} */
+        let pid = null;
         try {
-          const child = detachSelf("resume", runDir);
-          const pid = child.pid;
-          if (pid === undefined) throw new Error("detached child has no pid");
+          child = detachSelf("resume", runDir);
+          pid = child.pid ?? null;
+          if (pid === null) throw new Error("detached child has no pid");
           process.stdout.write(`[supervise] controller lease expired · resumed · pid ${pid}\n`);
           await waitForBootstrap(runDir, pid, child);
         } catch (error) {
           const message = errorMessage(error);
           const code = message.includes("source drift") ? "source_drift" : "resume_failed";
+          // A stale-lease resume can lose to a concurrently healthy controller
+          // that renewed or took over while the detached child bootstrapped.
+          // That contention is benign: re-read the lease and keep supervising.
+          // Source drift, malformed state, and an absent or unhealthy controller
+          // still need attention.
+          const leaseAfter = readLease(runDir);
+          if (
+            code === "resume_failed" &&
+            leaseAfter !== null &&
+            !leaseAfter.invalid &&
+            leaseHealthy(leaseAfter) &&
+            leaseAfter.pid !== pid
+          ) {
+            process.stdout.write(`[supervise] controller lease contended · healthy controller pid ${leaseAfter.pid} owns the run · continuing\n`);
+            continue;
+          }
           writeJsonAtomic(join(runDir, "supervisor-attention.json"), {
             schemaVersion: PROTOCOL_SCHEMA_VERSION,
             at: new Date().toISOString(),
@@ -5002,8 +5110,11 @@ function hasSettledCheckpoint(runDir, state) {
     const settlement = readOperationSettlement(runDir, lastInvocation.id);
     if (settlement) {
       const status = String(settlement.status);
-      if (status === "unknown_effect" || status === "reconciled") return false;
-      if (RESOLVED_OPERATION_STATUSES.has(status)) return true;
+      // Any existing settlement must be resolved: an unresolved ("closed",
+      // "unknown_effect") or reconciled operation is not demonstrably settled,
+      // and a stale capsule must not make the checkpoint handoff-able.
+      if (status === "reconciled" || status === "unknown_effect" || !RESOLVED_OPERATION_STATUSES.has(status)) return false;
+      return true;
     }
   }
   if (loadLatestCapsule(runDir, state.id, state.attempt) !== null) return true;
@@ -5036,6 +5147,7 @@ export async function handoffRun(target, values = {}) {
     contractVersion: PLAN_RUNNER_VERSION,
     processStartToken: processStartToken(process.pid),
   });
+  lease.startHeartbeat();
   try {
     const state = readRunNodes(runDir, contract).find((node) => node.id === nodeId);
     if (!state) throw new Error(`missing persisted snapshot for node ${nodeId}`);
@@ -5067,7 +5179,7 @@ export async function handoffRun(target, values = {}) {
     // The capsule must be durable before the pending routing override becomes
     // schedulable: a crash at any write boundary leaves either the old safe
     // state or a complete handoff, never a pending node without its capsule.
-    const pendingState = { ...state, routing, status: "pending", phase: "waiting", error: null, blockedBy: [], updatedAt: at };
+    const pendingState = /** @type {NodeSnapshot} */ ({ ...state, routing, status: "pending", phase: "waiting", error: null, blockedBy: [], updatedAt: at });
     const capsule = persistNodeCapsule(contract, planNode, pendingState, runDir, lease, reason);
     const previousStatus = state.status;
     transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [], routing }, lease);

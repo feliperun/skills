@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 
 export const VERIFICATION_LIMITS = Object.freeze({
   stdoutBytes: 16 * 1024,
@@ -169,7 +170,8 @@ export function captureWorkspaceSnapshot(cwd, expectedIgnoreSources) {
       }
       add({ path: rel, kind: "symlink", digest: `link:${target}:${targetReal}` });
     } else if (metadata.isFile()) {
-      add({ path: rel, kind: "file", digest: readFileIdentity(child, metadata), size: metadata.size });
+      const identity = fileIdentity(child, metadata);
+      add({ path: rel, kind: "file", digest: identity.digest, size: identity.size });
     } else {
       throw fail("snapshot_unsupported_entry", `unsupported workspace entry: ${rel}`);
     }
@@ -390,7 +392,7 @@ function captureIgnoreSources(root) {
       return [{ path, kind: "symlink", digest: `link:${target}:${targetReal}` }];
     }
     if (!metadata.isFile()) throw fail("snapshot_unsupported_entry", `unsupported ignore source: ${path}`);
-    return [{ path, kind: "file", digest: readFileIdentity(child, metadata), size: metadata.size }];
+    return [{ path, kind: "file", digest: fileIdentity(child, metadata).digest, size: metadata.size }];
   };
   return [...paths].sort().flatMap(capturePath);
 }
@@ -513,9 +515,21 @@ function workspacePathComponents(path) {
 /**
  * @param {string} path
  * @param {import("node:fs").Stats} metadata
- * @returns {string}
+ * @returns {{digest: string, size: number}}
  */
-function readFileIdentity(path, metadata) {
+function fileIdentity(path, metadata) {
+  if (basename(path) === "AGENTS.md") {
+    // The runner rewrites the machine-managed signal block as run state
+    // changes. Hash the file with only that complete block normalized so
+    // runner-owned block edits are not mistaken for worker scope drift, while
+    // human-authored guidance outside the block still changes the identity.
+    const normalized = normalizeManagedSignalBlock(readFileSync(path, "utf8"));
+    const bytes = Buffer.from(normalized, "utf8");
+    return {
+      digest: `file:${createHash("sha256").update(normalized).digest("hex")}:${bytes.byteLength}:${metadata.mode}`,
+      size: bytes.byteLength,
+    };
+  }
   const hash = createHash("sha256");
   let fd;
   try {
@@ -533,7 +547,7 @@ function readFileIdentity(path, metadata) {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-  return `file:${hash.digest("hex")}:${metadata.size}:${metadata.mode}`;
+  return { digest: `file:${hash.digest("hex")}:${metadata.size}:${metadata.mode}`, size: metadata.size };
 }
 
 /**

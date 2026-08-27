@@ -507,6 +507,7 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
     pollIntervalMs: source.pollIntervalMs,
     stallTimeoutSec: source.stallTimeoutSec,
     timeoutSec: source.timeoutSec,
+    maxInputTokens: repairInputTokens,
     maxCostUsd: repairCostUsd,
     runtimeDefaults: { worker: workerRuntime, judge: workerRuntime },
     runtimes,

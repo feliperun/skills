@@ -56,7 +56,7 @@ test("keeps conflicting and legacy no-cost entries ambiguous", () => {
   ]);
   try {
     const report = JSON.parse(renderReportJson(runDir));
-    assert.deepEqual(report.nodes.map(({ id, costUsd, costStatus }) => ({ id, costUsd, costStatus })), [
+    assert.deepEqual(report.nodes.map((/** @type {{id: string, costUsd: number|null, costStatus: string}} */ { id, costUsd, costStatus }) => ({ id, costUsd, costStatus })), [
       { id: "conflicting", costUsd: null, costStatus: "ambiguous" },
       { id: "legacy", costUsd: null, costStatus: "ambiguous" },
     ]);
@@ -70,6 +70,9 @@ test("keeps conflicting and legacy no-cost entries ambiguous", () => {
   }
 });
 
+/**
+ * @param {Array<{id: string, costUsd?: number, invocations?: Array<{id: string, costUsd?: number}>}>} nodes
+ */
 function makeRun(nodes) {
   const directory = mkdtempSync(join(tmpdir(), "intent-factory-report-cost-"));
   const contractPath = writeContract(directory, fixture({
@@ -88,11 +91,10 @@ function makeRun(nodes) {
     sourceIdentity: { kind: "run" },
   }, null, 2)}\n`);
   for (const node of nodes) {
-    const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
+    const planNode = /** @type {import("../scripts/contract.mjs").ValidatedNode} */ (contract.nodes.find((candidate) => candidate.id === node.id));
     writeFileSync(join(runDir, "nodes", `${node.id}.json`), `${JSON.stringify({
       schemaVersion: 1,
       contractVersion: "0.1.0",
-      id: node.id,
       type: planNode.type,
       sourceIdentity: planNode.sourceIdentity,
       packetHash: planNode.packetHash,
@@ -114,6 +116,7 @@ function makeRun(nodes) {
   return { runDir };
 }
 
+/** @param {string} id @param {number|undefined} costUsd */
 function invocation(id, costUsd) {
   return {
     id,

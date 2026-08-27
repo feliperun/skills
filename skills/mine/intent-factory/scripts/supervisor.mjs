@@ -89,6 +89,9 @@ function childEnv() {
     if (value === null) delete merged[key];
     else merged[key] = value;
   }
+  // Worker providers are not a notification surface: strip the controller-only
+  // transport after the driver overlay so no driver can reintroduce it.
+  delete merged.PLAN_RUNNER_NOTIFY_BIN;
   return merged;
 }
 process.on("SIGTERM", () => stopProvider());
@@ -128,7 +131,7 @@ const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
 /** @typedef {import("node:child_process").ChildProcess} ChildProcess */
 /** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
-/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign", liveInputTokens?: number, observeTimer?: ReturnType<typeof setInterval>, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
+/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign"|"wallclock", liveInputTokens?: number, observeTimer?: ReturnType<typeof setInterval>, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
 
 /**
  * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
