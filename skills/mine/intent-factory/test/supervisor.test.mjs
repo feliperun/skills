@@ -295,6 +295,74 @@ process.stdin.resume();
   }
 });
 
+test("worker providers never receive the controller-only notification transport", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "runner-notify-env-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const marker = join(runDir, "provider-env.json");
+  const provider = join(runDir, "provider.mjs");
+  writeFileSync(provider, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.PLAN_RUNNER_MARKER, JSON.stringify({
+  notify: process.env.PLAN_RUNNER_NOTIFY_BIN ?? null,
+  ambient: process.env.PLAN_RUNNER_AMBIENT ?? null,
+  baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
+  model: process.env.ANTHROPIC_MODEL ?? null,
+  token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
+  apiKey: process.env.ANTHROPIC_API_KEY ?? null,
+}));
+process.stdin.resume();
+`);
+  chmodSync(provider, 0o755);
+  const previous = {
+    PLAN_RUNNER_GLM_BIN: process.env.PLAN_RUNNER_GLM_BIN,
+    PLAN_RUNNER_MARKER: process.env.PLAN_RUNNER_MARKER,
+    PLAN_RUNNER_AMBIENT: process.env.PLAN_RUNNER_AMBIENT,
+    PLAN_RUNNER_NOTIFY_BIN: process.env.PLAN_RUNNER_NOTIFY_BIN,
+    ZAI_API_KEY: process.env.ZAI_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+  process.env.PLAN_RUNNER_GLM_BIN = provider;
+  process.env.PLAN_RUNNER_MARKER = marker;
+  process.env.PLAN_RUNNER_AMBIENT = "ambient-value";
+  process.env.PLAN_RUNNER_NOTIFY_BIN = provider;
+  process.env.ZAI_API_KEY = "glm-notify-test-token";
+  process.env.ANTHROPIC_API_KEY = "ambient-anthropic-key";
+  const { contract, node } = validatedRun(runDir);
+  const state = nodeSnapshot(node, []);
+  const job = startProcess({
+    contract,
+    node,
+    state,
+    runtime: { id: "glm", driver: "glm", model: "glm-5.3[1m]" },
+    prompt: "task",
+    paths: {
+      prompt: join(logs, "worker.prompt"),
+      stdout: join(logs, "worker.jsonl"),
+      stderr: join(logs, "worker.err"),
+    },
+    phase: "worker",
+    onInvocation: () => {},
+  });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    const observed = JSON.parse(readFileSync(marker, "utf8"));
+    assert.equal(observed.notify, null, "PLAN_RUNNER_NOTIFY_BIN must not reach the worker provider");
+    assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
+    assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "driver env overlay must still apply");
+    assert.equal(observed.model, "glm-5.3[1m]");
+    assert.equal(observed.token, "glm-notify-test-token");
+    assert.equal(observed.apiKey, null, "ambient Anthropic key is removed, not inherited");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
+  }
+});
+
 test("a persistence failure leaves the gated provider unstarted and terminates its wrapper", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "runner-persistence-barrier-"));
   const logs = join(runDir, "logs");
