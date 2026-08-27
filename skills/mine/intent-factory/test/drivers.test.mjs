@@ -9,7 +9,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "../scripts/drivers/index.mjs";
-import { EXEC_JSONL_PROTOCOL, liveInputTokens, normalizeExecJsonlResult, parseVersion } from "../scripts/drivers/exec-jsonl.mjs";
+import { EXEC_JSONL_PROTOCOL, liveInputTokens, liveUsage, normalizeExecJsonlResult, parseVersion } from "../scripts/drivers/exec-jsonl.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
@@ -553,6 +553,17 @@ test("live metering reads cumulative Codex usage from a growing transcript", () 
   assert.equal(liveInputTokens("codex", stream), 1200);
   assert.equal(liveInputTokens("codex", `${stream}\n{"type":"turn.compl`), 1200, "partial trailing line is ignored");
   assert.equal(liveInputTokens("codex", "not json at all"), 0);
+});
+
+test("live metering separates and weights cached reads like the campaign ledger", () => {
+  const stream = [
+    { type: "turn.completed", usage: { input_tokens: 2000, cached_input_tokens: 1800, output_tokens: 10 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.deepEqual(liveUsage("codex", stream), { inputTokens: 200, cacheReadInputTokens: 1800 }, "uncached and cached components");
+  assert.equal(liveInputTokens("codex", stream, 0.1), 380, "cached reads count at the weighted rate");
+  assert.equal(liveInputTokens("codex", stream), 2000, "default weight meters the raw total");
+  const allCache = JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1800, cached_input_tokens: 1800 } });
+  assert.equal(liveInputTokens("codex", allCache, 0.1), 180, "fully cached input meters at the weighted rate");
 });
 
 test("live metering sums per-request Claude usage and prefers the terminal total", () => {
