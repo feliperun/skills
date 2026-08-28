@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fast syntax gate before every commit.
+# Note: the husky wrapper runs this with `sh -e`, so keep it POSIX-safe.
+set -eu
+
+npm run check

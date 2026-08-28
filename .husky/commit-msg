@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Conventional Commits gate — receives the commit message file path.
+# Note: the husky wrapper runs this with `sh -e`, so keep it POSIX-safe.
+set -eu
+
+npx --no -- commitlint --edit "$1"

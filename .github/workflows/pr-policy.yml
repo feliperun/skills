@@ -1,0 +1,74 @@
+name: pr-policy
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  squash-message:
+    name: squash message (title + body)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+
+      - name: Reject blank PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$(printf '%s' "$PR_BODY" | tr -d '[:space:]')" ]; then
+            echo "::error::PR body is blank — it becomes the squash commit body. Describe the change."
+            exit 1
+          fi
+
+      - name: Validate title + body as the future squash commit message
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          msg="$RUNNER_TEMP/squash-message.txt"
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$msg"
+          echo "▸ validating squash message: $PR_TITLE"
+          npx --no -- commitlint --edit "$msg"
+
+  commit-messages:
+    name: commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need the full origin/main..HEAD range
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+
+      - name: Validate every non-merge candidate commit
+        run: |
+          dir="$RUNNER_TEMP/commit-messages"
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          i=0
+          while IFS= read -r -d '' msg; do
+            i=$((i + 1))
+            printf '%s' "$msg" > "$dir/$i.txt"
+          done < <(git log --no-merges --pretty=format:'%B%x00' origin/main..HEAD)
+          shopt -s nullglob
+          files=("$dir"/*.txt)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no candidate commits found in origin/main..HEAD"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "▸ validating: $(head -n 1 "$f")"
+            npx --no -- commitlint --edit "$f"
+          done
