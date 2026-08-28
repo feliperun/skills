@@ -3,13 +3,13 @@
  * skills — install skills from this repository into an agent's skills directory.
  *
  * Usage:
- *   skills [--category <mine|curated|community|all>]... [--target <dir>] [--global] [--force]
+ *   skills [--target <dir>] [--global] [--force]
  *   skills <skill-name>... [--target <dir>] [--global] [--force]
- *   skills list [--category <bucket>]...
+ *   skills list
  *
- * Defaults: the `mine` category, installed under `.claude/skills/` of the
- * current directory. `--global` targets `~/.claude/skills/`. An existing
- * skill is kept unless `--force` removes and recopies it.
+ * Installs from `skills/mine/` under `.claude/skills/` of the current
+ * directory. `--global` targets `~/.claude/skills/`. An existing skill is
+ * kept unless `--force` removes and recopies it.
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -18,16 +18,16 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SKILLS_ROOT = fileURLToPath(new URL("../skills", import.meta.url));
-const BUCKETS = ["mine", "curated", "community"];
+const SKILLS_DIR = join(SKILLS_ROOT, "mine");
 
 const USAGE = `usage:
-  skills [--category <mine|curated|community|all>]... [--target <dir>] [--global] [--force]
+  skills [--target <dir>] [--global] [--force]
   skills <skill-name>... [--target <dir>] [--global] [--force]
-  skills list [--category <bucket>]...
+  skills list
   skills --help | --version
 
 installs skills into .claude/skills/ of the current directory (or <dir> with
---target, or ~/.claude/skills/ with --global). default category: mine.`;
+--target, or ~/.claude/skills/ with --global).`;
 
 /** @param {string} [message] */
 function usageError(message) {
@@ -37,14 +37,11 @@ function usageError(message) {
 }
 
 /**
- * @param {string} bucket
- * @returns {string[]} skill names in the bucket that carry a SKILL.md
+ * @returns {string[]} skill names that carry a SKILL.md
  */
-function skillsIn(bucket) {
-  const dir = join(SKILLS_ROOT, bucket);
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && existsSync(join(dir, entry.name, "SKILL.md")))
+function catalog() {
+  return readdirSync(SKILLS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(SKILLS_DIR, entry.name, "SKILL.md")))
     .map((entry) => entry.name)
     .sort();
 }
@@ -53,9 +50,8 @@ function skillsIn(bucket) {
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-  /** @type {{categories: string[], names: string[], list: boolean, global: boolean, force: boolean, target: string | null, help: boolean, version: boolean}} */
+  /** @type {{names: string[], list: boolean, global: boolean, force: boolean, target: string | null, help: boolean, version: boolean}} */
   const opts = {
-    categories: [],
     names: [],
     list: false,
     global: false,
@@ -66,13 +62,7 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--category") {
-      const value = argv[++i];
-      if (!value) usageError("--category needs a bucket name");
-      opts.categories.push(value);
-    } else if (arg.startsWith("--category=")) {
-      opts.categories.push(arg.slice("--category=".length));
-    } else if (arg === "--target") {
+    if (arg === "--target") {
       const value = argv[++i];
       if (!value) usageError("--target needs a directory");
       opts.target = value;
@@ -94,78 +84,35 @@ function parseArgs(argv) {
       opts.names.push(arg);
     }
   }
-  const categories = opts.categories.length ? opts.categories : ["mine"];
-  for (const category of categories) {
-    if (category !== "all" && !BUCKETS.includes(category)) {
-      usageError(`unknown category "${category}" (mine, curated, community, all)`);
-    }
-  }
-  return { ...opts, categories };
-}
-
-/** @returns {Record<string, string[]>} skill names per bucket */
-function catalog() {
-  /** @type {Record<string, string[]>} */
-  const result = {};
-  for (const bucket of BUCKETS) {
-    const names = skillsIn(bucket);
-    if (names.length) result[bucket] = names;
-  }
-  return result;
-}
-
-/** @returns {Record<string, string>} skill name -> bucket */
-function byName() {
-  /** @type {Record<string, string>} */
-  const result = {};
-  for (const [bucket, names] of Object.entries(catalog())) {
-    for (const name of names) {
-      if (result[name]) result[name] = "*ambiguous*";
-      else result[name] = bucket;
-    }
-  }
-  return result;
+  return opts;
 }
 
 function list() {
-  const catalogEntries = catalog();
-  for (const bucket of BUCKETS) {
-    const names = catalogEntries[bucket];
-    if (!names) continue;
-    const marker = bucket === "mine" ? "⭐" : bucket === "curated" ? "💎" : "";
-    process.stdout.write(`${bucket} ${marker}\n`);
-    for (const name of names) process.stdout.write(`  ${name}\n`);
-  }
+  for (const name of catalog()) process.stdout.write(`${name}\n`);
 }
 
 /**
  * @param {string[]} names
- * @param {string[]} categories
  * @param {string} skillsDir
  * @param {boolean} force
  */
-function install(names, categories, skillsDir, force) {
-  const lookup = byName();
-  /** @type {Array<{name: string, bucket: string}>} */
-  const selected = [];
+function install(names, skillsDir, force) {
+  const available = new Set(catalog());
+  /** @type {string[]} */
+  let selected = [];
   if (names.length) {
     for (const name of names) {
-      const bucket = lookup[name];
-      if (!bucket) usageError(`no skill named "${name}" (run \`skills list\`)`);
-      if (bucket === "*ambiguous*") usageError(`"${name}" exists in more than one bucket; rename one of them`);
-      selected.push({ name, bucket });
+      if (!available.has(name)) usageError(`no skill named "${name}" (run \`skills list\`)`);
     }
+    selected = names;
   } else {
-    const wanted = categories.includes("all") ? BUCKETS : categories;
-    for (const bucket of wanted) {
-      for (const name of skillsIn(bucket)) selected.push({ name, bucket });
-    }
+    selected = catalog();
   }
   mkdirSync(skillsDir, { recursive: true });
   let installed = 0;
   let skipped = 0;
-  for (const { name, bucket } of selected) {
-    const source = join(SKILLS_ROOT, bucket, name);
+  for (const name of selected) {
+    const source = join(SKILLS_DIR, name);
     const destination = join(skillsDir, name);
     if (existsSync(destination) && !force) {
       process.stdout.write(`skipped ${name} (exists, use --force)\n`);
@@ -174,7 +121,7 @@ function install(names, categories, skillsDir, force) {
     }
     rmSync(destination, { recursive: true, force: true });
     cpSync(source, destination, { recursive: true });
-    process.stdout.write(`installed ${name} (${bucket}) → ${skillsDir}\n`);
+    process.stdout.write(`installed ${name} → ${skillsDir}\n`);
     installed++;
   }
   process.stdout.write(`${installed} installed, ${skipped} skipped\n`);
@@ -198,7 +145,7 @@ function main() {
   const skillsDir = opts.global
     ? join(homedir(), ".claude", "skills")
     : join(opts.target ? resolve(opts.target) : process.cwd(), ".claude", "skills");
-  install(opts.names, opts.categories, skillsDir, opts.force);
+  install(opts.names, skillsDir, opts.force);
 }
 
 main();

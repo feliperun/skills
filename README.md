@@ -1,18 +1,11 @@
 # skills
 
-Personal catalog of reusable agent skills, organized by provenance and
-installable into any repository with a single command.
+Personal catalog of reusable agent skills, installable into any repository
+with a single command.
 
-## Layout
-
-| Bucket | Meaning |
-|--------|---------|
-| [`skills/mine/`](skills/mine/) | Skills authored from scratch in this repository. ⭐ |
-| [`skills/curated/`](skills/curated/) | Community skills adapted to a personal workflow. 💎 |
-| [`skills/community/`](skills/community/) | Skills copied verbatim from the community. |
-
-Each skill is one folder with a `SKILL.md`; scripts, references, and templates
-live inside the skill so it stays a single copyable unit.
+All skills live under [`skills/mine/`](skills/mine/). Each skill is one folder
+with a `SKILL.md`; scripts, references, and templates live inside the skill so
+it stays a single copyable unit.
 
 ## Install
 

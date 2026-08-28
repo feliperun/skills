@@ -26,7 +26,7 @@ function run(args, cwd, extraEnv = {}) {
   };
 }
 
-test("installs the mine bucket into .claude/skills by default", () => {
+test("installs the catalog into .claude/skills by default", () => {
   const cwd = mkdtempSync(join(tmpdir(), "skills-install-"));
   const result = run([], cwd);
   assert.equal(result.status, 0, result.stderr);
@@ -60,12 +60,12 @@ test("keeps an existing skill unless --force", () => {
   assert.match(readFileSync(join(skillDir, "SKILL.md"), "utf8"), /^---\nname: init-agentkit/);
 });
 
-test("list prints buckets and names", () => {
+test("list prints skill names without bucket markers", () => {
   const result = run(["list"], tmpdir());
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /mine ⭐/);
   assert.match(result.stdout, /intent-factory/);
   assert.match(result.stdout, /init-agentkit/);
+  assert.doesNotMatch(result.stdout, /mine|curated|community|⭐|💎/);
 });
 
 test("rejects unknown skills and unknown flags", () => {
@@ -75,6 +75,19 @@ test("rejects unknown skills and unknown flags", () => {
   const flag = run(["--bogus"], tmpdir());
   assert.equal(flag.status, 2);
   assert.match(flag.stderr, /unknown flag/);
+  const category = run(["--category", "mine"], tmpdir());
+  assert.equal(category.status, 2);
+  assert.match(category.stderr, /unknown flag --category/);
+});
+
+test("keeps help and version available", () => {
+  const help = run(["--help"], tmpdir());
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^usage:/);
+  assert.doesNotMatch(help.stdout, /category|curated|community/);
+  const version = run(["--version"], tmpdir());
+  assert.equal(version.status, 0, version.stderr);
+  assert.match(version.stdout, /^\d+\.\d+\.\d+\n$/);
 });
 
 test("--global installs into the home skills directory", () => {
