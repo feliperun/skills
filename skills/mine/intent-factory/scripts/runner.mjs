@@ -86,7 +86,7 @@ import {
   validateWorkspaceScopeBoundary,
 } from "./verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
-import { buildCapsule, parseCapsule } from "./capsule.mjs";
+import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
@@ -1747,7 +1747,7 @@ export function composeCapsulePrompt(capsule, taskPacket) {
   const handoff = [
     `Continue node ${capsule.nodeId} in a fresh provider session on a new harness. The portable continuation capsule below is authoritative; it carries everything from the previous attempt.`,
     `Portable continuation capsule (digest ${capsule.digest}):`,
-    boundedUtf8(JSON.stringify(capsule, null, 2), 32 * 1024),
+    boundedUtf8(JSON.stringify(capsule, null, 2), DEFAULT_CAPSULE_BYTES),
     "Current closed task packet:",
     boundedUtf8(packet, 24 * 1024),
   ].join("\n\n");

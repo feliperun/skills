@@ -600,7 +600,8 @@ test("autonomous heartbeats observe progress made through a contained alias", as
   const result = await withFakeCodex(directory, "alias-heartbeat", () => runContract(path));
   const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
-  assert.ok((state.progress?.heartbeatCount ?? 0) > 0);
+  assert.equal(state.progress?.heartbeatCount, 3);
+  assert.equal(state.progress?.dryHeartbeatCount, 0);
   assert.ok(state.scope?.boundary?.roots.includes("alias"));
   assert.ok(state.scope?.boundary?.roots.includes("src"));
   assert.ok(readFileSync(join(directory, "src", "progress.txt"), "utf8"));

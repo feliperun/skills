@@ -224,7 +224,7 @@ test("campaign supervision drains notifications automatically", async () => {
 });
 
 test("detached supervisor reports readiness from the pinned runner", async () => {
-  const value = tempRepo(`import { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const id = process.argv[4]; const cwd = process.argv[process.argv.indexOf("--cwd") + 1]; const nonce = process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE; const path = join(cwd, ".runs", "campaigns", id); mkdirSync(path, { recursive: true }); writeFileSync(join(path, "controller-bootstrap.json." + nonce + ".json"), JSON.stringify({ status: "ready", pid: process.pid })); setInterval(() => {}, 1000);\n`);
+  const value = tempRepo(`import { mkdirSync, renameSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const id = process.argv[4]; const cwd = process.argv[process.argv.indexOf("--cwd") + 1]; const nonce = process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE; const path = join(cwd, ".runs", "campaigns", id); const ack = join(path, "controller-bootstrap.json." + nonce + ".json"); const temporary = ack + "." + process.pid + ".tmp"; mkdirSync(path, { recursive: true }); writeFileSync(temporary, JSON.stringify({ status: "ready", pid: process.pid })); renameSync(temporary, ack); setInterval(() => {}, 1000);\n`);
   try {
     const result = await detachSelf(value.campaignPath, { intervalMs: 100 });
     assert.ok(result.pid > 0);

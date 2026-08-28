@@ -191,7 +191,7 @@ export function initializeGit(directory, { commit = true } = {}) {
 export function fakeCodex(directory, mode = "pass") {
   const path = join(mkdtempSync(join(tmpdir(), "runner-fake-codex-")), `fake-codex-${mode}.mjs`);
   writeFileSync(path, `#!${process.execPath}
-import { appendFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, symlinkSync, unlinkSync, watch, writeFileSync } from "node:fs";
 const mode = ${JSON.stringify(mode)};
 if (process.argv.includes("--version")) {
   if (mode === "version-fail") {
@@ -227,16 +227,28 @@ if (process.argv.includes("--version")) {
     }
     if (mode === "contained-alias" && !judge) writeFileSync("alias.txt", "authorized target\\n");
     if (mode === "alias-heartbeat" && !judge) {
-      let writes = 0;
-      const timer = setInterval(() => {
-        writeFileSync("alias/progress.txt", String(Date.now()));
-        writes += 1;
-        if (writes >= 6) {
-          clearInterval(timer);
+      const statePath = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes", "build.json"))};
+      const stateDirectory = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes"))};
+      let observedHeartbeat = 0;
+      writeFileSync("alias/progress.txt", "initial");
+      const watcher = watch(stateDirectory, () => {
+        let progress;
+        try {
+          progress = JSON.parse(readFileSync(statePath, "utf8")).progress;
+        } catch {
+          return;
+        }
+        const heartbeat = progress?.heartbeatCount ?? 0;
+        if (heartbeat <= observedHeartbeat) return;
+        observedHeartbeat = heartbeat;
+        if (heartbeat >= 3) {
+          watcher.close();
           console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
           console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+          return;
         }
-      }, 20);
+        writeFileSync("alias/progress.txt", String(heartbeat));
+      });
       return;
     }
     if (mode === "large-output") {

@@ -240,13 +240,16 @@ test("a glm worker runs with the driver's endpoint env overlay applied", async (
   const marker = join(runDir, "provider-env.json");
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
-writeFileSync(process.env.INTENT_FACTORY_MARKER, JSON.stringify({
+import { renameSync, writeFileSync } from "node:fs";
+const marker = process.env.INTENT_FACTORY_MARKER;
+const temporary = \`${"${marker}"}.${"${process.pid}"}.tmp\`;
+writeFileSync(temporary, JSON.stringify({
   baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
   model: process.env.ANTHROPIC_MODEL ?? null,
   token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
   apiKey: process.env.ANTHROPIC_API_KEY ?? null,
 }));
+renameSync(temporary, marker);
 process.stdin.resume();
 `);
   chmodSync(provider, 0o755);
@@ -302,8 +305,10 @@ test("worker providers never receive the controller-only notification transport"
   const marker = join(runDir, "provider-env.json");
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
-writeFileSync(process.env.INTENT_FACTORY_MARKER, JSON.stringify({
+import { renameSync, writeFileSync } from "node:fs";
+const marker = process.env.INTENT_FACTORY_MARKER;
+const temporary = \`${"${marker}"}.${"${process.pid}"}.tmp\`;
+writeFileSync(temporary, JSON.stringify({
   notify: process.env.INTENT_FACTORY_NOTIFY_BIN ?? null,
   ambient: process.env.INTENT_FACTORY_AMBIENT ?? null,
   baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
@@ -311,6 +316,7 @@ writeFileSync(process.env.INTENT_FACTORY_MARKER, JSON.stringify({
   token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
   apiKey: process.env.ANTHROPIC_API_KEY ?? null,
 }));
+renameSync(temporary, marker);
 process.stdin.resume();
 `);
   chmodSync(provider, 0o755);
