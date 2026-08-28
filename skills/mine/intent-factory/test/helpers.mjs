@@ -191,7 +191,7 @@ export function initializeGit(directory, { commit = true } = {}) {
 export function fakeCodex(directory, mode = "pass") {
   const path = join(mkdtempSync(join(tmpdir(), "runner-fake-codex-")), `fake-codex-${mode}.mjs`);
   writeFileSync(path, `#!${process.execPath}
-import { appendFileSync, readFileSync, symlinkSync, unlinkSync, watch, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, symlinkSync, unlinkSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 const mode = ${JSON.stringify(mode)};
 if (process.argv.includes("--version")) {
   if (mode === "version-fail") {
@@ -228,10 +228,9 @@ if (process.argv.includes("--version")) {
     if (mode === "contained-alias" && !judge) writeFileSync("alias.txt", "authorized target\\n");
     if (mode === "alias-heartbeat" && !judge) {
       const statePath = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes", "build.json"))};
-      const stateDirectory = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes"))};
       let observedHeartbeat = 0;
       writeFileSync("alias/progress.txt", "initial");
-      const watcher = watch(stateDirectory, () => {
+      const observeHeartbeat = () => {
         let progress;
         try {
           progress = JSON.parse(readFileSync(statePath, "utf8")).progress;
@@ -242,13 +241,15 @@ if (process.argv.includes("--version")) {
         if (heartbeat <= observedHeartbeat) return;
         observedHeartbeat = heartbeat;
         if (heartbeat >= 3) {
-          watcher.close();
+          unwatchFile(statePath, observeHeartbeat);
           console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
           console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
           return;
         }
         writeFileSync("alias/progress.txt", String(heartbeat));
-      });
+      };
+      watchFile(statePath, { interval: 5 }, observeHeartbeat);
+      observeHeartbeat();
       return;
     }
     if (mode === "large-output") {
@@ -259,6 +260,18 @@ if (process.argv.includes("--version")) {
       for (let index = 0; index < 7000; index += 1) console.log(JSON.stringify({ type: "progress", text: "A".repeat(100) }));
       console.log(JSON.stringify({type:"turn.failed",error:{message:"still running after partial accounting",usage:{input_tokens:5,output_tokens:2,cached_input_tokens:1}}}));
       setInterval(() => {}, 60_000);
+      return;
+    }
+    if (mode === "wait-for-release") {
+      const started = ${JSON.stringify(join(directory, ".runs", "provider-started"))};
+      const release = ${JSON.stringify(join(directory, ".runs", "provider-release"))};
+      writeFileSync(started, "started");
+      const timer = setInterval(() => {
+        if (!existsSync(release)) return;
+        clearInterval(timer);
+        console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
+        console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      }, 5);
       return;
     }
     if (mode === "slow") {

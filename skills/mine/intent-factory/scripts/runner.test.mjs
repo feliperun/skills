@@ -593,7 +593,7 @@ test("autonomous heartbeats observe progress made through a contained alias", as
       id: "build",
       type: "backend",
       taskPacket: autonomousPacket,
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      progressPolicy: { graceSec: 0, intervalSec: 0.25, maxDryHeartbeats: 3 },
       gate: false,
     }],
   }));
@@ -988,10 +988,11 @@ test("orphan worker failure usage is recovered into the campaign ledger", async 
 test("simultaneous resumes allow one controller and reject the other", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-concurrent-resume-"));
   const path = writeContract(directory, fixture({ id: "concurrent-resume-run", pollIntervalMs: 10 }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  orphan(runDir, "build");
+  const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
   const runner = fileURLToPath(new URL("./runner.mjs", import.meta.url));
-  const slow = fakeCodex(directory, "slow");
+  const started = join(directory, ".runs", "provider-started");
+  const release = join(directory, ".runs", "provider-release");
+  const slow = fakeCodex(directory, "wait-for-release");
   const first = spawn(process.execPath, [runner, "resume", runDir], {
     env: { ...process.env, INTENT_FACTORY_CODEX_BIN: slow },
     stdio: ["ignore", "pipe", "pipe"],
@@ -999,7 +1000,11 @@ test("simultaneous resumes allow one controller and reject the other", async () 
   try {
     await waitForValue(() => {
       try {
-        return JSON.parse(readFileSync(join(runDir, "controller-lease.json"), "utf8")).pid === first.pid ? "held" : null;
+        return existsSync(started)
+          && first.exitCode === null
+          && JSON.parse(readFileSync(join(runDir, "controller-lease.json"), "utf8")).pid === first.pid
+          ? "held"
+          : null;
       } catch {
         return null;
       }
@@ -1008,12 +1013,15 @@ test("simultaneous resumes allow one controller and reject the other", async () 
       env: { ...process.env, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const [firstResult, secondResult] = await Promise.all([closeResult(first), closeResult(second)]);
-    assert.equal(firstResult.code, 0, firstResult.stderr);
+    const secondResult = await closeResult(second);
     assert.notEqual(secondResult.code, 0, secondResult.stderr);
     assert.match(secondResult.stderr, /lease/u);
+    writeFileSync(release, "release");
+    const firstResult = await closeResult(first);
+    assert.equal(firstResult.code, 0, `${firstResult.stderr}\n${firstResult.stdout}`);
     assert.equal(readStatus(join(runDir, "nodes", "build.json")), "done");
   } finally {
+    writeFileSync(release, "release");
     try { first.kill("SIGKILL"); } catch {}
   }
 });
