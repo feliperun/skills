@@ -35,12 +35,15 @@ export { acquireLease, writeJsonAtomic } from "./store.mjs";
 export const CAMPAIGN_PLAN_FILE = "plan.json";
 export const CAMPAIGN_STATE_FILE = "control-state.json";
 export const CAMPAIGN_OUTBOX_FILE = "notification-outbox.json";
+export const CAMPAIGN_PROGRESS_TYPE = "campaign.progress";
+export const CAMPAIGN_WATCH_CURSOR_DIR = "watch-cursors";
 export const CAMPAIGN_LEASE_FILE = "campaign-controller-lease.json";
 export const CAMPAIGN_SNAPSHOT_DIR = "controller-snapshots";
 export const CAMPAIGN_BOOTSTRAP_FILE = "controller-bootstrap.json";
 export const CAMPAIGN_PLAN_VERSION = "1.0.0";
 export const CAMPAIGN_SCHEMA_VERSION = 1;
 const MAX_OUTBOX_EVENTS = 100;
+const MAX_COALESCE_KEY_BYTES = 256;
 const MAX_EVENT_BYTES = 8 * 1024;
 const MAX_EVIDENCE_BYTES = 8 * 1024;
 const DEFAULT_INTERVAL_MS = 1_000;
@@ -54,7 +57,7 @@ const TERMINAL_CAMPAIGN_STATES = new Set(["attention", "completed"]);
 /** @typedef {{id: string, kind: "initial"|"repair", contractPath: string, status: "planned"|"running"|"done"|"attention"}} CampaignRun */
 /** @typedef {{id: string, kind: string, status: "pending"|"dispatched"|"failed", runId?: string, error?: string}} CampaignAction */
 /** @typedef {{schemaVersion: 1, campaignId: string, status: "configured"|"running"|"attention"|"completed", initialRunId: string, runs: CampaignRun[], retries: Record<string, number>, repairs: Record<string, string>, actions: Record<string, CampaignAction>, attention: {code: string, message: string}|null, updatedAt: string}} CampaignControlState */
-/** @typedef {{eventId: string, type: string, campaignId: string, at: string, summary: string, data?: JsonObject, deliveredAt?: string|null, attempts: number, lastError?: string|null}} NotificationEvent */
+/** @typedef {{eventId: string, type: string, campaignId: string, at: string, summary: string, data?: JsonObject, coalesceKey?: string, deliveredAt?: string|null, attempts: number, lastError?: string|null}} NotificationEvent */
 
 /**
  * Validate the durable campaign plan. The plan is intentionally independent
@@ -578,6 +581,67 @@ export async function drainNotifications(campaignPath) {
 }
 
 /**
+ * Watch campaign events incrementally. Exactly one of `since` or `cursor` is
+ * accepted: `since` is a stateless event ID, while
+ * `cursor` names a durable per-watcher position that is advanced atomically
+ * after the unseen event list is built, so a repeated invocation returns no
+ * events.
+ *
+ * @param {string} campaignPath
+ * @param {{since?: string, cursor?: string}} [options]
+ * @returns {{campaignId: string, cursor: {cursorId: string, at: string, eventId: string}|null, events: NotificationEvent[]}}
+ */
+export function watchCampaign(campaignPath, options = {}) {
+  if ((options.since !== undefined) === (options.cursor !== undefined)) throw new TypeError("watch requires exactly one of --since or --cursor");
+  const outbox = readNotificationOutbox(campaignPath).sort(compareEvents);
+  let cursorId = null;
+  /** @type {{at: string, eventId: string}} */
+  let position;
+  if (options.since !== undefined) {
+    const since = String(options.since);
+    const event = outbox.find((candidate) => candidate.eventId === since);
+    if (!event) throw new TypeError("--since event ID is not retained in the notification outbox");
+    position = { at: event.at, eventId: event.eventId };
+  } else {
+    cursorId = String(options.cursor);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(cursorId)) throw new TypeError("--cursor must be a safe identifier");
+    position = readWatchCursor(campaignPath, cursorId);
+  }
+  const events = outbox
+    .filter((event) => event.at > position.at || (event.at === position.at && event.eventId > position.eventId));
+  if (cursorId !== null && events.length > 0) {
+    const last = events[events.length - 1];
+    position = { at: last.at, eventId: last.eventId };
+    writeWatchCursor(campaignPath, { cursorId, ...position });
+  }
+  const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
+  return { campaignId, cursor: cursorId === null ? null : { cursorId, ...position }, events };
+}
+
+/** @param {NotificationEvent} left @param {NotificationEvent} right @returns {number} */
+function compareEvents(left, right) {
+  if (left.at !== right.at) return left.at < right.at ? -1 : 1;
+  return left.eventId < right.eventId ? -1 : left.eventId > right.eventId ? 1 : 0;
+}
+
+/** @param {string} campaignPath @param {string} cursorId @returns {{at: string, eventId: string}} */
+function readWatchCursor(campaignPath, cursorId) {
+  const path = join(campaignPath, CAMPAIGN_WATCH_CURSOR_DIR, `${cursorId}.json`);
+  if (!existsSync(path)) return { at: "", eventId: "" };
+  const record = objectValue(readJson(path), "campaign watch cursor");
+  requireText(record.at, "campaign watch cursor.at");
+  if (typeof record.eventId !== "string") throw new TypeError("campaign watch cursor.eventId must be a string");
+  return { at: String(record.at), eventId: record.eventId };
+}
+
+/** @param {string} campaignPath @param {{cursorId: string, at: string, eventId: string}} position */
+function writeWatchCursor(campaignPath, position) {
+  const path = join(campaignPath, CAMPAIGN_WATCH_CURSOR_DIR, `${position.cursorId}.json`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeJsonAtomic(path, { schemaVersion: CAMPAIGN_SCHEMA_VERSION, ...position, updatedAt: new Date().toISOString() });
+}
+
+/**
  * Detach a campaign supervisor using the pinned controller and wait for its
  * readiness record. This is intentionally separate from model/provider work.
  *
@@ -779,11 +843,19 @@ function setAttention(campaignPath, state, code, message) {
   enqueueNotification(campaignPath, "campaign.attention", `${code}:${message}`, message, { code });
 }
 
-/** @param {string} campaignPath @param {string} type @param {string} key @param {string} summary @param {JsonObject} [data] */
-export function enqueueNotification(campaignPath, type, key, summary, data = {}) {
-  const eventId = stableId(`${campaignPath}:${type}:${key}`);
+/**
+ * Append one notification event. Undelivered campaign.progress events are
+ * coalesced by a bounded key: a newer enqueue rewrites the older pending event
+ * in place instead of growing the outbox. Terminal events and delivered
+ * history are never rewritten.
+ *
+ * @param {string} campaignPath @param {string} type @param {string} key @param {string} summary @param {JsonObject} [data] @param {string} [progressCoalesceKey]
+ */
+export function enqueueNotification(campaignPath, type, key, summary, data = {}, progressCoalesceKey = key) {
   const outbox = readNotificationOutbox(campaignPath);
+  const eventId = stableId(`${campaignPath}:${type}:${key}`);
   if (outbox.some((event) => event.eventId === eventId)) return;
+  const coalesceKey = type === CAMPAIGN_PROGRESS_TYPE ? boundedText(progressCoalesceKey, MAX_COALESCE_KEY_BYTES) : null;
   const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
   const event = /** @type {NotificationEvent} */ ({
     eventId,
@@ -796,10 +868,22 @@ export function enqueueNotification(campaignPath, type, key, summary, data = {})
     attempts: 0,
     lastError: null,
   });
+  if (coalesceKey !== null) event.coalesceKey = coalesceKey;
+  const coalescedIndex = coalesceKey === null ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === type && candidate.coalesceKey === coalesceKey);
+  if (coalescedIndex >= 0) {
+    outbox[coalescedIndex] = event;
+    writeOutbox(campaignPath, outbox);
+    return;
+  }
   while (outbox.length >= MAX_OUTBOX_EVENTS) {
     const deliveredIndex = outbox.findIndex((candidate) => Boolean(candidate.deliveredAt));
-    if (deliveredIndex < 0) return;
-    outbox.splice(deliveredIndex, 1);
+    const progressIndex = type === CAMPAIGN_PROGRESS_TYPE ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === CAMPAIGN_PROGRESS_TYPE);
+    const evictableIndex = deliveredIndex >= 0 ? deliveredIndex : progressIndex;
+    if (evictableIndex < 0) {
+      process.stderr.write("[warn] notification outbox is full of undelivered events; new event was not retained\n");
+      return;
+    }
+    outbox.splice(evictableIndex, 1);
   }
   outbox.push(event);
   writeOutbox(campaignPath, outbox);

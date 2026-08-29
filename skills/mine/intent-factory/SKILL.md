@@ -245,6 +245,17 @@ the public contract must not depend on them.
     Never wait for a run inside the session: no `while`/`sleep` status loops, no repeated `status` calls, no watched background processes. Every tool call re-sends the whole session context, so a polling loop pays the orchestrator's full context price on every tick — one such loop kept a control session burning its entire usage period while the deterministic runner watched the same run for free. Waiting is the controller's and the supervisor's job; both are plain Node processes that cost nothing to keep alive.
 
     Under a harness that re-invokes the session continuously (a `/goal`, an autonomous loop, a scheduler), check status at most once per invocation: run active and healthy → report one line and end the turn; terminal states → act on them (findings, fix node, or report); never sleep inside a turn.
+    On every reinvocation, consume unseen campaign events once with a durable
+    cursor derived from the attached session ID, then summarize only those
+    material events in commentary before the single status read:
+
+    ```bash
+    node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <repo> --cursor session-<session-id>
+    ```
+
+    This is incremental pull triggered by reinvocation, not unsolicited push
+    into an idle chat. True proactive delivery requires a separately configured
+    `INTENT_FACTORY_NOTIFY_BIN` or another runtime bridge.
 11. When the user asks for status, including through `/btw`, render and read the snapshot:
 
    ```bash

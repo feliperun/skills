@@ -17,6 +17,7 @@ import {
   drainNotifications,
   startCampaign,
   superviseCampaign,
+  watchCampaign,
 } from "./campaign-autonomy.mjs";
 import { syncAgentSignal } from "./signal.mjs";
 
@@ -54,6 +55,7 @@ const OPERATION_OPTIONS = {
   supervise: { cwd: { type: "string" }, detach: { type: "boolean" }, interval: { type: "string" }, once: { type: "boolean" } },
   status: { cwd: { type: "string" } },
   drain: { cwd: { type: "string" } },
+  watch: { cwd: { type: "string" }, since: { type: "string" }, cursor: { type: "string" } },
   attach: {
     cwd: { type: "string" },
     tool: { type: "string" },
@@ -86,7 +88,7 @@ const OPERATION_OPTIONS = {
   show: { cwd: { type: "string" } },
 };
 
-/** @typedef {{cwd?: string, goal?: string, tool?: string, sessionId?: string, transcript?: string, format?: string, cursor?: string, kind?: string, text?: string, runId?: string, supersedes?: string, decisionId?: string, questionId?: string, eventId?: string, noTranscript?: boolean, plan?: string, contract?: string, snapshotVersion?: string, sourceRoot?: string, detach?: boolean, interval?: string, once?: boolean}} CliValues */
+/** @typedef {{cwd?: string, goal?: string, tool?: string, sessionId?: string, transcript?: string, format?: string, cursor?: string, since?: string, kind?: string, text?: string, runId?: string, supersedes?: string, decisionId?: string, questionId?: string, eventId?: string, noTranscript?: boolean, plan?: string, contract?: string, snapshotVersion?: string, sourceRoot?: string, detach?: boolean, interval?: string, once?: boolean}} CliValues */
 /** @typedef {import("./campaign.mjs").Campaign} Campaign */
 
 /**
@@ -109,6 +111,7 @@ export async function campaignCli(args) {
   if (operation === "supervise") return supervise(campaignId, values);
   if (operation === "status") return status(campaignId, values);
   if (operation === "drain") return drain(campaignId, values);
+  if (operation === "watch") return watch(campaignId, values);
   if (operation === "attach") return attach(campaignId, values);
   if (operation === "note") return note(campaignId, values);
   if (operation === "resolve") return resolveQuestion(campaignId, values);
@@ -164,6 +167,12 @@ function status(campaignId, values) {
 async function drain(campaignId, values) {
   const { path } = selectCampaign(campaignId, values);
   process.stdout.write(`${JSON.stringify(await drainNotifications(path))}\n`);
+}
+
+/** @param {string} campaignId @param {CliValues} values */
+function watch(campaignId, values) {
+  const { path } = selectCampaign(campaignId, values);
+  process.stdout.write(`${JSON.stringify(watchCampaign(path, { since: values.since, cursor: values.cursor }))}\n`);
 }
 
 /**
@@ -385,7 +394,7 @@ function positiveIntervalMs(value) {
 
 function usage() {
   process.stderr.write(
-    "usage: runner.mjs campaign <init|configure|start|supervise|status|drain|attach|note|resolve|close|show|list> <campaign-id> [--cwd <dir>] ...\n",
+    "usage: runner.mjs campaign <init|configure|start|supervise|status|drain|watch|attach|note|resolve|close|show|list> <campaign-id> [--cwd <dir>] ...\n",
   );
   process.exitCode = 2;
 }

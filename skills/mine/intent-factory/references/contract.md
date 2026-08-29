@@ -653,6 +653,8 @@ node <skill-dir>/scripts/runner.mjs campaign init <campaign-id> --cwd <dir> --go
 node <skill-dir>/scripts/runner.mjs campaign attach <campaign-id> --cwd <dir> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
 node <skill-dir>/scripts/runner.mjs campaign note <campaign-id> --cwd <dir> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
 node <skill-dir>/scripts/runner.mjs campaign resolve <campaign-id> --cwd <dir> --session-id <session-id> --question-id <id> --text <answer>
+node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --cursor session-<session-id>
+node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --since <event-id>
 node <skill-dir>/scripts/runner.mjs campaign close <campaign-id> --cwd <dir>
 node <skill-dir>/scripts/runner.mjs campaign show <campaign-id> --cwd <dir>
 ```
@@ -662,6 +664,14 @@ single active one instead of guessing. `resolve` answers an `open-question`
 journal event and removes it from the handoff's open-questions section.
 `close` marks the campaign terminal; a closed campaign rejects further
 attach/note/resolve writes but remains inspectable via `show` and `list`.
+`watch --cursor` returns ordered unseen notification events and atomically
+advances a durable consumer position; invoking it again returns no events until
+new material progress exists. `watch --since` is stateless and returns events
+after a named event ID that is still retained in the bounded outbox. The flags
+are mutually exclusive. A resumed session uses one stable watch consumer ID
+derived from its attached session ID and calls `watch` once per reinvocation
+before its single status read. This watch consumer ID is unrelated to the
+optional transcript position accepted by `campaign attach --cursor`.
 
 Artifacts:
 

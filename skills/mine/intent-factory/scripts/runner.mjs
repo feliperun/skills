@@ -89,7 +89,7 @@ import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
 import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
-import { drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
+import { CAMPAIGN_PROGRESS_TYPE, drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").ValidatedNode} ValidatedNode */
@@ -159,10 +159,11 @@ async function drainNotificationsSafely(campaignPath) {
  * @param {string} key
  * @param {string} summary
  * @param {Record<string, unknown>} [data]
+ * @param {string} [progressCoalesceKey]
  */
-async function notifyCampaign(campaignPath, type, key, summary, data = {}) {
+async function notifyCampaign(campaignPath, type, key, summary, data = {}, progressCoalesceKey = key) {
   try {
-    enqueueNotification(campaignPath, type, key, summary, data);
+    enqueueNotification(campaignPath, type, key, summary, data, progressCoalesceKey);
   } catch (error) {
     process.stderr.write(`[warn] notification enqueue failed: ${errorMessage(error)}\n`);
     return;
@@ -709,9 +710,37 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
     handoffFingerprint = fingerprint;
     renderCampaignHandoffSafely(campaign, runsDir, runDir);
   };
+  // Material progress is per node and per state, never per poll: a node whose
+  // status, phase, attempt, revision, or runtime did not change produces no
+  // campaign.progress event, so heartbeat counters and repeated idle passes
+  // stay silent. Terminal states found at take-over (e.g. on resume) are not
+  // seeded so their first pass still reports them.
+  /** @type {Map<string, string>} */
+  const progressFingerprints = new Map(
+    [...states.values()]
+      .filter((state) => !TERMINAL.has(state.status))
+      .map((state) => [state.id, nodeMaterialFingerprint(state)]),
+  );
   /** @type {string|null} */
   let notificationFingerprint = null;
   const notifyStateChanges = async () => {
+    for (const state of states.values()) {
+      const fingerprint = nodeMaterialFingerprint(state);
+      if (progressFingerprints.get(state.id) === fingerprint) continue;
+      progressFingerprints.set(state.id, fingerprint);
+      const attempt = state.attempt ?? 0;
+      const revisions = state.revisions ?? 0;
+      const runtime = state.runtime?.id ?? null;
+      const note = state.gate?.summary ?? resultSummary(state.result) ?? state.error?.message ?? null;
+      await notifyCampaign(
+        campaign.path,
+        CAMPAIGN_PROGRESS_TYPE,
+        `${basename(runDir)}:${state.id}:${state.status}:${state.phase}:${attempt}:${revisions}:${runtime ?? ""}`,
+        progressSummary(state, note),
+        { runId: basename(runDir), nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
+        `${basename(runDir)}:${state.id}`,
+      );
+    }
     const fingerprint = statesFingerprint(states);
     if (fingerprint === notificationFingerprint) return;
     notificationFingerprint = fingerprint;
@@ -3977,6 +4006,33 @@ function addCost(left, right) {
  */
 function statesFingerprint(states) {
   return [...states.values()].map((state) => `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}`).join("|");
+}
+
+/**
+ * Material progress identity of one node: status, phase, attempt, revision,
+ * and runtime. Heartbeat counters and other advisory fields are excluded, so
+ * idle polls and live heartbeats never look like progress.
+ *
+ * @param {NodeSnapshot} state
+ * @returns {string}
+ */
+function nodeMaterialFingerprint(state) {
+  return `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}:${state.runtime?.id ?? ""}`;
+}
+
+/**
+ * @param {NodeSnapshot} state
+ * @param {string|null} note
+ * @returns {string}
+ */
+function progressSummary(state, note) {
+  const parts = [`${state.id} ${state.status}`];
+  if (state.phase && state.phase !== "waiting") parts.push(`phase ${state.phase}`);
+  if ((state.attempt ?? 0) > 0) parts.push(`attempt ${state.attempt}`);
+  if ((state.revisions ?? 0) > 0) parts.push(`rev ${state.revisions}`);
+  if (state.runtime?.id) parts.push(state.runtime.id);
+  const summary = parts.join(" · ");
+  return note && note !== state.status ? `${summary} — ${excerpt(note)}` : summary;
 }
 
 /**

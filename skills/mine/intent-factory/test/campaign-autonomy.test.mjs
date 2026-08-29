@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
 import {
   CAMPAIGN_LEASE_FILE,
+  CAMPAIGN_OUTBOX_FILE,
   CAMPAIGN_STATE_FILE,
   classifyTransition,
   configureCampaign,
@@ -20,6 +21,7 @@ import {
   readNotificationOutbox,
   startCampaign,
   superviseCampaignOnce,
+  watchCampaign,
 } from "../scripts/campaign-autonomy.mjs";
 import { acquireLease, LeaseBusyError, writeJsonAtomic } from "../scripts/store.mjs";
 import { fixture, packet } from "./helpers.mjs";
@@ -203,6 +205,25 @@ test("notification outbox is bounded, deduplicated, and retried", async () => {
   }
 });
 
+test("a saturated outbox prioritizes terminal events and rejects terminal-only overflow", () => {
+  const value = tempRepo();
+  try {
+    for (let index = 0; index < 99; index += 1) {
+      enqueueNotification(value.campaignPath, "node.terminal", `node-${index}`, `node ${index} done`);
+    }
+    enqueueNotification(value.campaignPath, "campaign.progress", "run:working", "working", {}, "run");
+    enqueueNotification(value.campaignPath, "campaign.completed", "campaign", "campaign completed");
+    let outbox = readNotificationOutbox(value.campaignPath);
+    assert.equal(outbox.length, 100);
+    assert.equal(outbox.some((event) => event.type === "campaign.progress"), false);
+    assert.equal(outbox.some((event) => event.type === "campaign.completed"), true);
+    enqueueNotification(value.campaignPath, "campaign.attention", "attention", "attention");
+    outbox = readNotificationOutbox(value.campaignPath);
+    assert.equal(outbox.length, 100);
+    assert.equal(outbox.some((event) => event.type === "campaign.attention"), false);
+  } finally { cleanup(value); }
+});
+
 test("campaign supervision drains notifications automatically", async () => {
   const value = tempRepo();
   const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
@@ -229,6 +250,92 @@ test("detached supervisor reports readiness from the pinned runner", async () =>
     const result = await detachSelf(value.campaignPath, { intervalMs: 100 });
     assert.ok(result.pid > 0);
     process.kill(result.pid, "SIGTERM");
+  } finally { cleanup(value); }
+});
+
+test("campaign progress events coalesce by key until delivered", async () => {
+  const value = tempRepo();
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  try {
+    enqueueNotification(value.campaignPath, "campaign.progress", "initial-run:one", "one node done", { done: 1, total: 3 }, "initial-run");
+    const firstId = readNotificationOutbox(value.campaignPath)[0].eventId;
+    enqueueNotification(value.campaignPath, "campaign.progress", "initial-run:two", "two nodes done", { done: 2, total: 3 }, "initial-run");
+    enqueueNotification(value.campaignPath, "campaign.progress", "repair-1:one", "repair under way", { done: 1, total: 1 }, "repair-1");
+    let outbox = readNotificationOutbox(value.campaignPath);
+    assert.equal(outbox.length, 2);
+    assert.notEqual(outbox.find((event) => event.coalesceKey === "initial-run")?.eventId, firstId, "new material state gets its own stable event ID");
+    assert.equal(outbox.find((event) => event.coalesceKey === "initial-run")?.summary, "two nodes done");
+    assert.deepEqual(outbox.find((event) => event.coalesceKey === "initial-run")?.data, { done: 2, total: 3 });
+    enqueueNotification(value.campaignPath, "campaign.completed", "campaign", "campaign completed", { runCount: 1 });
+    assert.equal(readNotificationOutbox(value.campaignPath).length, 3);
+    const notify = join(value.root, "notify.mjs");
+    writeFileSync(notify, `#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on("end", () => process.exit(0));\n`);
+    chmodSync(notify, 0o755);
+    process.env.INTENT_FACTORY_NOTIFY_BIN = notify;
+    assert.equal((await drainNotifications(value.campaignPath)).pending, 0);
+    enqueueNotification(value.campaignPath, "campaign.progress", "initial-run:three", "three nodes done", { done: 3, total: 3 }, "initial-run");
+    outbox = readNotificationOutbox(value.campaignPath);
+    assert.equal(outbox.filter((event) => event.deliveredAt !== null).length, 3);
+    assert.equal(outbox.filter((event) => event.deliveredAt === null).length, 1);
+    assert.equal(outbox.find((event) => event.deliveredAt === null)?.summary, "three nodes done");
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
+    cleanup(value);
+  }
+});
+
+test("campaign watch orders events, advances cursors incrementally, and validates inputs", () => {
+  const value = tempRepo();
+  try {
+    /** @param {number} seconds @returns {string} */
+    const at = (seconds) => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+    /** @param {string} eventId @param {string} type @param {number} seconds @param {string} summary */
+    const event = (eventId, type, seconds, summary) => ({
+      eventId,
+      type,
+      campaignId: "campaign",
+      at: at(seconds),
+      summary,
+      data: {},
+      deliveredAt: null,
+      attempts: 0,
+      lastError: null,
+    });
+    writeJsonAtomic(join(value.campaignPath, CAMPAIGN_OUTBOX_FILE), [
+      event("b", "campaign.progress", 2, "second"),
+      event("a", "campaign.attention", 1, "first"),
+      event("c", "campaign.completed", 3, "done"),
+    ]);
+    const first = watchCampaign(value.campaignPath, { cursor: "watcher" });
+    assert.deepEqual(first.events.map((entry) => entry.eventId), ["a", "b", "c"]);
+    assert.deepEqual(first.cursor, { cursorId: "watcher", at: at(3), eventId: "c" });
+    const second = watchCampaign(value.campaignPath, { cursor: "watcher" });
+    assert.equal(second.events.length, 0);
+    assert.deepEqual(second.cursor, first.cursor);
+    assert.deepEqual(watchCampaign(value.campaignPath, { since: "b" }).events.map((entry) => entry.eventId), ["c"]);
+    assert.throws(() => watchCampaign(value.campaignPath, { since: "missing" }), /not retained/u);
+    assert.throws(() => watchCampaign(value.campaignPath, {}), /exactly one/u);
+    assert.throws(() => watchCampaign(value.campaignPath, { since: at(1), cursor: "watcher" }), /exactly one/u);
+    assert.throws(() => watchCampaign(value.campaignPath, { cursor: "../escape" }), /safe identifier/u);
+  } finally { cleanup(value); }
+});
+
+test("public campaign CLI watch streams events and rejects combined flags", () => {
+  const value = tempRepo();
+  try {
+    enqueueNotification(value.campaignPath, "campaign.progress", "initial-run", "half way");
+    const first = JSON.parse(runPublicCampaignCli(value.root, ["watch", "campaign", "--cwd", value.root, "--cursor", "progress"]));
+    assert.equal(first.events.length, 1);
+    assert.equal(first.events[0].summary, "half way");
+    assert.equal(first.cursor.cursorId, "progress");
+    const second = JSON.parse(runPublicCampaignCli(value.root, ["watch", "campaign", "--cwd", value.root, "--cursor", "progress"]));
+    assert.equal(second.events.length, 0);
+    const rejected = spawnSync(process.execPath, [runnerPath, "campaign", "watch", "campaign", "--cwd", value.root, "--since", first.events[0].eventId, "--cursor", "both"], {
+      cwd: value.root,
+      encoding: "utf8",
+    });
+    assert.notEqual(rejected.status, 0);
   } finally { cleanup(value); }
 });
 

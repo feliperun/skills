@@ -17,8 +17,10 @@ import { invocationAlive, invocationResult, processStartToken } from "./supervis
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
+import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./campaign-autonomy.mjs";
 import {
   closeResult,
+  delay,
   fakeCodex,
   fakeExecJsonl,
   fixture,
@@ -1575,6 +1577,93 @@ test("events record attempt, runtime, and gate verdict", async () => {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
+});
+
+test("runner emits campaign.progress only for material node changes and keeps terminal events", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-progress-emission-"));
+  const path = writeContract(directory, fixture({
+    id: "progress-emission-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
+  const notifier = join(directory, "notify-success.mjs");
+  writeFileSync(notifier, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n");
+  chmodSync(notifier, 0o755);
+  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
+  let result;
+  try {
+    result = await withFakeCodex(directory, "pass", () => runContract(path));
+  } finally {
+    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
+  }
+  assert.equal(result.ok, true);
+  const outbox = readNotificationOutbox(campaignPath);
+  const progress = outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE);
+  assert.deepEqual(progress.map((event) => event.data), [
+    { runId: "progress-emission-run", nodeId: "build", status: "running", phase: "worker", attempt: 1, revisions: 0, runtime: "luna" },
+    { runId: "progress-emission-run", nodeId: "build", status: "done", phase: "complete", attempt: 1, revisions: 0, runtime: "luna" },
+  ]);
+  assert.deepEqual(progress.map((event) => event.coalesceKey), [
+    "progress-emission-run:build",
+    "progress-emission-run:build",
+  ]);
+  assert.equal(progress[0].summary, "build running · phase worker · attempt 1 · luna");
+  assert.equal(progress[1].summary, "build done · phase complete · attempt 1 · luna — worker complete");
+  const terminal = outbox.filter((event) => event.type === "node.terminal");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].coalesceKey, undefined, "terminal events are never coalesced");
+  assert.deepEqual(terminal[0].data, { runId: "progress-emission-run", nodeId: "build", status: "done" });
+  assert.equal(terminal[0].summary, "build done: worker complete");
+  assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
+});
+
+test("idle polls and resume seeding emit no extra progress and coalesce undelivered progress", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-progress-idle-"));
+  const path = writeContract(directory, fixture({
+    id: "progress-idle-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
+  const started = join(directory, ".runs", "provider-started");
+  const release = join(directory, ".runs", "provider-release");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "wait-for-release");
+  let runDir;
+  try {
+    const pending = runContract(path);
+    await waitForValue(() => (existsSync(started) ? "started" : null));
+    // Let several controller polls pass while the node stays running: idle
+    // passes must not create progress events.
+    await delay(200);
+    writeFileSync(release, "release");
+    runDir = (await pending).runDir;
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+  let outbox = readNotificationOutbox(campaignPath);
+  assert.equal(outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE).length, 1, "undelivered progress coalesces to the latest material state");
+  assert.equal(outbox.find((event) => event.type === CAMPAIGN_PROGRESS_TYPE)?.data?.status, "done");
+  assert.equal(outbox.filter((event) => event.type === "node.terminal").length, 1);
+  assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
+  // Rewind the finished node to running and resume. The provider that would
+  // fail any fresh worker proves the result is adopted, the still-pending
+  // "done" progress is rewritten in place, and the seeded "running" state is
+  // not re-emitted.
+  orphan(runDir, "build");
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  assert.equal(resumed.ok, true);
+  assert.equal(nodeState(resumed).status, "done");
+  outbox = readNotificationOutbox(campaignPath);
+  const progress = outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE);
+  assert.equal(progress.length, 1, "resume must not duplicate progress");
+  assert.equal(progress[0]?.data?.status, "done");
+  assert.equal(outbox.filter((event) => event.type === "node.terminal").length, 1, "terminal events deduplicate");
+  assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
 });
 
 test("preflight probes every routed worker and judge runtime", async () => {

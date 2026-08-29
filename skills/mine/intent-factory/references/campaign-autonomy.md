@@ -96,12 +96,20 @@ run or resolve the campaign through the normal control surface.
 - Notification delivery is advisory. A missing, failing, or unavailable
   notification transport never changes the campaign outcome.
 
-## Notifications
+## Notifications and progress
 
-Terminal campaign events are appended to
-`notification-outbox.json` with a stable event ID, bounded summary/data,
+Material node transitions are appended as `campaign.progress`; terminal
+campaign events keep their existing event types. Every event in
+`notification-outbox.json` carries a stable event ID, bounded summary/data,
 attempt count, delivery timestamp, and last error. Duplicate event keys are
-ignored; delivered entries are evicted first when the bounded outbox is full.
+ignored. Pending progress for the same run/node is replaced by its newest
+material state, with a new state-specific event ID; delivered progress and
+terminal events are never coalesced. Delivered entries are evicted first when
+the bounded outbox is full; a new terminal event may then evict the oldest
+pending progress event. Heartbeats and unchanged controller passes emit no
+progress. The outbox retains at most 100 events. If all 100 remain undelivered
+terminal events, new events are rejected with a warning; `watch` reads do not
+acknowledge transport delivery or free capacity.
 
 Set `INTENT_FACTORY_NOTIFY_BIN` to an executable that accepts one JSON event on
 stdin and exits zero on successful delivery. `campaign drain` retries pending
@@ -109,6 +117,17 @@ events. At-least-once delivery is expected: a transport may receive an event
 again after a process crash, so consumers should deduplicate by `eventId`.
 The repository contains no relay credentials, recipient details, or private
 transport implementation.
+
+`campaign watch --cursor <consumer-id>` reads ordered unseen events and
+atomically advances a durable cursor before writing its JSON response; the same
+call then returns none until a new event arrives. It does not provide a
+per-consumer acknowledgement/replay handshake. `campaign watch --since
+<event-id>` is the stateless form and returns events after an ID that is still
+retained in the bounded outbox; coalesced or evicted IDs are rejected. Exactly
+one flag is required. An attached orchestrator session should consume its
+`session-<session-id>` cursor once per reinvocation and summarize unseen
+material events in commentary. This is durable incremental pull; unsolicited
+same-chat push is impossible without a runtime bridge.
 
 ## Operational commands
 
@@ -121,6 +140,8 @@ node <skill-dir>/scripts/runner.mjs campaign start <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign supervise <id> --cwd <repo> --detach --interval 30
 node <skill-dir>/scripts/runner.mjs campaign status <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign drain <id> --cwd <repo>
+node <skill-dir>/scripts/runner.mjs campaign watch <id> --cwd <repo> --cursor <consumer-id>
+node <skill-dir>/scripts/runner.mjs campaign watch <id> --cwd <repo> --since <event-id>
 node <skill-dir>/scripts/runner.mjs campaign show <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign close <id> --cwd <repo>
 ```
