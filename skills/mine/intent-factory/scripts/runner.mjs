@@ -906,7 +906,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       }, async (job) => {
         writeNode(runDir, job.state, lease);
       });
-      await enforceAutomaticWorkerRotation(runDir, running, lease);
+      await enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeightOf(contract));
       blockDependents(contract, runDir, states, lease);
       enforceTokenBudget(contract, runDir, states, running, lease);
       enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
@@ -1046,9 +1046,15 @@ function routingBackoffActive(state, phase) {
 
 /**
  * Automatic worker rotation (RETROSPECTIVE-2026-08-28 P0.1): a worker session
- * is rotated at 80 observed turns or an average of 120000 cache-read input
- * tokens per turn, whichever lands first. The handoff the dying session
+ * is rotated at 80 observed turns or an average of 120000 *weighted* cache-read
+ * input tokens per turn, whichever lands first. The handoff the dying session
  * writes is bounded to 16 KiB so the fresh session starts small.
+ *
+ * The cache-read trigger is weighted by the campaign's `cacheReadWeight`: a
+ * cache read is a performance cost, not a correctness cost, and prompt caching
+ * is exactly what makes a long session affordable. Comparing raw cache reads
+ * rotated a bounded-preamble flash worker on turn one, every turn, because it
+ * re-reads its whole (cheap) context each turn — the opposite of the intent.
  */
 export const ROTATION_MAX_TURNS = 80;
 export const ROTATION_AVG_CACHE_READ_TOKENS = 120_000;
@@ -1063,14 +1069,16 @@ const ROTATION_HANDOFF_PROMPT_HEADER = "The worker session is being rotated.";
  * a completed turn there is no per-turn average to trust.
  *
  * @param {{turns: number, cacheReadInputTokens: number}} metrics
+ * @param {number} [cacheReadWeight] campaign cache-read weight; 1 preserves the raw comparison
  * @returns {string|null}
  */
-export function rotationTrigger(metrics) {
+export function rotationTrigger(metrics, cacheReadWeight = 1) {
   if (metrics.turns >= ROTATION_MAX_TURNS) {
     return `observed turns ${metrics.turns} >= ${ROTATION_MAX_TURNS}`;
   }
-  if (metrics.turns > 0 && metrics.cacheReadInputTokens >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
-    return `average cache-read input ${Math.round(metrics.cacheReadInputTokens / metrics.turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${metrics.turns} turns`;
+  const weightedCacheRead = metrics.cacheReadInputTokens * cacheReadWeight;
+  if (metrics.turns > 0 && weightedCacheRead >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
+    return `weighted cache-read input ${Math.round(weightedCacheRead / metrics.turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${metrics.turns} turns`;
   }
   return null;
 }
@@ -1083,11 +1091,12 @@ export function rotationTrigger(metrics) {
  * @param {string} runDir
  * @param {Map<string, Job>} running
  * @param {LeaseHandle} lease
+ * @param {number} [cacheReadWeight] campaign cache-read weight for the trigger
  */
-async function enforceAutomaticWorkerRotation(runDir, running, lease) {
+async function enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeight = 1) {
   for (const [nodeId, job] of running) {
     if (job.closed || job.phase !== "worker" || job.rotationReason || job.rotationHandoff || job.resultMaterialization) continue;
-    const reason = rotationTrigger(monitorInvocation(job));
+    const reason = rotationTrigger(monitorInvocation(job), cacheReadWeight);
     if (!reason) continue;
     job.rotationReason = reason;
     recordExecutionOverride(runDir, job.state, {
@@ -3496,6 +3505,23 @@ function conservativeInput(usage) {
   return (usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0);
 }
 
+/** @param {ValidatedContract} contract @returns {number} */
+function cacheReadWeightOf(contract) {
+  return contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
+}
+
+/**
+ * Weighted input for a persisted node, comparable with the live meter and the
+ * campaign cap: cache reads count at the campaign `cacheReadWeight`, not raw.
+ *
+ * @param {Usage|undefined|null} usage
+ * @param {number} cacheReadWeight
+ * @returns {number}
+ */
+function weightedInput(usage, cacheReadWeight) {
+  return Math.round(((usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0) * cacheReadWeight) * 1000) / 1000;
+}
+
 /**
  * @param {ValidatedContract} contract
  * @param {string} runDir
@@ -3517,12 +3543,13 @@ function enforceLedgerBudget(contract, runDir, states, lease, campaignPath) {
       transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `worker allowance exhausted at ${policy.maxInputTokens - policy.judgeReserveInputTokens}; ${policy.judgeReserveInputTokens} input tokens remain reserved for judges` } }, lease);
     }
   }
+  const cacheReadWeight = policy === false ? 1 : (policy.cacheReadWeight ?? 1);
   for (const node of contract.nodes) {
     if (node.maxInputTokens === undefined) continue;
     const state = states.get(node.id);
-    const nodeSpent = state ? conservativeInput(state.usage) : 0;
+    const nodeSpent = state ? weightedInput(state.usage, cacheReadWeight) : 0;
     if (state?.status === "pending" && nodeSpent >= node.maxInputTokens) {
-      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `node input tokens (${nodeSpent}) reached the ${node.maxInputTokens} budget` } }, lease);
+      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `node weighted input tokens (${nodeSpent}) reached the ${node.maxInputTokens} budget` } }, lease);
     }
   }
 }

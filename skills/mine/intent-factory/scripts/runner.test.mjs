@@ -3265,7 +3265,11 @@ test("rotation triggers at exactly 80 turns or 120000 average cache-read tokens 
   assert.equal(rotationTrigger({ turns: 79, cacheReadInputTokens: 79 * 119_999 }), null, "79 turns under the average stay put");
   assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2 * ROTATION_AVG_CACHE_READ_TOKENS - 1 }), null, "one token under the average is not premature");
   assert.match(rotationTrigger({ turns: 80, cacheReadInputTokens: 0 }) ?? "", /observed turns 80 >= 80/u);
-  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS }) ?? "", /average cache-read input 120000/u);
+  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS }) ?? "", /weighted cache-read input 120000/u);
+  // The cache-read trigger weights cache reads: a bounded-preamble worker that
+  // re-reads a large but cheap context each turn must not rotate every turn.
+  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 374_400 }, 0.1), null, "cheap cache reads under the weighted threshold stay put");
+  assert.match(rotationTrigger({ turns: 1, cacheReadInputTokens: 1_300_000 }, 0.1) ?? "", /weighted cache-read input 130000 >= 120000/u, "genuinely bloated weighted context still rotates");
 });
 
 test("automatic rotation turns a fat worker session over at 80 observed turns", async () => {
@@ -3318,7 +3322,7 @@ test("automatic rotation triggers on average cache-read input without 80 turns",
   assert.equal(state.status, "done");
   const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
   assert.equal(rotations.length, 2);
-  assert.match(rotations[0].reason ?? "", /average cache-read input 130000 >= 120000 tokens\/turn over 1 turns/u);
+  assert.match(rotations[0].reason ?? "", /weighted cache-read input 130000 >= 120000 tokens\/turn over 1 turns/u);
   assert.equal((state.invocations ?? []).length, 3, "the cache trigger also rotates through the handoff into a fresh session");
 });
 
