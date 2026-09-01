@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,7 +14,7 @@ import {
   writeJsonAtomic,
 } from "../scripts/store.mjs";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
-import { detectStalls, invocationAlive, processStartToken, startProcess, terminateInvocation } from "../scripts/supervisor.mjs";
+import { detectStalls, invocationAlive, monitorInvocation, processStartToken, startProcess, terminateInvocation } from "../scripts/supervisor.mjs";
 import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
 
@@ -181,6 +181,78 @@ test("termination escalates from SIGTERM to SIGKILL for a provider that ignores 
 
 test("portable PID reuse defense rejects a mismatched Linux process start token", { skip: process.platform !== "linux" }, () => {
   assert.equal(invocationAlive({ pid: process.pid, processStartToken: "definitely-not-this-process" }), false);
+});
+
+test("monitorInvocation reads bounded live evidence and never throws", () => {
+  const runDir = mkdtempSync(join(tmpdir(), "runner-monitor-invocation-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const stdout = join(logs, "worker.jsonl");
+  writeFileSync(stdout, [
+    { type: "thread.started", thread_id: "live-thread" },
+    { type: "item.completed", item: { type: "tool_call" } },
+    { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
+  ].map((event) => JSON.stringify(event)).join("\n") + "\n");
+  const job = /** @type {import("../scripts/supervisor.mjs").Job} */ ({
+    runtime: { driver: "codex" },
+    paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
+  });
+  assert.deepEqual(monitorInvocation(job), { continuationId: "live-thread", turns: 1, cacheReadInputTokens: 80, toolCalls: 1 });
+  assert.deepEqual(
+    monitorInvocation({ ...job, paths: { ...job.paths, stdout: join(logs, "missing.jsonl") } }),
+    { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0 },
+    "a missing transcript meters as zero without throwing",
+  );
+});
+
+test("monitorInvocation keeps counting codex turns after the transcript outgrows any fixed window", () => {
+  const runDir = mkdtempSync(join(tmpdir(), "runner-monitor-fat-codex-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const stdout = join(logs, "worker.jsonl");
+  const fatItem = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "y".repeat(4096) } });
+  const turn = JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 150_000 } });
+  const first = [];
+  for (let index = 0; index < 40; index += 1) first.push(fatItem, turn);
+  writeFileSync(stdout, `${first.join("\n")}\n`);
+  const job = /** @type {import("../scripts/supervisor.mjs").Job} */ ({
+    runtime: { driver: "codex" },
+    paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
+  });
+  assert.equal(monitorInvocation(job).turns, 40, "the first observation consumes the padded prefix");
+  const second = [];
+  for (let index = 0; index < 40; index += 1) second.push(turn);
+  appendFileSync(stdout, `${second.join("\n")}\n`);
+  assert.ok(statSync(stdout).size > 128 * 1024, "the transcript outgrew the old fixed live window");
+  const observed = monitorInvocation(job);
+  assert.equal(observed.turns, 80, "the rotation turn threshold stays observable on a fat transcript");
+  assert.equal(observed.cacheReadInputTokens, 150_000, "cumulative codex cache-read counters compose as a max, not a sum");
+});
+
+test("monitorInvocation observes claude turns and the session total beyond a fixed window", () => {
+  const runDir = mkdtempSync(join(tmpdir(), "runner-monitor-fat-claude-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const stdout = join(logs, "worker.jsonl");
+  const lines = [];
+  for (let index = 0; index < 90; index += 1) {
+    // Fat content pushes the threshold-crossing turns past 128 KiB of log.
+    const text = index < 40 ? "z".repeat(4096) : "done";
+    lines.push(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text }], usage: { input_tokens: 1, cache_read_input_tokens: 1_000 } },
+    }));
+  }
+  lines.push(JSON.stringify({ type: "result", session_id: "fat-session", usage: { input_tokens: 9, cache_read_input_tokens: 123_456 } }));
+  writeFileSync(stdout, `${lines.join("\n")}\n`);
+  assert.ok(statSync(stdout).size > 128 * 1024, "the transcript outgrew the old fixed live window");
+  const job = /** @type {import("../scripts/supervisor.mjs").Job} */ ({
+    runtime: { driver: "claude" },
+    paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
+  });
+  const observed = monitorInvocation(job);
+  assert.equal(observed.turns, 90, "assistant turns past the old window still count");
+  assert.equal(observed.cacheReadInputTokens, 123_456, "the terminal result total replaces the per-turn sum");
 });
 
 test("stall supervision uses the latest persisted timeout override", async () => {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture, orphan, withFakeCodex, writeContract } from "./helpers.mjs";
@@ -21,12 +21,14 @@ function workerStdoutLog(runDir, nodeId = "build") {
 
 /**
  * Reopen the unknown_effect window left by a controller crash: withhold the
- * settlement and destroy the completed-turn proof so adoption cannot apply.
+ * settlement, the canonical worker-result file, and the completed-turn stream
+ * proof so adoption cannot apply.
  *
  * @param {string} runDir @param {string} invocationId @param {string} nodeId
  */
 function reopenCrashWindow(runDir, invocationId, nodeId = "build") {
   unlinkSync(join(runDir, "operations", `${invocationId}.settlement.json`));
+  rmSync(join(runDir, "results", `${nodeId}.json`), { force: true });
   const stdout = workerStdoutLog(runDir, nodeId);
   assert.ok(stdout, "worker stdout log is missing");
   writeFileSync(stdout, "");
@@ -41,6 +43,7 @@ function reopenCrashWindow(runDir, invocationId, nodeId = "build") {
  */
 function reopenCrashWindowKeepingThread(runDir, invocationId, nodeId = "build") {
   unlinkSync(join(runDir, "operations", `${invocationId}.settlement.json`));
+  rmSync(join(runDir, "results", `${nodeId}.json`), { force: true });
   const stdout = workerStdoutLog(runDir, nodeId);
   assert.ok(stdout, "worker stdout log is missing");
   const started = readFileSync(stdout, "utf8").split("\n").find((line) => line.includes("thread.started"));

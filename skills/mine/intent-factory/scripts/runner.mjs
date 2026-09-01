@@ -15,7 +15,7 @@ import {
   rmSync,
   unlinkSync,
 } from "node:fs";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -41,7 +41,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "./drivers/index.mjs";
-import { extractJson, liveInputTokens, liveUsage } from "./drivers/exec-jsonl.mjs";
+import { extractJson, liveInputTokens, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   captureSourceIdentity,
@@ -71,6 +71,7 @@ import {
   invocationAlive,
   invocationResult,
   latestTimeoutSec,
+  monitorInvocation,
   processStartToken,
   runProcessAlive,
   startProcess,
@@ -401,14 +402,54 @@ export async function resumeRun(runDirPath) {
         continue;
       }
       if (recovery?.kind === "adopted" || recovery?.kind === "rejudge") {
-        const workerResult = recovery.phase === "judge"
-          ? recoverWorkerResult(state, contract, node)
-          : recovery.result;
-        if (recovery.phase === "worker" && workerResult !== null) {
+        // The run-owned canonical file outranks every provider-derived source:
+        // the message, the settlement, and the adopted stream result. A
+        // present-but-invalid file surfaces as an invalid result on every
+        // recovery path, never as a reason to adopt provider evidence.
+        let workerResult;
+        try {
+          workerResult = recovery.phase === "judge"
+            ? recoverWorkerResult(runDir, state, contract, node)
+            : canonicalWorkerResultText(runDir, node.id) ?? recovery.result;
+        } catch (error) {
+          applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error));
+          continue;
+        }
+        if (recovery.phase === "worker" && workerResult !== null && workerResult !== undefined) {
           const invocation = recovery.kind === "rejudge"
             ? [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker")
             : state.invocations?.find((item) => item.id === recovery.invocationId);
-          if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease)) continue;
+          // A one-turn rotation handoff acknowledges itself, not the node: its
+          // message must never be adopted as a worker result. The durable
+          // handoff override schedules the fresh rotated session instead.
+          if (isRotationHandoffInvocation(invocation)) {
+            // The handoff turn had no workspace authority: any persisted
+            // change across the window is as terminal as for materialization.
+            if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, { materialization: true })) continue;
+            const handoffInvocation = state.invocations?.find((item) => item.id === recovery.invocationId);
+            state.invocations = closePersistedInvocation(state.invocations, recovery.invocationId, recovery.usage, recovery.costUsd);
+            state.costUsd = invocationCost(state);
+            settleInvocation(runDir, /** @type {string | Invocation} */ (handoffInvocation ?? recovery.invocationId), {
+              status: "adopted",
+              usage: handoffInvocation?.usage ?? recovery.usage ?? null,
+              costUsd: typeof handoffInvocation?.costUsd === "number" ? handoffInvocation.costUsd : recovery.costUsd ?? null,
+              reason: "rotation handoff turn adopted; the fresh rotated session continues the node",
+            });
+            if (!persistedRecovery) recordExecutionOverride(runDir, state, {
+              kind: "recovery",
+              decision: "adopted",
+              invocationId: recovery.invocationId,
+              phase: "worker",
+              reason: "rotation handoff turn adopted after controller loss",
+            }, lease);
+            transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
+            continue;
+          }
+          // A recovered result-materialization turn keeps its live-path rule:
+          // the turn had no workspace authority, so any change is a violation.
+          if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, {
+            materialization: isResultMaterializationInvocation(invocation),
+          })) continue;
           /** @type {WorkerResult|undefined} */
           let parsedWorkerResult;
           try {
@@ -501,6 +542,50 @@ export async function resumeRun(runDirPath) {
           ?? [...(state.invocations ?? [])].reverse()[0];
         const unknownEffectId = recovery.invocationId ?? lastInvocationId;
         const recoveryPhase = recovery.phase ?? restartInvocation?.phase ?? "worker";
+        // A restart of a result-materialization turn means the one permitted
+        // result-only turn already ran and left no canonical result. It must
+        // fail terminally instead of becoming fresh implementation work.
+        if (restartInvocation?.phase === "worker" && isResultMaterializationInvocation(restartInvocation)) {
+          if (recovery.invocationId) {
+            state.invocations = closePersistedInvocation(state.invocations, recovery.invocationId, recovery.usage, recovery.costUsd);
+            if (!hasOperationSettlement(runDir, recovery.invocationId)) {
+              settleInvocation(runDir, restartInvocation, {
+                status: "failed",
+                error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
+                reason: recovery.reason ?? undefined,
+                nextState: "failed",
+              });
+            }
+          }
+          state.costUsd = invocationCost(state);
+          transition(runDir, state, "failed", {
+            phase: "worker",
+            error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result before the controller was interrupted" },
+          }, lease);
+          continue;
+        }
+        // An interrupted one-turn rotation handoff must not become fresh
+        // implementation work either: the durable handoff override already
+        // commissions the fresh rotated session, with the written handoff
+        // file when the turn got that far and the portable capsule otherwise.
+        if (restartInvocation?.phase === "worker" && isRotationHandoffInvocation(restartInvocation)) {
+          // No workspace authority: prove the window stayed clean before the
+          // fresh rotated session builds on top of it.
+          if (!checkPersistedWorkerScope(contract, runDir, state, node, restartInvocation, lease, { materialization: true })) continue;
+          if (recovery.invocationId) {
+            state.invocations = closePersistedInvocation(state.invocations, recovery.invocationId, recovery.usage, recovery.costUsd);
+            if (!hasOperationSettlement(runDir, recovery.invocationId)) {
+              settleInvocation(runDir, restartInvocation, {
+                status: "restarted",
+                reason: "rotation handoff turn interrupted; the durable handoff override continues the rotation",
+                nextState: operationNextState(state),
+              });
+            }
+          }
+          state.costUsd = invocationCost(state);
+          transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
+          continue;
+        }
         if (recoveryPhase === "worker" || recoveryPhase === "judge") {
           const unknownInvocation = restartInvocation?.id === unknownEffectId
             ? restartInvocation
@@ -821,6 +906,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       }, async (job) => {
         writeNode(runDir, job.state, lease);
       });
+      await enforceAutomaticWorkerRotation(runDir, running, lease);
       blockDependents(contract, runDir, states, lease);
       enforceTokenBudget(contract, runDir, states, running, lease);
       enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
@@ -959,6 +1045,140 @@ function routingBackoffActive(state, phase) {
 }
 
 /**
+ * Automatic worker rotation (RETROSPECTIVE-2026-08-28 P0.1): a worker session
+ * is rotated at 80 observed turns or an average of 120000 cache-read input
+ * tokens per turn, whichever lands first. The handoff the dying session
+ * writes is bounded to 16 KiB so the fresh session starts small.
+ */
+export const ROTATION_MAX_TURNS = 80;
+export const ROTATION_AVG_CACHE_READ_TOKENS = 120_000;
+export const ROTATION_HANDOFF_MAX_BYTES = 16 * 1024;
+
+/** First line of the one-turn rotation-handoff prompt. */
+const ROTATION_HANDOFF_PROMPT_HEADER = "The worker session is being rotated.";
+
+/**
+ * The rotation trigger for one live worker observation, or null when the
+ * session is still within budget. Zero observed turns never trigger: without
+ * a completed turn there is no per-turn average to trust.
+ *
+ * @param {{turns: number, cacheReadInputTokens: number}} metrics
+ * @returns {string|null}
+ */
+export function rotationTrigger(metrics) {
+  if (metrics.turns >= ROTATION_MAX_TURNS) {
+    return `observed turns ${metrics.turns} >= ${ROTATION_MAX_TURNS}`;
+  }
+  if (metrics.turns > 0 && metrics.cacheReadInputTokens >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
+    return `average cache-read input ${Math.round(metrics.cacheReadInputTokens / metrics.turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${metrics.turns} turns`;
+  }
+  return null;
+}
+
+/**
+ * Rotate any live worker session whose observed metrics crossed a rotation
+ * threshold. The trigger is persisted before the provider is terminated so a
+ * controller loss between trigger and termination still resumes honestly.
+ *
+ * @param {string} runDir
+ * @param {Map<string, Job>} running
+ * @param {LeaseHandle} lease
+ */
+async function enforceAutomaticWorkerRotation(runDir, running, lease) {
+  for (const [nodeId, job] of running) {
+    if (job.closed || job.phase !== "worker" || job.rotationReason || job.rotationHandoff || job.resultMaterialization) continue;
+    const reason = rotationTrigger(monitorInvocation(job));
+    if (!reason) continue;
+    job.rotationReason = reason;
+    recordExecutionOverride(runDir, job.state, {
+      kind: "rotation",
+      decision: "trigger",
+      invocationId: job.invocation.id,
+      phase: "worker",
+      reason,
+    }, lease);
+    process.stdout.write(`[node] ${nodeId} rotating worker session · ${reason}\n`);
+    await terminateProcess(job);
+  }
+}
+
+/** @param {NodeSnapshot} state @returns {Set<string>} */
+function rotationInvocationIds(state) {
+  return new Set((state.executionOverrides ?? [])
+    .filter((item) => item.kind === "rotation" && typeof item.invocationId === "string")
+    .map((item) => /** @type {string} */ (item.invocationId)));
+}
+
+/**
+ * The commissioned rotation handoff awaiting its fresh session. The override
+ * is recorded when the one-turn handoff is spawned, so the durable record
+ * survives controller loss and resume schedules the fresh session itself.
+ *
+ * @param {NodeSnapshot} state
+ * @returns {{at: string, handoffPath: string}|null}
+ */
+function pendingRotationHandoff(state) {
+  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
+    if (item.kind !== "rotation" || item.decision !== "handoff") continue;
+    if (typeof item.result !== "string" || typeof item.at !== "string") continue;
+    return { at: item.at, handoffPath: item.result };
+  }
+  return null;
+}
+
+/**
+ * Consume the pending handoff so exactly one fresh session is started per
+ * rotation; later attempts (revisions, resumes) never replay it.
+ *
+ * @param {NodeSnapshot} state
+ * @param {string} at
+ */
+function consumeRotationHandoff(state, at) {
+  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
+    if (item.kind === "rotation" && item.decision === "handoff" && item.at === at) {
+      item.decision = "rotated";
+      return;
+    }
+  }
+}
+
+/**
+ * Compose the fresh post-rotation prompt from exactly three inputs: the
+ * closed task packet, the bounded rotation handoff, and a bounded
+ * `git status --short`. No transcript and no native continuation carry over;
+ * a missing handoff file falls back to the portable capsule.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {string} handoffPath
+ * @returns {string}
+ */
+function rotationFreshPrompt(contract, node, state, runDir, handoffPath) {
+  let handoff = null;
+  try {
+    handoff = boundedUtf8(readFileSync(handoffPath, "utf8"), ROTATION_HANDOFF_MAX_BYTES);
+  } catch {}
+  if (handoff === null) {
+    const capsule = loadLatestCapsule(runDir, node.id, state.attempt)
+      ?? buildNodeCapsule(contract, node, state, runDir, "continue from the last settled checkpoint");
+    handoff = boundedUtf8(JSON.stringify(capsule, null, 2), ROTATION_HANDOFF_MAX_BYTES);
+  }
+  const status = spawnSync("git", ["-C", contract.cwd, "status", "--short"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const gitStatus = status.status === 0 ? boundedUtf8(status.stdout, 2 * 1024) : "(git status unavailable)";
+  return boundedUtf8([
+    `Continue node ${node.id} in a fresh provider session. The previous session was rotated at a settled boundary; nothing else from it carries over.`,
+    "Rotation handoff from the previous session:",
+    handoff,
+    "Bounded git status --short:",
+    gitStatus,
+    "Current closed task packet:",
+    boundedUtf8(node.prompt, 48 * 1024),
+  ].join("\n\n"), 60 * 1024);
+}
+
+/**
  * Select the only continuation that is allowed for this plan phase and role.
  * The search is intentionally limited to persisted node snapshots in this run.
  *
@@ -972,7 +1192,9 @@ function routingBackoffActive(state, phase) {
  */
 function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   const runId = basename(runDir);
-  const candidates = phaseSessionCandidates(contract, node, state, runDir, role);
+  const rotatedAway = rotationInvocationIds(state);
+  const candidates = phaseSessionCandidates(contract, node, state, runDir, role)
+    .filter(({ invocation }) => !rotatedAway.has(invocation.id));
   const session = candidates.at(-1);
   const runtime = routeRuntimeForState(contract, node, state, role);
   const identityMatches = session && session.invocation.runId === runId
@@ -993,6 +1215,19 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
     && priorNode !== null
     && priorNode !== node.id;
   const canContinue = runtime.capabilities.continuation === true;
+  // A commissioned rotation handoff outranks every continuation: the fresh
+  // session must never resume (nor require) the rotated provider session.
+  if (role === "worker") {
+    const rotation = pendingRotationHandoff(state);
+    if (rotation) {
+      consumeRotationHandoff(state, rotation.at);
+      return {
+        prompt: rotationFreshPrompt(contract, node, state, runDir, rotation.handoffPath),
+        continuationId: null,
+        mode: "fresh",
+      };
+    }
+  }
   if (role === "worker" && isManualHandoff(state)) {
     return {
       prompt: capsuleHandoffPrompt(contract, node, state, runDir),
@@ -1127,6 +1362,20 @@ function phaseHandoffPrompt(contract, node, state, runDir, role) {
 }
 
 /**
+ * The mechanical worker tool policy for the provider boundary: hook settings
+ * on Claude-compatible commands. Only an adapter whose surface can prove
+ * enforcement (`capabilities.toolPolicy`) receives it; prompt text is not
+ * enforcement.
+ *
+ * @param {RuntimeSnapshot} runtime
+ * @returns {import("./drivers/index.mjs").ToolPolicy|undefined}
+ */
+function workerToolPolicy(runtime) {
+  if (runtime.capabilities.toolPolicy !== true) return undefined;
+  return { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+}
+
+/**
  * Build the bounded options shared by workers, judges, and gate revisions.
  * Capability declarations decide which in-flight provider controls are sent;
  * timeout and campaign accounting remain universal fallbacks.
@@ -1166,7 +1415,10 @@ function invocationCommandOptions(contract, node, state, runtime, phasePlan, ext
 function startWorker(contract, node, state, runDir, running, prompt, lease) {
   const runtime = routeRuntimeForState(contract, node, state, "worker");
   const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "worker", prompt);
-  const effectivePrompt = phasePlan.prompt;
+  // The worker prompt directs the provider to write the canonical result file;
+  // make sure the directory exists before the provider is asked to.
+  mkdirSync(dirname(workerResultPath(runDir, node.id)), { recursive: true });
+  const effectivePrompt = workerProtocolPrompt(phasePlan.prompt, workerResultPath(runDir, node.id));
   const paths = logPaths(runDir, node.id, "worker", state.attempt);
   if (Buffer.byteLength(effectivePrompt, "utf8") > 64 * 1024) {
     transition(runDir, state, "failed", { phase: "worker", error: { code: "worker_prompt_too_large", message: "worker prompt exceeds 65536 bytes" } }, lease);
@@ -1192,6 +1444,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
   state.result = null;
   state.verification = null;
   state.scope = null;
+  clearWorkerResultFile(runDir, node.id);
   const previousInvocation = state.invocations?.at(-1);
   if (previousInvocation && hasOperationSettlement(runDir, previousInvocation.id)) {
     settleInvocation(runDir, previousInvocation, { nextState: operationNextState(state) });
@@ -1203,7 +1456,9 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
   try {
     const job = startProcess({
       contract, node, state, runtime, prompt: effectivePrompt, paths, phase: "worker",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan),
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, {
+        toolPolicy: workerToolPolicy(runtime),
+      }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, runDir, "worker", phasePlan.mode, phasePlan.continuationId);
         invocation.snapshotPath = snapshotPath;
@@ -1234,6 +1489,215 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
     }
     transition(runDir, state, "failed", { phase: "worker", error: { code: "spawn_error", message: errorMessage(error) } }, lease);
   }
+}
+
+/**
+ * A completed implementation may have omitted only its durable result. Resume
+ * the exact provider session for one turn to materialize that file; never use
+ * this path to restart implementation work.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {Map<string, Job>} running
+ * @param {Invocation} sourceInvocation
+ * @param {DriverRuntime & {id: string|null}} runtime
+ * @param {string|null} continuationId
+ * @param {LeaseHandle} lease
+ */
+function startResultMaterialization(contract, node, state, runDir, running, sourceInvocation, runtime, continuationId, lease) {
+  const materializationRuntime = runtime.id ? runtimeSnapshot(contract, runtime.id) : null;
+  if (!materializationRuntime || materializationRuntime.capabilities.continuation !== true || !continuationId) {
+    transition(runDir, state, "failed", {
+      phase: "worker",
+      error: { code: "missing_worker_result", message: "worker completed without a canonical result file and this runtime did not provide a resumable session for the one-turn materialization" },
+    }, lease);
+    return;
+  }
+  const paths = logPaths(runDir, node.id, "worker", state.attempt);
+  const resultPath = workerResultPath(runDir, node.id);
+  const prompt = [
+    `${RESULT_MATERIALIZATION_PROMPT_HEADER} Do not inspect, implement, verify, or invoke tools.`,
+    `Your only job in this single bounded turn is to write the required worker-result JSON object to: ${resultPath}`,
+    "Then return that same JSON object as the final message.",
+  ].join("\n\n");
+  let baseline;
+  try {
+    baseline = captureWorkspaceSnapshot(contract.cwd);
+    writeJsonAtomic(`${paths.prompt}.snapshot.json`, baseline);
+  } catch (error) {
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_snapshot_invalid", message: errorMessage(error) } }, lease);
+    return;
+  }
+  state.phase = "worker";
+  state.runtime = materializationRuntime;
+  state.error = { code: "result_materialization_pending", message: "awaiting one-turn canonical worker-result materialization" };
+  writeNode(runDir, state, lease);
+  try {
+    const job = startProcess({
+      contract, node, state, runtime: materializationRuntime, prompt, paths, phase: "worker",
+      commandOptions: invocationCommandOptions(contract, node, state, materializationRuntime, {
+        prompt,
+        continuationId,
+        mode: "reuse",
+      }, {
+        toolPolicy: workerToolPolicy(materializationRuntime),
+      }),
+      onInvocation: (invocation, currentJob) => {
+        stampInvocation(invocation, contract, node, materializationRuntime, runDir, "worker", "reuse", continuationId);
+        invocation.snapshotPath = `${paths.prompt}.snapshot.json`;
+        currentJob.resultMaterialization = true;
+        currentJob.recoveryBaseline = baseline;
+        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
+        persistInvocationIntent(runDir, invocation, {
+          nodeId: node.id,
+          role: "worker",
+          attempt: state.attempt,
+          runtimeFingerprint: fingerprintRuntime(materializationRuntime),
+          prompt,
+        });
+      },
+      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
+    });
+    transition(runDir, state, "running", { phase: "worker", runtime: materializationRuntime }, lease);
+    running.set(node.id, job);
+  } catch (error) {
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_failed", message: errorMessage(error) } }, lease);
+  }
+}
+
+/**
+ * Finish a triggered rotation at a settled boundary. The rotated session is
+ * resumed for exactly one turn whose only job is writing the bounded handoff
+ * document; it has no workspace authority. Starting the fresh session itself
+ * never requires a native continuation — only this one-turn handoff does, and
+ * without a resumable session the node fails with a precise bounded error
+ * instead of silently discarding the rotation.
+ *
+ * @param {ValidatedContract} contract
+ * @param {string} runDir
+ * @param {Map<string, Job>} running
+ * @param {Job} job the rotation-terminated worker job
+ * @param {NodeSnapshot} state
+ * @param {LeaseHandle} lease
+ * @param {ProviderEnvelope} envelope
+ */
+function startRotationHandoff(contract, runDir, running, job, state, lease, envelope) {
+  const node = job.node;
+  const runtime = job.runtime.id ? runtimeSnapshot(contract, job.runtime.id) : null;
+  const continuationId = envelope.continuationId ?? job.invocation.continuationId ?? null;
+  if (!runtime || runtime.capabilities.continuation !== true || !continuationId) {
+    const detail = !runtime
+      ? `runtime ${job.runtime.id ?? "unknown"} is no longer resolvable`
+      : runtime.capabilities.continuation !== true
+        ? `runtime ${runtime.id} declares no resumable provider session`
+        : "the rotating provider session exposed no continuation identity";
+    transition(runDir, state, "failed", {
+      phase: "worker",
+      error: {
+        code: "rotation_continuation_unavailable",
+        message: excerpt(`automatic rotation triggered (${job.rotationReason}); ${detail}; the one-turn handoff needs a resumable provider session`),
+      },
+    }, lease);
+    return;
+  }
+  const sequence = Math.max(1, (state.executionOverrides ?? []).filter((item) => item.kind === "rotation").length);
+  const handoffPath = join(runDir, "rotations", `${node.id}.${state.attempt}.${sequence}.md`);
+  mkdirSync(dirname(handoffPath), { recursive: true });
+  const prompt = [
+    `${ROTATION_HANDOFF_PROMPT_HEADER} Do not inspect, implement, verify, or invoke tools.`,
+    `Your only job in this single bounded turn is to write the continuation handoff for node ${node.id} to: ${handoffPath}`,
+    `The handoff is markdown of at most ${ROTATION_HANDOFF_MAX_BYTES} bytes covering: work already done, work still pending, commands that pass or fail, and files touched.`,
+    "Then reply with a single line: handoff written",
+  ].join("\n\n");
+  const paths = logPaths(runDir, node.id, "worker", state.attempt);
+  let baseline;
+  try {
+    baseline = captureWorkspaceSnapshot(contract.cwd);
+    writeJsonAtomic(`${paths.prompt}.snapshot.json`, baseline);
+  } catch (error) {
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "rotation_handoff_snapshot_invalid", message: errorMessage(error) } }, lease);
+    return;
+  }
+  state.phase = "worker";
+  state.runtime = runtime;
+  state.error = { code: "rotation_handoff_pending", message: `awaiting one-turn rotation handoff (${job.rotationReason ?? "rotation threshold reached"})` };
+  writeNode(runDir, state, lease);
+  try {
+    const rotationJob = startProcess({
+      contract, node, state, runtime, prompt, paths, phase: "worker",
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, {
+        prompt,
+        continuationId,
+        mode: "reuse",
+      }, {
+        toolPolicy: workerToolPolicy(runtime),
+      }),
+      onInvocation: (invocation, currentJob) => {
+        stampInvocation(invocation, contract, node, runtime, runDir, "worker", "reuse", continuationId);
+        invocation.snapshotPath = `${paths.prompt}.snapshot.json`;
+        currentJob.rotationHandoff = true;
+        currentJob.rotationHandoffPath = handoffPath;
+        currentJob.recoveryBaseline = baseline;
+        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
+        persistInvocationIntent(runDir, invocation, {
+          nodeId: node.id,
+          role: "worker",
+          attempt: state.attempt,
+          runtimeFingerprint: fingerprintRuntime(runtime),
+          prompt,
+        });
+        // The commissioned handoff is durable before the turn runs, so a
+        // controller loss resumes into the fresh session, not a lost rotation.
+        recordExecutionOverride(runDir, state, {
+          kind: "rotation",
+          decision: "handoff",
+          invocationId: invocation.id,
+          phase: "worker",
+          reason: job.rotationReason ?? "rotation threshold reached",
+          result: handoffPath,
+        }, lease);
+      },
+      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
+    });
+    transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lease);
+    running.set(node.id, rotationJob);
+  } catch (error) {
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "rotation_handoff_failed", message: errorMessage(error) } }, lease);
+  }
+}
+
+/**
+ * Adopt the one-turn rotation handoff: the written document is bounded to the
+ * rotation limit, the node returns to pending, and the next scheduling pass
+ * starts the fresh provider session from packet, handoff, and git status.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {Job} job the one-turn rotation-handoff job
+ * @param {LeaseHandle} lease
+ * @param {ProviderEnvelope} envelope
+ */
+function finishRotationHandoff(contract, node, state, runDir, job, lease, envelope) {
+  const handoffPath = /** @type {string} */ (job.rotationHandoffPath);
+  if (!existsSync(handoffPath)) {
+    transition(runDir, state, "failed", {
+      phase: "worker",
+      error: {
+        code: "rotation_handoff_missing",
+        message: excerpt(`the one-turn rotation handoff wrote no document at ${handoffPath}${envelope.error ? `: ${envelope.error.message}` : ""}`),
+      },
+    }, lease);
+    return;
+  }
+  const handoff = boundedUtf8(readFileSync(handoffPath, "utf8"), ROTATION_HANDOFF_MAX_BYTES);
+  writeTextAtomic(handoffPath, handoff);
+  persistNodeCapsule(contract, node, state, runDir, lease, "continue the node in a fresh rotated provider session");
+  transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
+  process.stdout.write(`[node] ${node.id} rotation handoff materialized · ${Buffer.byteLength(handoff, "utf8")} bytes · fresh session next\n`);
 }
 
 /**
@@ -2040,6 +2504,61 @@ function checkWorkerScope(contract, runDir, job, lease) {
 }
 
 /**
+ * A result-only continuation is not implementation work. Its baseline is
+ * captured immediately before that single turn, so every workspace change is
+ * outside its authority (the run-owned result file is ignored by snapshots).
+ * The same no-authority rule covers the one-turn rotation handoff.
+ *
+ * @param {ValidatedContract} contract
+ * @param {string} runDir
+ * @param {Job} job
+ * @param {LeaseHandle} lease
+ * @param {string} [label]
+ * @returns {boolean}
+ */
+function checkResultMaterializationScope(contract, runDir, job, lease, label = "result materialization") {
+  if (job.scopeChecked) return !job.scopeViolation;
+  job.scopeChecked = true;
+  const state = job.state;
+  try {
+    const baseline = /** @type {WorkspaceSnapshot|undefined} */ (job.recoveryBaseline ?? (job.invocation.snapshotPath ? readJson(job.invocation.snapshotPath) : null));
+    if (!baseline) throw Object.assign(new Error(`${label} scope snapshot is missing`), { code: "scope_snapshot_missing" });
+    const scope = compareWorkspaceSnapshot(baseline, contract.cwd);
+    if (!scope.changedPaths.length) return true;
+    job.scopeViolation = true;
+    const shown = scope.changedPaths.slice(0, 8).join(", ");
+    transition(runDir, state, "failed", {
+      phase: "worker",
+      error: { code: "unexpected_write", message: excerpt(`${label} changed workspace paths (${scope.changedPaths.length}): ${shown}`) },
+    }, lease);
+    return false;
+  } catch (error) {
+    job.scopeViolation = true;
+    transition(runDir, state, "failed", {
+      phase: "worker",
+      error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: excerpt(errorMessage(error)) },
+    }, lease);
+    return false;
+  }
+}
+
+/**
+ * Materialization can reuse prior controller evidence only when that evidence
+ * survived the same worker attempt. A fresh worker clears verification; the
+ * retained, completed record is therefore the bounded same-attempt proof.
+ * Judge evidence cannot currently carry that identity, so gated nodes fail
+ * closed and run their normal judge phase.
+ *
+ * @param {NodeSnapshot} state
+ * @param {ValidatedNode} node
+ * @returns {boolean}
+ */
+function canReuseResultEvidence(state, node) {
+  if (state.verification?.completed !== true || state.verification.passed !== true) return false;
+  return !node.gate.enabled;
+}
+
+/**
  * Compare the current workspace against the persisted worker baseline without
  * transitioning the node. Shared by the unexpected-write failure path and the
  * unknown_effect replay gate.
@@ -2143,14 +2662,25 @@ function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocati
  * @param {ValidatedNode} node
  * @param {Invocation|undefined} invocation
  * @param {LeaseHandle} lease
+ * @param {{materialization?: boolean}} [options]
  * @returns {boolean}
  */
-function checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease) {
-  const evaluation = evaluatePersistedWorkerScope(contract, node, state, invocation);
+function checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, options = {}) {
+  const materialization = options.materialization === true;
+  const evaluation = evaluatePersistedWorkerScope(contract, node, state, invocation, { strict: materialization });
   if (evaluation.ok) return true;
+  // A recovered materialization turn mirrors the live check: it may only write
+  // the canonical result file, so declared-path changes are as terminal as
+  // unexpected ones.
+  const failure = materialization && (evaluation.code === "unexpected_write" || evaluation.code === "declared_paths_changed")
+    ? {
+      code: "unexpected_write",
+      message: excerpt(`result materialization changed workspace paths (${evaluation.changedPathCount ?? evaluation.unexpectedPathCount}): ${(evaluation.changedPaths ?? evaluation.unexpectedPaths ?? []).slice(0, 8).join(", ")}`),
+    }
+    : { code: evaluation.code, message: excerpt(evaluation.detail) };
   transition(runDir, state, "failed", {
     phase: "worker",
-    error: { code: evaluation.code, message: excerpt(evaluation.detail) },
+    error: failure,
   }, lease);
   if (evaluation.unexpectedPaths) {
     appendTransitionEvent(runDir, state, "failed", "failed", {
@@ -2242,7 +2772,11 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       usage: usageWithBudgetFallback(envelope.usage, envelope.error?.message, contract.usagePolicy) ?? envelope.usage,
     };
     if (job.phase === "worker") {
-      const scopeOk = checkWorkerScope(contract, runDir, job, lease);
+      const scopeOk = job.resultMaterialization
+        ? checkResultMaterializationScope(contract, runDir, job, lease)
+        : job.rotationHandoff
+          ? checkResultMaterializationScope(contract, runDir, job, lease, "rotation handoff")
+          : checkWorkerScope(contract, runDir, job, lease);
       if (!scopeOk) {
         settleInvocation(runDir, job.invocation, {
           status: "failed",
@@ -2271,6 +2805,17 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     await recordCampaignUsage(campaignPath, contract.usagePolicy, state.invocations.find((invocation) => invocation.id === job.invocation.id));
     state.usage = invocationUsage(state);
     state.costUsd = invocationCost(state);
+    // A rotation-terminated worker settles its scope above and hands over to
+    // the one-turn rotation handoff; a worker that finished anyway keeps the
+    // normal completion path, so rotation never discards accepted work.
+    if (job.phase === "worker" && job.rotationHandoff) {
+      finishRotationHandoff(contract, job.node, state, runDir, job, lease, envelope);
+      continue;
+    }
+    if (job.phase === "worker" && job.rotationReason && envelope.status !== "done") {
+      startRotationHandoff(contract, runDir, running, job, state, lease, envelope);
+      continue;
+    }
     if (hasCostBudget(contract, job.node) && envelope.costUsd === null) {
       transition(runDir, state, "failed", {
         phase: job.phase,
@@ -2284,7 +2829,33 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease);
       continue;
     }
-    if (envelope.status !== "done") {
+    // An empty final message is a missing worker result, not a no-op worker:
+    // when the canonical file exists it is authoritative (the message is
+    // redundant), and a worker that completed without it gets exactly one
+    // result-only continuation before the node fails.
+    const fileBackedNoOp = job.phase === "worker" && envelope.status === "no-op" && existsSync(workerResultPath(runDir, job.node.id));
+    if (job.phase === "worker" && envelope.status === "no-op" && !fileBackedNoOp) {
+      if (job.resultMaterialization) {
+        transition(runDir, state, "failed", {
+          phase: "worker",
+          error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
+        }, lease);
+      } else {
+        startResultMaterialization(
+          contract,
+          job.node,
+          state,
+          runDir,
+          running,
+          job.invocation,
+          job.runtime,
+          envelope.continuationId ?? job.invocation.continuationId ?? null,
+          lease,
+        );
+      }
+      continue;
+    }
+    if (envelope.status !== "done" && !fileBackedNoOp) {
       transition(runDir, state, job.budgetStop ? "exhausted" : envelope.status, {
         phase: job.phase,
         result: state.result,
@@ -2299,10 +2870,15 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       /** @type {WorkerResult} */
       let workerResult;
       try {
-        // Workers often prefix the required JSON with a closing summary sentence;
-        // the structured object at the end of the message is authoritative.
-        workerResult = parseWorkerResult(String(extractJson(envelope.result) ?? envelope.result ?? ""));
+        workerResult = resolveWorkerResult(runDir, job.node, envelope.result);
       } catch (error) {
+        if (job.resultMaterialization) {
+          transition(runDir, state, "failed", {
+            phase: "worker",
+            error: { code: "missing_worker_result", message: `result-only materialization did not produce a valid canonical worker result: ${errorMessage(error)}` },
+          }, lease);
+          continue;
+        }
         applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error));
         continue;
       }
@@ -2321,6 +2897,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           result: workerResult,
           error: { code: "context_missing", message: workerResult.missingContext.join("; ") },
         }, lease);
+        continue;
+      }
+      if (job.resultMaterialization && canReuseResultEvidence(state, job.node)) {
+        consumeManualHandoff(state);
+        if (job.node.gate.enabled) applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running);
+        else transition(runDir, state, "done", { phase: "complete", result: workerResult, error: null }, lease);
         continue;
       }
       await executeControllerVerification(contract, runDir, job.node, state, lease);
@@ -3466,6 +4048,126 @@ function unexpectedPathsOf(state) {
 }
 
 /**
+ * Run-owned worker-result sidecar. It lives in its own directory because every
+ * `.json` directly under `nodes/` is a validated node snapshot — status,
+ * report, campaign summary, and signal readers reject or miscount anything
+ * else there.
+ *
+ * @param {string} runDir @param {string} nodeId @returns {string} */
+function workerResultPath(runDir, nodeId) {
+  return join(runDir, "results", `${nodeId}.json`);
+}
+
+/**
+ * The run-owned result file is the primary recovery source. The provider's
+ * final message is intentionally only redundant input.
+ *
+ * @param {string} runDir
+ * @param {string} nodeId
+ * @returns {WorkerResult|null}
+ */
+function readWorkerResultFile(runDir, nodeId) {
+  const path = workerResultPath(runDir, nodeId);
+  if (!existsSync(path)) return null;
+  try {
+    return parseWorkerResult(JSON.stringify(readJson(path)));
+  } catch (error) {
+    throw new TypeError(`canonical worker result ${path} is invalid: ${errorMessage(error)}`);
+  }
+}
+
+/** @param {string} runDir @param {string} nodeId @param {WorkerResult} result */
+function persistWorkerResultFile(runDir, nodeId, result) {
+  writeJsonAtomic(workerResultPath(runDir, nodeId), result);
+}
+
+/** @param {string} runDir @param {string} nodeId */
+function clearWorkerResultFile(runDir, nodeId) {
+  try { unlinkSync(workerResultPath(runDir, nodeId)); } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+}
+
+/** First line of the one-turn result-materialization prompt. */
+const RESULT_MATERIALIZATION_PROMPT_HEADER = "The implementation is already complete.";
+
+/**
+ * The canonical result text without validation. Presence is authoritative:
+ * adoption decisions must surface a present-but-invalid file as an invalid
+ * result, never treat it as missing work.
+ *
+ * @param {string} runDir
+ * @param {string} nodeId
+ * @returns {string|null}
+ */
+function canonicalWorkerResultText(runDir, nodeId) {
+  const path = workerResultPath(runDir, nodeId);
+  if (!existsSync(path)) return null;
+  try { return JSON.stringify(readJson(path)); } catch { return readFileSync(path, "utf8"); }
+}
+
+/**
+ * The materialization mode must survive controller interruption, so it is
+ * derived from the persisted invocation prompt — the run-owned record of what
+ * that turn was asked to do — instead of in-memory job state.
+ *
+ * @param {Invocation|null|undefined} invocation
+ * @returns {boolean}
+ */
+function isResultMaterializationInvocation(invocation) {
+  if (!invocation?.promptPath) return false;
+  try {
+    return readFileSync(invocation.promptPath, "utf8").startsWith(RESULT_MATERIALIZATION_PROMPT_HEADER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Same durable derivation for the one-turn rotation handoff: its prompt
+ * header identifies the turn on every recovery path.
+ *
+ * @param {Invocation|null|undefined} invocation
+ * @returns {boolean}
+ */
+function isRotationHandoffInvocation(invocation) {
+  if (!invocation?.promptPath) return false;
+  try {
+    return readFileSync(invocation.promptPath, "utf8").startsWith(ROTATION_HANDOFF_PROMPT_HEADER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {string} runDir
+ * @param {ValidatedNode} node
+ * @param {unknown} providerResult
+ * @returns {WorkerResult}
+ */
+function resolveWorkerResult(runDir, node, providerResult) {
+  const fromFile = readWorkerResultFile(runDir, node.id);
+  if (fromFile) return fromFile;
+  const result = parseWorkerResult(String(extractJson(providerResult) ?? providerResult ?? ""));
+  persistWorkerResultFile(runDir, node.id, result);
+  return result;
+}
+
+/**
+ * @param {string} prompt
+ * @param {string} resultPath
+ * @returns {string}
+ */
+function workerProtocolPrompt(prompt, resultPath) {
+  return [
+    prompt,
+    "Controller worker protocol:",
+    `Before your final response, write the required worker-result JSON object to this canonical result file: ${resultPath}`,
+    "Your final provider message is redundant; the result file is the recovery source.",
+  ].join("\n\n");
+}
+
+/**
  * @param {string} runDir
  * @param {string} nodeId
  * @param {string} phase
@@ -3543,12 +4245,18 @@ function parsePersistedWorkerResult(value) {
 }
 
 /**
+ * Durable worker-result evidence for recovery, in authority order: the run-owned
+ * canonical file first, then the operation settlement, then the node snapshot.
+ *
+ * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {Invocation} invocation
  * @param {Record<string, unknown>|null} settlement
  * @returns {string|null}
  */
-function persistedWorkerResult(state, invocation, settlement) {
+function persistedWorkerResult(runDir, state, invocation, settlement) {
+  const fromFile = canonicalWorkerResultText(runDir, state.id);
+  if (fromFile !== null) return fromFile;
   const fromSettlement = parsePersistedWorkerResult(settlement?.result);
   if (fromSettlement) return fromSettlement;
   if (invocation.status !== "active") return parsePersistedWorkerResult(state.result);
@@ -3616,7 +4324,7 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
       return /** @type {RecoveryOutcome} */ ({ kind: "adopted", ...terminal, phase: invocation.phase, invocationId: invocation.id });
     }
     const persisted = invocation.phase === "worker"
-      ? persistedWorkerResult(state, invocation, settlement)
+      ? persistedWorkerResult(runDir, state, invocation, settlement)
       : persistedJudgeResult(state, invocation, settlement);
     if (persisted) {
       if (invocation.phase === "judge") {
@@ -3634,7 +4342,7 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
       return /** @type {RecoveryOutcome} */ ({ kind: "adopted", ...terminal, phase: invocation.phase, invocationId: invocation.id });
     }
     const persisted = invocation.phase === "worker"
-      ? persistedWorkerResult(state, invocation, settlement)
+      ? persistedWorkerResult(runDir, state, invocation, settlement)
       : persistedJudgeResult(state, invocation, settlement);
     if (persisted) {
       if (invocation.phase === "judge") {
@@ -3701,7 +4409,7 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
     if (expired) return restartRecovery(invocation, null, `${invocation.phase} invocation ${invocation.id} exceeded its wall-clock budget`);
     if (invocation.closedAt === null) {
       const persisted = invocation.phase === "worker"
-        ? persistedWorkerResult(state, invocation, settlement)
+        ? persistedWorkerResult(runDir, state, invocation, settlement)
         : persistedJudgeResult(state, invocation, settlement);
       if (persisted) return /** @type {RecoveryOutcome} */ ({ kind: "adopted", phase: invocation.phase === "judge" ? "judge" : "worker", result: persisted, invocationId: invocation.id });
       return restartRecovery(invocation, null, `${invocation.phase} invocation ${invocation.id} has no reliable close time`);
@@ -3747,7 +4455,7 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
     }
     if (result?.status === "done") return /** @type {RecoveryOutcome} */ ({ kind: "adopted", ...result, phase: invocation.phase, invocationId: invocation.id });
     if (result?.status === "exhausted") return /** @type {RecoveryOutcome} */ ({ kind: "exhausted", ...result, phase: invocation.phase, invocationId: invocation.id, reason: result.error?.message });
-    const persisted = persistedWorkerResult(state, invocation, settlement);
+    const persisted = persistedWorkerResult(runDir, state, invocation, settlement);
     if (persisted) return /** @type {RecoveryOutcome} */ ({ kind: "adopted", phase: "worker", result: persisted, invocationId: invocation.id });
     return restartRecovery(invocation, result, `${invocation.phase} invocation ${invocation.id} died without a completed stream`);
   }
@@ -3867,12 +4575,23 @@ function closePersistedInvocation(invocations, invocationId, usage = undefined, 
 }
 
 /**
+ * The worker result backing a judge-phase recovery. The canonical file is
+ * primary: a present-but-invalid file throws so the caller surfaces an
+ * invalid result, and only an absent file falls back to the transcript.
+ *
+ * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
  * @returns {WorkerResult|null}
  */
-function recoverWorkerResult(state, contract, node) {
+function recoverWorkerResult(runDir, state, contract, node) {
+  const fromFile = canonicalWorkerResultText(runDir, state.id);
+  if (fromFile !== null) {
+    // Presence is authoritative: an unparsable canonical file is an invalid
+    // result, never a license to adopt provider-derived evidence instead.
+    return parseWorkerResult(String(extractJson(fromFile) ?? fromFile));
+  }
   const invocation = [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker");
   if (!invocation) return null;
   const result = invocationResult(invocation, invocation.runtimeId ? runtimeSnapshot(contract, invocation.runtimeId) : routeRuntimeForState(contract, node, state, "worker"));
@@ -4558,8 +5277,10 @@ function reusedDoneWarnings(contract) {
       if (!otherNode) continue;
       try {
         if (validateNodeSnapshot(JSON.parse(readFileSync(statePath, "utf8")), otherNode).status === "done") warnings.push(`node ${node.id} is already done in run ${name}`);
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) throw error;
+      } catch {
+        // Historical snapshots are advisory only. A snapshot written by an
+        // older protocol revision must not prevent a new run from starting;
+        // the new run still validates its own contract and snapshots strictly.
       }
     }
   }

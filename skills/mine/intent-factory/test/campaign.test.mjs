@@ -786,6 +786,18 @@ test("campaign CLI scopes flags to operations and note kinds", () => {
   assert.match(noteWithWrongKindFlag.stderr, /--decision-id is only valid for --kind decision/u);
 });
 
+test("campaign CLI supervise parses --interval as a positive number of seconds", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-interval-"));
+  const runsDir = join(directory, ".runs");
+  initializeCampaign(runsDir, { campaignId: "interval", goal: "Prove the public interval unit" });
+  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  for (const interval of ["0", "abc"]) {
+    const result = spawnSync(process.execPath, [runner, "campaign", "supervise", "interval", "--cwd", directory, "--interval", interval], { encoding: "utf8" });
+    assert.notEqual(result.status, 0, interval);
+    assert.match(result.stderr, /--interval must be a positive number of seconds/u);
+  }
+});
+
 test("linked-run corruption cannot kill a controller", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-corrupt-run-"));
   const path = writeContract(directory, fixture({

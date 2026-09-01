@@ -1,15 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   driverCapabilities,
+  missingCapabilities,
   normalizeProviderResult,
   probeRuntime,
   providerCommand,
 } from "../scripts/drivers/index.mjs";
-import { EXEC_JSONL_PROTOCOL, liveInputTokens, liveUsage, normalizeExecJsonlResult, parseVersion } from "../scripts/drivers/exec-jsonl.mjs";
+import {
+  EXEC_JSONL_PROTOCOL,
+  TOOL_OUTPUT_LIMIT_BYTES,
+  liveInputTokens,
+  liveSessionMetrics,
+  liveUsage,
+  normalizeExecJsonlResult,
+  parseVersion,
+  truncateToolOutput,
+} from "../scripts/drivers/exec-jsonl.mjs";
+import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
@@ -33,6 +45,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       costBudget: false,
       usage: true,
       cost: false,
+      toolPolicy: false,
     },
     {
       structuredOutput: true,
@@ -44,6 +57,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       costBudget: true,
       usage: true,
       cost: true,
+      toolPolicy: true,
     },
     {
       structuredOutput: true,
@@ -56,6 +70,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       costBudget: false,
       usage: true,
       cost: false,
+      toolPolicy: false,
     },
     {
       structuredOutput: true,
@@ -67,6 +82,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       costBudget: true,
       usage: true,
       cost: true,
+      toolPolicy: true,
     },
     {
       structuredOutput: true,
@@ -78,6 +94,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       costBudget: false,
       usage: true,
       cost: true,
+      toolPolicy: false,
     },
   ];
   for (let index = 0; index < runtimes.length; index += 1) {
@@ -575,4 +592,175 @@ test("live metering sums per-request Claude usage and prefers the terminal total
   const terminal = `${partial}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 320 } })}`;
   assert.equal(liveInputTokens("claude", terminal), 320, "terminal session total wins");
   assert.equal(liveInputTokens("exec-jsonl", partial), 0, "completion-only drivers meter as zero mid-run");
+});
+
+test("live session metrics expose only what each driver's events prove", () => {
+  const codex = [
+    { type: "thread.started", thread_id: "t" },
+    { type: "item.completed", item: { type: "command_execution" } },
+    { type: "turn.completed", usage: { input_tokens: 500, cached_input_tokens: 300 } },
+    { type: "item.completed", item: { type: "tool_call" } },
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: { input_tokens: 900, cached_input_tokens: 700 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.deepEqual(
+    liveSessionMetrics("codex", codex),
+    { turns: 2, cacheReadInputTokens: 700, toolCalls: 2 },
+    "Codex turn completions, cumulative cache-read maximum, and tool item events",
+  );
+  assert.deepEqual(
+    liveSessionMetrics("codex", `${codex}\n{"type":"turn.compl`),
+    { turns: 2, cacheReadInputTokens: 700, toolCalls: 2 },
+    "a partial trailing line is ignored",
+  );
+  const claude = [
+    { type: "assistant", message: { usage: { input_tokens: 10, cache_read_input_tokens: 40 }, content: [{ type: "tool_use" }, { type: "tool_use" }, { type: "text", text: "working" }] } },
+    { type: "assistant", message: { usage: { input_tokens: 5, cache_read_input_tokens: 20 }, content: [] } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.deepEqual(
+    liveSessionMetrics("claude", claude),
+    { turns: 2, cacheReadInputTokens: 60, toolCalls: 2 },
+    "assistant turns, summed per-request cache reads, and tool_use blocks",
+  );
+  assert.deepEqual(liveSessionMetrics("glm", claude), { turns: 2, cacheReadInputTokens: 60, toolCalls: 2 });
+  const terminal = `${claude}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 15, cache_read_input_tokens: 90 } })}`;
+  assert.deepEqual(
+    liveSessionMetrics("claude", terminal),
+    { turns: 2, cacheReadInputTokens: 90, toolCalls: 2 },
+    "the terminal session total wins over the mid-run sum",
+  );
+  const execJsonl = JSON.stringify({ schemaVersion: 1, type: "run.completed", result: "ok", continuationId: null, usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 7 }, costUsd: null });
+  assert.deepEqual(
+    liveSessionMetrics("exec-jsonl", execJsonl),
+    { turns: 1, cacheReadInputTokens: 7, toolCalls: 0 },
+    "the protocol carries no tool events, so only a completed run proves a turn",
+  );
+  assert.deepEqual(liveSessionMetrics("codex", "not json at all"), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "malformed input meters as zero");
+  assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "unsupported drivers meter as zero");
+});
+
+test("toolPolicy travels only the Claude-compatible hook settings boundary", () => {
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  // Claude-compatible adapters prove enforcement by installing hook settings.
+  for (const runtime of [{ driver: "claude", model: "m" }, { driver: "glm", model: "glm-5.3[1m]" }]) {
+    const command = providerCommand(runtime, "work", { toolPolicy: policy });
+    const settingsIndex = command.args.indexOf("--settings");
+    assert.ok(settingsIndex >= 0, `${runtime.driver} installs the hook settings`);
+    const settings = JSON.parse(command.args[settingsIndex + 1]);
+    assert.deepEqual(Object.keys(settings.hooks).sort(), ["PostToolUse", "PreToolUse"]);
+    assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash|TaskOutput|BashOutput|Monitor");
+    assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes(HOOK_PATH), "the repository hook executable is wired");
+    assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.includes(HOOK_PATH));
+  }
+  // No offered policy means no fabricated settings.
+  assert.equal(providerCommand({ driver: "claude", model: "m" }, "work").args.includes("--settings"), false);
+  // An adapter that cannot prove enforcement receives no policy to pretend with.
+  const request = JSON.parse(String(providerCommand({ driver: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "work", {
+    toolPolicy: policy,
+  }).input));
+  assert.equal("toolPolicy" in request, false, "the exec-jsonl request carries no tool policy");
+  assert.equal(request.maxInvocationTokens, null, "unrelated budget fields stay null, not fabricated");
+  assert.equal(providerCommand({ driver: "codex", model: "m" }, "work", { toolPolicy: policy }).args.includes("--settings"), false);
+  assert.deepEqual(
+    missingCapabilities(driverCapabilities({ driver: "claude" }), { toolPolicy: true }),
+    [],
+    "the claude hook surface satisfies the requirement",
+  );
+  assert.deepEqual(
+    missingCapabilities(driverCapabilities({ driver: "exec-jsonl" }), { toolPolicy: true }),
+    ["toolPolicy=true (driver provides toolPolicy=false)"],
+    "capability requirements expose the missing toolPolicy honestly",
+  );
+});
+
+test("truncateToolOutput bounds tool output to 8192 UTF-8 bytes keeping head and tail", () => {
+  const tiny = "ls src\n";
+  assert.equal(truncateToolOutput(tiny), tiny, "output within the bound is untouched");
+  const ascii = `head-marker\n${"a".repeat(40_000)}\ntail-marker\n`;
+  const boundedAscii = truncateToolOutput(ascii);
+  assert.ok(Buffer.byteLength(boundedAscii, "utf8") <= TOOL_OUTPUT_LIMIT_BYTES, "bounded result never exceeds 8192 bytes");
+  assert.match(boundedAscii, /^head-marker\n/u, "the head survives");
+  assert.match(boundedAscii, /tail-marker\n$/u, "the tail survives");
+  const omitted = /(\d+) bytes truncated/u.exec(boundedAscii);
+  assert.ok(omitted, "the omission is quantified");
+  assert.ok(Number(omitted[1]) > 0, "oversized input is actually truncated");
+  // Multibyte output: a cut may never split a UTF-8 sequence.
+  const greek = `γ-head\n${"α".repeat(6_000)}\nω-tail`;
+  const boundedGreek = truncateToolOutput(greek);
+  assert.ok(Buffer.byteLength(boundedGreek, "utf8") <= TOOL_OUTPUT_LIMIT_BYTES);
+  assert.ok(!boundedGreek.includes("�"), "no replacement character from a split sequence");
+  assert.match(boundedGreek, /^γ-head\n/u);
+  assert.match(boundedGreek, /ω-tail$/u);
+  // A 4-byte codepoint straddling the head cut lands whole on one side.
+  const straddling = `${"b".repeat(4_088)}\u{1F680}${"c".repeat(9_000)}`;
+  const boundedStraddle = truncateToolOutput(straddling);
+  assert.ok(Buffer.byteLength(boundedStraddle, "utf8") <= TOOL_OUTPUT_LIMIT_BYTES);
+  assert.ok(!boundedStraddle.includes("�"), "the astral codepoint is never split mid-sequence");
+  assert.match(boundedStraddle, /ccc$/u, "the tail is preserved");
+  assert.equal(Buffer.byteLength(truncateToolOutput("é", 1), "utf8") <= 1, true, "a tiny explicit limit still yields valid UTF-8");
+});
+
+test("the repository hook behind the providerCommand settings mechanically rejects background tools and bounds output", async () => {
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  const command = providerCommand({ driver: "claude", model: "m" }, "work", { toolPolicy: policy });
+  const settings = JSON.parse(command.args[command.args.indexOf("--settings") + 1]);
+  const registered = [...settings.hooks.PreToolUse[0].hooks, ...settings.hooks.PostToolUse[0].hooks];
+  assert.deepEqual(registered.map((hook) => hook.type), ["command", "command"]);
+  const hookCommand = registered[0].command;
+  assert.ok(hookCommand.includes(HOOK_PATH), "the exact repository hook executable is registered");
+  assert.ok(hookCommand.includes("--foreground-only") && hookCommand.includes(`'${TOOL_OUTPUT_LIMIT_BYTES}'`), "the command carries the policy it enforces");
+
+  // Run the registered command exactly as the provider would: one JSON payload
+  // per invocation, one JSON decision (or silence) on stdout.
+  /** @param {Record<string, unknown>} payload @returns {Promise<Record<string, any>|null>} */
+  const runHook = (payload) => new Promise((resolve, reject) => {
+    const child = spawn("/bin/sh", ["-c", hookCommand], { stdio: ["pipe", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0) reject(new Error(`hook exited with code ${code}`));
+      else resolve(out.trim() ? JSON.parse(out) : null);
+    });
+    child.stdin.end(`${JSON.stringify(payload)}\n`);
+  });
+
+  assert.deepEqual(
+    await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "sleep 1", run_in_background: true } }),
+    { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: FOREGROUND_ONLY_DENIAL } },
+    "a background Bash invocation is denied with the foreground retry reason",
+  );
+  assert.equal(
+    await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo hi", run_in_background: false } }),
+    null,
+    "a foreground invocation passes through untouched",
+  );
+  assert.equal(
+    (await runHook({ hook_event_name: "PreToolUse", tool_name: "BashOutput", tool_input: {} }))?.hookSpecificOutput?.permissionDecision,
+    "deny",
+    "a background-output tool is denied too",
+  );
+  assert.equal(
+    await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: "not an object" }),
+    null,
+    "an unparsable invocation shape must never break the provider",
+  );
+  const bounded = await runHook({
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_response: `${"A".repeat(6_000)}${"é".repeat(2_048)}${"B".repeat(6_000)}`,
+  });
+  const output = String(bounded?.hookSpecificOutput?.updatedToolOutput ?? "");
+  assert.equal(bounded?.hookSpecificOutput?.hookEventName, "PostToolUse");
+  assert.ok(Buffer.byteLength(output, "utf8") <= TOOL_OUTPUT_LIMIT_BYTES, "the bounded result never exceeds 8192 bytes");
+  assert.ok(!output.includes("�"), "the multibyte middle never splits a UTF-8 sequence");
+  assert.match(output, /^A+/u, "the head survives");
+  assert.match(output, /B+$/u, "the tail survives");
+  assert.match(output, /bytes truncated/u, "the omission is quantified for the model");
+  assert.equal(
+    await runHook({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_response: "small" }),
+    null,
+    "a result within the bound is emitted unchanged",
+  );
 });

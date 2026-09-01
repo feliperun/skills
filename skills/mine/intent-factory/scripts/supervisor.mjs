@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { providerCommand, normalizeProviderResult } from "./drivers/index.mjs";
+import { SessionMetricsParser } from "./drivers/exec-jsonl.mjs";
 import { readLease, leaseHealthy, writeJsonAtomic } from "./store.mjs";
 import { captureWorkspaceSnapshot, compareWorkspaceSnapshot } from "./verification.mjs";
 
@@ -123,6 +124,12 @@ const timer = setInterval(() => {
 
 const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
 
+/** Fixed-size read for incremental transcript observation. */
+const MONITOR_CHUNK_BYTES = 64 * 1024;
+
+/** Per-observation read budget: one tick never blocks on a huge backlog. */
+const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
+
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").ValidatedNode} ValidatedNode */
 /** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
@@ -131,7 +138,7 @@ const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
 /** @typedef {import("node:child_process").ChildProcess} ChildProcess */
 /** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
-/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign"|"wallclock", liveInputTokens?: number, observeTimer?: ReturnType<typeof setInterval>, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
+/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign"|"wallclock", liveInputTokens?: number, rotationReason?: string, rotationHandoff?: boolean, rotationHandoffPath?: string, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
 
 /**
  * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
@@ -279,19 +286,57 @@ function closeInvocation(job) {
 function observeInvocation(job) {
   if (job.closed || job.invocation.continuationId) return;
   try {
-    const bytes = readFileSync(job.paths.stdout);
-    const bounded = bytes.subarray(0, Math.min(bytes.length, 128 * 1024));
-    const newline = bounded.lastIndexOf(10);
-    if (newline < 0) return;
-    const envelope = normalizeProviderResult(job.runtime, bounded.subarray(0, newline + 1).toString("utf8"), null, null);
-    if (!envelope.continuationId) return;
+    const monitored = monitorInvocation(job);
+    if (!monitored.continuationId) return;
     job.invocation = {
       ...job.invocation,
-      continuationId: envelope.continuationId,
+      continuationId: monitored.continuationId,
       updatedAt: new Date().toISOString(),
     };
     job.onInvocationUpdate?.(job.invocation);
   } catch {}
+}
+
+/**
+ * Observe the transcript incrementally: read only the bytes appended since
+ * the last observation, in fixed-size chunks folded into a parser whose
+ * retained state never scales with the unread length — so the metrics
+ * survive both a transcript that outgrows any fixed window and an
+ * already-large transcript on the first call after a controller restart.
+ * The gate caps the log only at close, so byte offsets stay valid while the
+ * provider is live. Only newline-terminated records are evidence; a
+ * trailing partial record stays unconsumed for the next observation. The
+ * generic metrics are zero for a provider that does not expose them.
+ *
+ * @param {Job} job
+ * @returns {{continuationId: string|null, turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ */
+export function monitorInvocation(job) {
+  try {
+    const parser = job.monitorParser ?? (job.monitorParser = new SessionMetricsParser(job.runtime.driver));
+    const size = statSync(job.paths.stdout).size;
+    let offset = job.monitorOffset ?? 0;
+    let budget = MONITOR_CALL_BUDGET_BYTES;
+    if (size > offset) {
+      const fd = openSync(job.paths.stdout, "r");
+      try {
+        const chunk = Buffer.alloc(MONITOR_CHUNK_BYTES);
+        while (offset < size && budget > 0) {
+          const read = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset, budget), offset);
+          if (read <= 0) break;
+          parser.push(chunk.subarray(0, read));
+          offset += read;
+          budget -= read;
+        }
+      } finally {
+        closeSync(fd);
+      }
+      job.monitorOffset = offset;
+    }
+    return { continuationId: parser.continuationId, ...parser.metrics() };
+  } catch {
+    return { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0 };
+  }
 }
 
 /**

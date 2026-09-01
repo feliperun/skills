@@ -5,7 +5,10 @@
  * `{schemaVersion:1,type:"run.request",model,prompt,structuredOutput,
  * outputSchema,continuationId,maxInvocationTokens}`. When
  * `maxInvocationTokens` is non-null, a compliant wrapper MUST enforce it for
- * this invocation. It writes JSONL events to stdout:
+ * this invocation. The request deliberately carries no tool policy: an
+ * arbitrary wrapper executable cannot prove enforcement, so the mechanical
+ * policy travels only where a hook surface can enforce it (claude/glm). It
+ * writes JSONL events to stdout:
  * `run.started` (optional), `message` (zero or more), then exactly one
  * `run.completed` or `run.failed` event. Events must appear in that order,
  * with no unknown fields. A completed event is
@@ -17,6 +20,7 @@
  * runtime normalizer; wrappers should emit this protocol rather than making
  * scheduler-specific provider branches.
  */
+
 export const EXEC_JSONL_PROTOCOL = Object.freeze({
   schemaVersion: 1,
   requestType: "run.request",
@@ -24,6 +28,9 @@ export const EXEC_JSONL_PROTOCOL = Object.freeze({
   failedType: "run.failed",
 });
 export const DRIVER_OUTPUT_LIMIT_BYTES = 512 * 1024;
+
+/** Exact tool-output bound (UTF-8 bytes) carried by the toolPolicy contract. */
+export const TOOL_OUTPUT_LIMIT_BYTES = 8192;
 
 const EVENT_FIELDS = Object.freeze({
   "run.started": new Set(["schemaVersion", "type", "continuationId"]),
@@ -50,6 +57,9 @@ export const execJsonlDriver = {
     costBudget: false,
     usage: true,
     cost: true,
+    // An arbitrary wrapper executable cannot honestly advertise mechanical
+    // tool-policy enforcement; the request carries none.
+    toolPolicy: false,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
@@ -476,15 +486,7 @@ function classifyFailure(message) {
  * @returns {{inputTokens: number|null, cacheReadInputTokens: number|null}}
  */
 export function liveUsage(driver, stdout) {
-  // A transcript tail can start or end mid-line; meter leniently by parsing
-  // each line independently and skipping anything unparseable.
-  const events = String(stdout).split(/\r?\n/u).flatMap((line) => {
-    try {
-      return [JSON.parse(line)];
-    } catch {
-      return [];
-    }
-  });
+  const events = parsedEvents(stdout);
   if (driver === "codex") {
     // turn.completed usage is cumulative for the session; the last one wins.
     // Codex counts input_tokens with their cached portion included, so the
@@ -547,6 +549,422 @@ export function liveInputTokens(driver, stdout, cacheReadWeight = 1) {
   if (usage.inputTokens === null) return 0;
   const weighted = usage.inputTokens + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
   return Math.round(weighted * 1000) / 1000;
+}
+
+/**
+ * Parse each JSONL line independently. A bounded transcript tail can start or
+ * end mid-line, so unparsable lines are skipped rather than failing the live
+ * observation.
+ *
+ * @param {string} stdout
+ */
+function parsedEvents(stdout) {
+  return String(stdout).split(/\r?\n/u).flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** Codex item types whose completion proves one tool invocation. */
+const CODEX_TOOL_ITEM_TYPES = new Set(["tool_call", "command_execution", "mcp_tool_call", "web_search", "file_change"]);
+
+/**
+ * Session evidence from a bounded live transcript: completed turns, cache-read
+ * input, and tool invocations. Each driver exposes only what its own events
+ * prove, and anything unparsable or unsupported meters as zero — a live
+ * observation never throws.
+ *
+ * @param {string} driver
+ * @param {string} stdout bounded transcript tail
+ * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ */
+export function liveSessionMetrics(driver, stdout) {
+  const parser = new SessionMetricsParser(driver);
+  parser.push(String(stdout));
+  parser.flush();
+  return parser.metrics();
+}
+
+/**
+ * Compose one newly observed transcript window into the running session
+ * totals behind a rotation trigger, so a transcript consumed in increments
+ * crosses the same thresholds as one read whole: turns and tool calls are
+ * additive for every driver; cache-read is a running max for Codex (every
+ * turn.completed counter is already cumulative) and additive for
+ * claude-style streams until a terminal result event carries the
+ * authoritative session total, which replaces the partial sum.
+ *
+ * @param {string} driver
+ * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number}|null} previous
+ * @param {string} window bounded transcript window of complete lines
+ * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ */
+export function accumulateSessionMetrics(driver, previous, window) {
+  const parser = new SessionMetricsParser(driver, previous ?? undefined);
+  parser.push(window);
+  parser.flush();
+  return parser.metrics();
+}
+
+/** Retention bound for one streamed record: records at or below it parse whole. */
+export const SESSION_RECORD_MAX_BYTES = 64 * 1024;
+
+/** Fragment evidence kept for a record that outgrew the retention bound. */
+const SESSION_FRAGMENT_BYTES = SESSION_RECORD_MAX_BYTES / 2;
+
+/** Claude-family content-block needle proving one tool invocation. */
+const TOOL_USE_NEEDLE = Buffer.from('"type":"tool_use"', "utf8");
+
+/** Cache-read evidence spellings across driver streams. */
+const CACHE_READ_PATTERN = /"(?:cache_read_input_tokens|cached_input_tokens|cacheReadInputTokens)":(\d+)/gu;
+
+/**
+ * Bounded incremental session-metrics parser: fold fixed-size chunks into
+ * running rotation totals without ever holding a buffer that scales with the
+ * unread transcript. Records within `SESSION_RECORD_MAX_BYTES` parse whole;
+ * a larger record keeps head and tail fragments plus streamed needle counts,
+ * so its turn and usage evidence still lands in the totals instead of being
+ * silently skipped.
+ */
+export class SessionMetricsParser {
+  /**
+   * @param {string} driver
+   * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number}} [previous]
+   */
+  constructor(driver, previous = {}) {
+    this.driver = driver;
+    this.totals = {
+      turns: previous.turns ?? 0,
+      cacheReadInputTokens: previous.cacheReadInputTokens ?? 0,
+      toolCalls: previous.toolCalls ?? 0,
+    };
+    /** @type {string|null} */
+    this.continuationId = null;
+    /** @type {Buffer} */
+    this.pending = Buffer.alloc(0);
+    /** @type {{head: Buffer, tail: Buffer, streamedToolUse: number, carry: Buffer}|null} */
+    this.oversized = null;
+  }
+
+  /**
+   * Fold every newline-terminated record in one chunk. A trailing partial
+   * record stays buffered (bounded) for the next chunk.
+   *
+   * @param {string|Buffer} chunk
+   */
+  push(chunk) {
+    let data = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    while (data.length > 0) {
+      const newline = data.indexOf(10);
+      if (newline < 0) {
+        this.absorb(data);
+        return;
+      }
+      this.absorb(data.subarray(0, newline));
+      this.completeRecord();
+      data = data.subarray(newline + 1);
+    }
+  }
+
+  /** Fold the buffered partial record as if a newline had ended it. */
+  flush() {
+    if (this.pending.length > 0 || this.oversized) this.completeRecord();
+  }
+
+  /** @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}} */
+  metrics() {
+    return { ...this.totals };
+  }
+
+  /**
+   * Retain one piece of a record still under assembly. Once the record
+   * outgrows the retention bound, only its head and a rolling tail are kept;
+   * the bytes leaving the tail are scanned for tool_use evidence instead of
+   * being buffered.
+   *
+   * @param {Buffer} piece
+   */
+  absorb(piece) {
+    if (this.oversized) {
+      const window = Buffer.concat([this.oversized.tail, piece]);
+      const keep = window.subarray(Math.max(0, window.length - SESSION_FRAGMENT_BYTES));
+      const dropped = window.subarray(0, window.length - keep.length);
+      if (isClaudeFamily(this.driver)) {
+        const counted = countWithCarry(dropped, this.oversized.carry, TOOL_USE_NEEDLE);
+        this.oversized.streamedToolUse += counted.hits;
+        this.oversized.carry = counted.carry;
+      }
+      this.oversized.tail = keep;
+      return;
+    }
+    if (this.pending.length + piece.length <= SESSION_RECORD_MAX_BYTES) {
+      // Copy: `piece` may be a view of a scratch buffer the caller reuses for
+      // the next read, which would corrupt a record buffered mid-chunk.
+      this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, piece]) : Buffer.from(piece);
+      return;
+    }
+    const whole = Buffer.concat([this.pending, piece]);
+    this.pending = Buffer.alloc(0);
+    const head = whole.subarray(0, Math.min(SESSION_FRAGMENT_BYTES, whole.length));
+    const tail = whole.subarray(Math.max(0, whole.length - SESSION_FRAGMENT_BYTES));
+    /** @type {{head: Buffer, tail: Buffer, streamedToolUse: number, carry: Buffer}} */
+    const oversized = { head, tail, streamedToolUse: 0, carry: Buffer.alloc(0) };
+    if (isClaudeFamily(this.driver)) {
+      // Count from the record start up to where the rolling tail takes over,
+      // so a needle straddling any region boundary is counted exactly once.
+      const counted = countWithCarry(whole.subarray(0, Math.max(0, whole.length - tail.length)), oversized.carry, TOOL_USE_NEEDLE);
+      oversized.streamedToolUse = counted.hits;
+      oversized.carry = counted.carry;
+    }
+    this.oversized = oversized;
+  }
+
+  /** Fold the assembled record into the running totals. */
+  completeRecord() {
+    const oversized = this.oversized;
+    if (oversized) {
+      this.oversized = null;
+      /** @type {{head: string, tail: string, toolUse: number}} */
+      let fragments;
+      if (isClaudeFamily(this.driver)) {
+        const counted = countWithCarry(oversized.tail, oversized.carry, TOOL_USE_NEEDLE);
+        fragments = {
+          head: decodeFragment(oversized.head),
+          tail: decodeFragment(oversized.tail),
+          toolUse: oversized.streamedToolUse + counted.hits,
+        };
+      } else {
+        fragments = { head: decodeFragment(oversized.head), tail: decodeFragment(oversized.tail), toolUse: 0 };
+      }
+      foldFragmentRecord(this.driver, this.totals, fragments);
+      this.continuationId ??= fragmentContinuationId(this.driver, fragments);
+      return;
+    }
+    const line = this.pending.toString("utf8");
+    this.pending = Buffer.alloc(0);
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (!event || typeof event !== "object" || Array.isArray(event)) return;
+    const record = /** @type {Record<string, unknown>} */ (event);
+    foldRecord(this.driver, this.totals, record);
+    this.continuationId ??= recordContinuationId(this.driver, record);
+  }
+}
+
+/**
+ * Fold one parsed record into the running totals. Turn and tool counts are
+ * additive; cache-read is a running max for Codex (each turn.completed
+ * counter is already cumulative) and additive for claude-style streams until
+ * a terminal result event carries the authoritative session total.
+ *
+ * @param {string} driver
+ * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number}} totals
+ * @param {Record<string, unknown>} record
+ */
+function foldRecord(driver, totals, record) {
+  if (driver === "codex") {
+    if (record.type === "turn.completed") {
+      totals.turns += 1;
+      totals.cacheReadInputTokens = Math.max(totals.cacheReadInputTokens, canonicalUsage(record.usage).cacheReadInputTokens ?? 0);
+    } else if (record.type === "item.completed" && CODEX_TOOL_ITEM_TYPES.has(String(eventItem(record)?.type))) {
+      totals.toolCalls += 1;
+    }
+    return;
+  }
+  if (driver === "claude" || driver === "glm") {
+    if (record.type === "assistant") {
+      const message = /** @type {Record<string, unknown>} */ (record.message ?? {});
+      totals.turns += 1;
+      totals.cacheReadInputTokens += canonicalUsage(message.usage).cacheReadInputTokens ?? 0;
+      totals.toolCalls += Array.isArray(message.content)
+        ? message.content.filter((/** @type {{type?: unknown}} */ block) => block?.type === "tool_use").length
+        : 0;
+    } else if (record.type === "result") {
+      const sessionTotal = canonicalUsage(record.usage).cacheReadInputTokens;
+      if (sessionTotal !== null) totals.cacheReadInputTokens = sessionTotal;
+    }
+    return;
+  }
+  if (driver === "exec-jsonl" && record.type === "run.completed") {
+    // The protocol carries no tool events; only a completed run proves a turn.
+    totals.turns += 1;
+    totals.cacheReadInputTokens += canonicalUsage(record.usage).cacheReadInputTokens ?? 0;
+  }
+}
+
+/**
+ * Fold the head-plus-tail fragments of one record that outgrew the retention
+ * bound: the same evidence foldRecord extracts, read as fragments so an
+ * oversized record is never silently skipped.
+ *
+ * @param {string} driver
+ * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number}} totals
+ * @param {{head: string, tail: string, toolUse: number}} fragments
+ */
+function foldFragmentRecord(driver, totals, fragments) {
+  const text = `${fragments.head}\n${fragments.tail}`;
+  if (driver === "claude" || driver === "glm") {
+    if (text.includes('"type":"assistant"')) {
+      totals.turns += 1;
+      totals.toolCalls += fragments.toolUse;
+      const cacheRead = lastCacheRead(text);
+      if (cacheRead !== null) totals.cacheReadInputTokens += cacheRead;
+    } else if (text.includes('"type":"result"')) {
+      const sessionTotal = lastCacheRead(text);
+      if (sessionTotal !== null) totals.cacheReadInputTokens = sessionTotal;
+    }
+    return;
+  }
+  if (driver === "codex") {
+    if (text.includes('"type":"turn.completed"')) {
+      totals.turns += 1;
+      const cacheRead = lastCacheRead(text);
+      totals.cacheReadInputTokens = Math.max(totals.cacheReadInputTokens, cacheRead ?? 0);
+    } else if (text.includes('"type":"item.completed"') && [...CODEX_TOOL_ITEM_TYPES].some((type) => text.includes(`"type":"${type}"`))) {
+      totals.toolCalls += 1;
+    }
+    return;
+  }
+  if (driver === "exec-jsonl" && text.includes('"type":"run.completed"')) {
+    totals.turns += 1;
+    const cacheRead = lastCacheRead(text);
+    if (cacheRead !== null) totals.cacheReadInputTokens += cacheRead;
+  }
+}
+
+/**
+ * The provider session identity one record proves.
+ *
+ * @param {string} driver
+ * @param {Record<string, unknown>} record
+ * @returns {string|null}
+ */
+function recordContinuationId(driver, record) {
+  if (driver === "codex") {
+    return record.type === "thread.started" && typeof record.thread_id === "string" ? record.thread_id : null;
+  }
+  if (driver === "claude" || driver === "glm") {
+    return record.type === "result" && typeof record.session_id === "string" ? record.session_id : null;
+  }
+  if (driver === "exec-jsonl" && (record.type === "run.started" || record.type === "run.completed")) {
+    return typeof record.continuationId === "string" ? record.continuationId : null;
+  }
+  return null;
+}
+
+/**
+ * The provider session identity one record's fragments prove.
+ *
+ * @param {string} driver
+ * @param {{head: string, tail: string}} fragments
+ * @returns {string|null}
+ */
+function fragmentContinuationId(driver, fragments) {
+  const text = `${fragments.head}\n${fragments.tail}`;
+  const pattern = driver === "codex"
+    ? /"thread_id":"([^"]+)"/u
+    : driver === "claude" || driver === "glm"
+      ? /"session_id":"([^"]+)"/u
+      : /"continuationId":"([^"]+)"/u;
+  const match = pattern.exec(text);
+  return match ? match[1] : null;
+}
+
+/**
+ * @param {string} driver
+ * @returns {boolean}
+ */
+function isClaudeFamily(driver) {
+  return driver === "claude" || driver === "glm";
+}
+
+/**
+ * Count needle occurrences in one region, keeping the trailing bytes that
+ * could complete a needle in the next region so a straddling needle is
+ * counted exactly once.
+ *
+ * @param {Buffer} region
+ * @param {Buffer} carry
+ * @param {Buffer} needle
+ * @returns {{hits: number, carry: Buffer}}
+ */
+function countWithCarry(region, carry, needle) {
+  const stream = carry.length > 0 ? Buffer.concat([carry, region]) : region;
+  return { hits: countNeedle(stream, needle), carry: stream.subarray(Math.max(0, stream.length - (needle.length - 1))) };
+}
+
+/**
+ * @param {Buffer} haystack
+ * @param {Buffer} needle
+ * @returns {number}
+ */
+function countNeedle(haystack, needle) {
+  let hits = 0;
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + needle.length)) hits += 1;
+  return hits;
+}
+
+/**
+ * Decode a retained fragment without splitting a UTF-8 sequence.
+ *
+ * @param {Buffer} fragment
+ * @returns {string}
+ */
+function decodeFragment(fragment) {
+  let start = 0;
+  while (start < fragment.length && (fragment[start] & 0xc0) === 0x80) start += 1;
+  return fragment.toString("utf8", start);
+}
+
+/**
+ * The last cache-read number in a fragment text, or null.
+ *
+ * @param {string} text
+ * @returns {number|null}
+ */
+function lastCacheRead(text) {
+  const matches = [...text.matchAll(CACHE_READ_PATTERN)];
+  return matches.length > 0 ? Number(matches.at(-1)?.[1]) : null;
+}
+
+/**
+ * Bound one tool result to at most `maxBytes` UTF-8 bytes, keeping the head
+ * and the tail around an omission marker. This is the reference head+tail
+ * form the toolPolicy contract names; a cut never splits a UTF-8 sequence.
+ *
+ * @param {string} value
+ * @param {number} [maxBytes]
+ * @returns {string}
+ */
+export function truncateToolOutput(value, maxBytes = TOOL_OUTPUT_LIMIT_BYTES) {
+  const bytes = Buffer.from(String(value ?? ""), "utf8");
+  if (bytes.length <= maxBytes) return bytes.toString("utf8");
+  if (maxBytes < 192) {
+    // Too small to carry a head+tail marker: keep only a UTF-8-safe prefix.
+    let end = Math.max(0, maxBytes - 3);
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    return end > 0 ? `${bytes.subarray(0, end).toString("utf8")}…` : "";
+  }
+  // Reserve headroom for the marker so the bounded result can never exceed
+  // the limit regardless of how many digits the omission count needs.
+  const markerBudget = 96;
+  const headBudget = Math.floor((maxBytes - markerBudget) / 2);
+  const tailBudget = maxBytes - markerBudget - headBudget;
+  let headEnd = headBudget;
+  while (headEnd > 0 && (bytes[headEnd] & 0xc0) === 0x80) headEnd -= 1;
+  let tailStart = bytes.length - tailBudget;
+  while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80) tailStart += 1;
+  const head = bytes.subarray(0, headEnd);
+  const tail = bytes.subarray(tailStart);
+  const marker = `\n…[${bytes.length - head.length - tail.length} bytes truncated; narrow with grep or tail]…\n`;
+  return Buffer.concat([head, Buffer.from(marker, "utf8"), tail]).toString("utf8");
 }
 
 /**

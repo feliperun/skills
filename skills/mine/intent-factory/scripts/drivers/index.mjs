@@ -29,13 +29,14 @@ const CAPABILITY_NAMES = new Set([
   "costBudget",
   "usage",
   "cost",
+  "toolPolicy",
 ]);
 
-/** @typedef {"structuredOutput"|"promptTransport"|"sandbox"|"permissions"|"continuation"|"tokenBudget"|"costBudget"|"usage"|"cost"} CapabilityName */
+/** @typedef {"structuredOutput"|"promptTransport"|"sandbox"|"permissions"|"continuation"|"tokenBudget"|"costBudget"|"usage"|"cost"|"toolPolicy"} CapabilityName */
 
-/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, maxArgvPromptBytes?: number}} DriverCapabilities */
+/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, toolPolicy: boolean, maxArgvPromptBytes?: number}} DriverCapabilities */
 
-/** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean}} CapabilityRequirements */
+/** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean, toolPolicy?: boolean}} CapabilityRequirements */
 
 /** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null, env?: Record<string, string|null>}} DriverCommand */
 
@@ -45,7 +46,17 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime */
 
-/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, maxInvocationTokens?: number, maxCostUsd?: number}} CommandOptions */
+/**
+ * Mechanical worker tool policy sent to the provider boundary:
+ * `foregroundOnly` rejects background tool invocations and
+ * `maxToolOutputBytes` bounds each tool result head-plus-tail. Claude-
+ * compatible adapters enforce it through hook settings; an adapter that
+ * cannot prove enforcement must never receive it.
+ *
+ * @typedef {{foregroundOnly: boolean, maxToolOutputBytes: number|null}} ToolPolicy
+ */
+
+/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, maxInvocationTokens?: number, maxCostUsd?: number, toolPolicy?: ToolPolicy}} CommandOptions */
 
 /** @typedef {{preferStructured?: boolean, exitCode?: number|null, signal?: string|null}} NormalizeOptions */
 

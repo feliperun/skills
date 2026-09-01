@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -12,7 +12,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
-import { cancelRun, preflightContract, runContract, resumeRun, superviseRun } from "./runner.mjs";
+import { cancelRun, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS } from "./runner.mjs";
 import { invocationAlive, invocationResult, processStartToken } from "./supervisor.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
@@ -80,6 +80,206 @@ else {
 function flagValue(args, flag) {
   const index = args.indexOf(flag);
   return index < 0 ? null : args[index + 1] ?? null;
+}
+
+/**
+ * A codex-shaped provider for the durable worker-result protocol: the worker
+ * prompt carries the canonical result-file path, and each mode proves one
+ * recovery property. "file-first" writes a result file that differs from its
+ * final message, "missing-then-mutates" completes the first worker turn with
+ * no message and no file then mutates the workspace during the one-turn
+ * materialization, "missing-then-file-vs-message" materializes a file that
+ * contradicts its final message, "missing-then-noop" ends the one result-only
+ * turn with neither file nor message, and "revision-regrinds" writes a
+ * counter-suffixed result per worker run so a gate revision must clear the
+ * stale file.
+ *
+ * @param {string} directory
+ * @param {"file-first"|"missing-then-mutates"|"missing-then-file-vs-message"|"missing-then-noop"|"revision-regrinds"} mode
+ * @returns {string}
+ */
+function resultFileCodex(directory, mode) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-result-file-")), `result-file-${mode}.mjs`);
+  const workerCounter = join(directory, ".runs", `result-file-${mode}-workers`);
+  const judgeCounter = join(directory, ".runs", `result-file-${mode}-judges`);
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const mode = ${JSON.stringify(mode)};
+const resultless = mode === "missing-then-mutates" || mode === "missing-then-file-vs-message" || mode === "missing-then-noop";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const judge = prompt.startsWith("Review node");
+    const materialization = prompt.startsWith("The implementation is already complete");
+    const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+    const result = (summary) => JSON.stringify({ status: "done", summary, changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "result-file-thread" }));
+    if (resultless && !materialization && !judge) {
+      // Worker completes with usage but no final message and no canonical result file.
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+      return;
+    }
+    if (mode === "missing-then-mutates" && materialization) {
+      writeFileSync("unexpected.txt", "outside the materialization authority\\n");
+    }
+    if (mode === "missing-then-file-vs-message" && materialization) {
+      // The one result-only turn writes a canonical file that contradicts its
+      // own final message: only the file is authoritative.
+      if (resultPath) writeFileSync(resultPath, result("materialized from file"));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result("materialized from message") } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 6, output_tokens: 1 } }));
+      return;
+    }
+    if (mode === "missing-then-noop" && materialization) {
+      // The one result-only turn ends without the canonical file or any message.
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 6, output_tokens: 1 } }));
+      return;
+    }
+    if (judge) {
+      appendFileSync(${JSON.stringify(judgeCounter)}, "x\\n");
+      const run = readFileSync(${JSON.stringify(judgeCounter)}, "utf8").trim().split("\\n").length;
+      const text = run === 1
+        ? JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "critical defect", findings: [{ severity: "critical", description: "broken", evidence: "test failed" }] })
+        : JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 1 } }));
+      return;
+    }
+    appendFileSync(${JSON.stringify(workerCounter)}, "x\\n");
+    const run = readFileSync(${JSON.stringify(workerCounter)}, "utf8").trim().split("\\n").length;
+    const summary = mode === "file-first" ? "from message" : \`worker attempt \${run}\`;
+    if (resultPath) writeFileSync(resultPath, result(mode === "file-first" ? "from file" : \`worker attempt \${run}\`));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result(summary) } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @param {string} directory @param {"file-first"|"missing-then-mutates"|"missing-then-file-vs-message"|"missing-then-noop"|"revision-regrinds"} mode @param {string} path @returns {Promise<import("./runner.mjs").RunOutcome>} */
+async function withResultFileCodex(directory, mode, path) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = resultFileCodex(directory, mode);
+  try {
+    return await runContract(path);
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/**
+ * A codex-shaped provider for automatic worker rotation. The fat session
+ * emits turn events until a rotation threshold is crossed and then parks
+ * until the controller terminates it; the one-turn handoff writes an
+ * intentionally oversized handoff document (or misbehaves per mode); the
+ * fresh rotated session completes the node. "turns" crosses the turn
+ * threshold, "cache" the average cache-read threshold, "no-threshold" stays
+ * under both, "no-continuation" never exposes a session identity,
+ * "handoff-missing" acknowledges without writing the document, and
+ * "handoff-parks" never finishes the handoff turn so cancellation lands on
+ * it. "fat-log" buries the 80 threshold-crossing turns under more than
+ * 128 KiB of padding events first, so the rotation only fires when live
+ * monitoring keeps observing past a fixed window.
+ *
+ * @param {string} directory
+ * @param {"turns"|"cache"|"no-threshold"|"no-continuation"|"handoff-missing"|"handoff-parks"|"fat-log"} mode
+ * @returns {{executable: string, argvLog: string}}
+ */
+function rotatingCodex(directory, mode) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-rotating-")), `rotating-${mode}.mjs`);
+  const argvLog = join(directory, ".runs", `rotating-${mode}-argv.jsonl`);
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+const mode = ${JSON.stringify(mode)};
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const handoffTurn = prompt.startsWith("The worker session is being rotated");
+    const freshTurn = prompt.startsWith("Continue node build in a fresh provider session");
+    appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ resume: process.argv.includes("resume"), handoffTurn, freshTurn }) + "\\n");
+    const result = (summary) => JSON.stringify({ status: "done", summary, changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (handoffTurn) {
+      if (mode !== "handoff-missing" && mode !== "handoff-parks") {
+        const handoffPath = /to: (\\S+\\.md)/.exec(prompt)?.[1];
+        // Oversized on purpose: the controller must bound it to 16 KiB.
+        if (handoffPath) writeFileSync(handoffPath, "## Handoff\\n\\n- done: fat session work\\n- pending: fresh session completion\\n- commands: node --test passes\\n- files: README.md\\n\\n" + "x".repeat(20 * 1024));
+      }
+      if (mode === "handoff-parks") { setInterval(() => {}, 60_000); return; }
+      console.log(JSON.stringify({ type: "thread.started", thread_id: "fat-thread" }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "handoff written" } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 6, output_tokens: 1 } }));
+      return;
+    }
+    if (freshTurn) {
+      const resultPath = /file: (\\S+\\.json)/.exec(prompt)?.[1];
+      if (resultPath) writeFileSync(resultPath, result("fresh session complete"));
+      console.log(JSON.stringify({ type: "thread.started", thread_id: "fresh-thread" }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result("fresh session complete") } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 2 } }));
+      return;
+    }
+    // Fat worker session: emit turn evidence, then park until rotated.
+    if (mode !== "no-continuation") console.log(JSON.stringify({ type: "thread.started", thread_id: "fat-thread" }));
+    if (mode === "cache") {
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 1, cached_input_tokens: 130000 } }));
+    } else if (mode === "no-threshold") {
+      // 78 turn events plus the closing one stay strictly under 80 observed.
+      for (let index = 0; index < 78; index += 1) {
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
+      }
+      const resultPath = /file: (\\S+\\.json)/.exec(prompt)?.[1];
+      if (resultPath) writeFileSync(resultPath, result("completed without rotation"));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result("completed without rotation") } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
+      return;
+    } else {
+      if (mode === "fat-log") {
+        // Padding first: a fixed live window would never reach the turns.
+        for (let index = 0; index < 60; index += 1) {
+          console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "p".repeat(4096) } }));
+        }
+      }
+      for (let index = 0; index < 80; index += 1) {
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
+      }
+    }
+    setInterval(() => {}, 60_000);
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return { executable, argvLog };
+}
+
+/**
+ * @param {string} directory
+ * @param {"turns"|"cache"|"no-threshold"|"no-continuation"|"handoff-missing"|"handoff-parks"|"fat-log"} mode
+ * @param {string} path
+ * @returns {Promise<{result: import("./runner.mjs").RunOutcome, argvLog: string}>}
+ */
+async function withRotatingCodex(directory, mode, path) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  const { executable, argvLog } = rotatingCodex(directory, mode);
+  process.env.INTENT_FACTORY_CODEX_BIN = executable;
+  try {
+    return { result: await runContract(path), argvLog };
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
 }
 
 test("runs the CLI through an installed symlink", () => {
@@ -401,6 +601,190 @@ test("worker result with prose before the JSON still parses", async () => {
   const state = nodeState(result);
   assert.equal(state.status, "done");
   assert.equal(/** @type {{status: string}} */ (state.result).status, "done");
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(result.runDir, "results", "build.json"), "utf8")),
+    state.result,
+    "a valid provider fallback is durably materialized in the run-owned result file",
+  );
+});
+
+test("canonical worker result file wins over the redundant provider message", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-result-file-first-"));
+  const path = writeContract(directory, fixture({
+    id: "result-file-first-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withResultFileCodex(directory, "file-first", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "from file", "the run-owned file is authoritative over the final message");
+});
+
+test("result-only materialization rejects workspace mutation outside its authority", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-result-mutates-"));
+  const path = writeContract(directory, fixture({
+    id: "result-mutates-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withResultFileCodex(directory, "missing-then-mutates", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write");
+  assert.match(state.error?.message ?? "", /result materialization changed workspace paths/u);
+  assert.equal((state.invocations ?? []).length, 2, "exactly one result-only continuation ran");
+});
+
+test("resume adoption treats the canonical result file as primary evidence", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-file-first-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-file-first-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  // The provider message and its operation settlement both say "worker
+  // complete"; the canonical file is rewritten to disagree.
+  writeFileSync(join(runDir, "results", "build.json"), JSON.stringify({
+    status: "done", summary: "from canonical file", changedFiles: [], verification: [], artifacts: [], missingContext: [],
+  }));
+  orphan(runDir, "build");
+
+  // With the provider stream intact, adoption must still follow the file.
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  assert.equal(resumed.ok, true);
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(/** @type {{summary: string}} */ (nodeState(resumed).result).summary, "from canonical file");
+  assert.equal(nodeState(resumed).attempt, 1);
+});
+
+test("resume adoption follows the canonical file when the provider stream is gone", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-file-only-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-file-only-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  writeFileSync(join(runDir, "results", "build.json"), JSON.stringify({
+    status: "done", summary: "from canonical file", changedFiles: [], verification: [], artifacts: [], missingContext: [],
+  }));
+  // Removing the transcript leaves only the settlement and the file; without
+  // the file this would restart completed work instead of adopting it.
+  for (const name of readdirSync(join(runDir, "logs"))) {
+    if (name.endsWith(".worker.jsonl")) unlinkSync(join(runDir, "logs", name));
+  }
+  orphan(runDir, "build");
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  assert.equal(resumed.ok, true);
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(/** @type {{summary: string}} */ (nodeState(resumed).result).summary, "from canonical file");
+  assert.equal(nodeState(resumed).attempt, 1);
+});
+
+test("resume judge recovery surfaces an invalid canonical result file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-judge-invalid-file-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-judge-invalid-file-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  // The judge completed, but the durable result file is corrupt. Presence is
+  // authoritative: judge-phase recovery must not fall back to the worker
+  // transcript, which still holds a valid final message.
+  writeFileSync(join(runDir, "results", "build.json"), "not the result protocol\n");
+  orphan(runDir, "build");
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "failed", "the transcript result must not be adopted through judge recovery");
+  assert.equal(state.result, null);
+  assert.equal(state.revisions, 1, "the invalid durable record consumed the gate revision");
+  assert.equal((state.invocations ?? []).length, 3, "the revision retried the worker exactly once");
+});
+
+test("resume of an interrupted result materialization adopts the file with strict scope", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-materialized-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withResultFileCodex(directory, "missing-then-file-vs-message", path);
+  assert.equal(nodeState(result).status, "done");
+  // The controller "crashes" after the one result-only turn: rewind the node
+  // to running so resume must recover the materialization invocation itself.
+  orphan(result.runDir, "build");
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(result.runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "done");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "materialized from file", "the canonical file outranks the recovered provider message");
+  assert.equal((state.invocations ?? []).length, 2, "recovery schedules no fresh worker");
+  assert.equal(state.attempt, 1);
+});
+
+test("resume of an interrupted result materialization rejects declared-path mutation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-mutation-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-materialized-mutation-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withResultFileCodex(directory, "missing-then-file-vs-message", path);
+  orphan(result.runDir, "build");
+  // README.md is a declared packet write file: the lenient worker check would
+  // accept this change, but a result-only turn had no authority to make it.
+  writeFileSync(join(directory, "README.md"), "mutated across the recovery window\\n");
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(result.runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write");
+  assert.match(state.error?.message ?? "", /result materialization changed workspace paths/u);
+});
+
+test("resume of a resultless materialization turn fails terminally instead of rerunning the worker", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-noop-"));
+  const path = writeContract(directory, fixture({
+    id: "resume-materialized-noop-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withResultFileCodex(directory, "missing-then-noop", path);
+  assert.equal(nodeState(result).status, "failed");
+  assert.equal(nodeState(result).error?.code, "missing_worker_result");
+  orphan(result.runDir, "build");
+
+  // A provider that would happily run a generic worker must never be invoked:
+  // the single result-only turn was already spent.
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(result.runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "missing_worker_result");
+  assert.equal((state.invocations ?? []).length, 2, "no third invocation was spawned");
+  assert.equal(state.attempt, 1);
+});
+
+test("a gate revision clears the stale canonical result file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-result-regrind-"));
+  const path = writeContract(directory, fixture({
+    id: "result-regrind-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+  }));
+  const result = await withResultFileCodex(directory, "revision-regrinds", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.equal(state.revisions, 1);
+  assert.equal(
+    /** @type {{summary: string}} */ (state.result).summary,
+    "worker attempt 2",
+    "the fresh worker attempt must not reuse the previous attempt's result file",
+  );
 });
 
 test("invalid worker result consumes a bounded revision before failing terminally", async () => {
@@ -727,6 +1111,7 @@ test("resume adopts an orphaned worker result instead of repeating the work", as
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-"));
   const path = writeContract(directory, fixture({ id: "resume-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  unlinkSync(join(runDir, "results", "build.json"));
   orphan(runDir, "build");
 
   // A provider that fails every worker call proves the result came from the orphaned log.
@@ -1000,6 +1385,9 @@ test("simultaneous resumes allow one controller and reject the other", async () 
     stdio: ["ignore", "pipe", "pipe"],
   });
   try {
+    // A freshly spawned `resume` controller spends several seconds in startup
+    // (identity probing, snapshots) before its first provider spawn, so the
+    // lease-held observation needs a wider window than the 5s default.
     await waitForValue(() => {
       try {
         return existsSync(started)
@@ -1010,7 +1398,7 @@ test("simultaneous resumes allow one controller and reject the other", async () 
       } catch {
         return null;
       }
-    }, 5_000);
+    }, 20_000);
     const second = spawn(process.execPath, [runner, "resume", runDir], {
       env: { ...process.env, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1137,6 +1525,10 @@ test("resume adopts a still-live orphan invocation after its stream completes", 
   });
   const nodePath = join(runDir, "nodes", "build.json");
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  // The synthetic invocation below fabricates a fresh attempt by hand; a real
+  // attempt start clears the previous attempt's canonical result file, so the
+  // fabricated one must not inherit it.
+  rmSync(join(runDir, "results", "build.json"), { force: true });
   const snapshotPath = join(runDir, "logs", "active-orphan.snapshot.json");
   writeFileSync(snapshotPath, JSON.stringify(captureWorkspaceSnapshot(directory)));
   const now = new Date().toISOString();
@@ -2620,6 +3012,25 @@ test("run warnings ignore an unrelated historical run with an obsolete contract"
   assert.doesNotMatch(result.stdout, /obsolete-run/u);
 });
 
+test("run warnings ignore a historical snapshot from an older capability schema", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rerun-old-snapshot-"));
+  const firstPath = writeContract(directory, fixture({ id: "old-run", pollIntervalMs: 10 }));
+  await withFakeCodex(directory, "pass", () => runContract(firstPath));
+  const oldNodePath = join(directory, ".runs", "old-run", "nodes", "build.json");
+  const oldNode = JSON.parse(readFileSync(oldNodePath, "utf8"));
+  delete oldNode.runtime.capabilities.toolPolicy;
+  writeFileSync(oldNodePath, `${JSON.stringify(oldNode)}\n`);
+
+  const secondPath = writeContract(directory, fixture({ id: "current-run", pollIntervalMs: 10 }));
+  const result = await withFakeCodex(directory, "pass", () => spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "run", secondPath],
+    { encoding: "utf8" },
+  ));
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /old-run/u);
+});
+
 test("supervise resumes a run whose controller died", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-supervise-"));
   const path = writeContract(directory, fixture({ id: "supervise-run", pollIntervalMs: 10 }));
@@ -2844,4 +3255,252 @@ test("blocks downstream nodes after a failed dependency", async () => {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
+});
+
+test("rotation triggers at exactly 80 turns or 120000 average cache-read tokens per turn", () => {
+  assert.equal(ROTATION_MAX_TURNS, 80);
+  assert.equal(ROTATION_AVG_CACHE_READ_TOKENS, 120_000);
+  assert.equal(ROTATION_HANDOFF_MAX_BYTES, 16 * 1024);
+  assert.equal(rotationTrigger({ turns: 0, cacheReadInputTokens: 10_000_000 }), null, "no observed turn means no trusted per-turn average");
+  assert.equal(rotationTrigger({ turns: 79, cacheReadInputTokens: 79 * 119_999 }), null, "79 turns under the average stay put");
+  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2 * ROTATION_AVG_CACHE_READ_TOKENS - 1 }), null, "one token under the average is not premature");
+  assert.match(rotationTrigger({ turns: 80, cacheReadInputTokens: 0 }) ?? "", /observed turns 80 >= 80/u);
+  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS }) ?? "", /average cache-read input 120000/u);
+});
+
+test("automatic rotation turns a fat worker session over at 80 observed turns", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-turns-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-turns-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result, argvLog } = await withRotatingCodex(directory, "turns", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  const invocations = state.invocations ?? [];
+  assert.equal(invocations.length, 3, "fat session, one-turn handoff, fresh session");
+  assert.equal(invocations[1].continuationMode, "reuse", "the handoff resumes the rotated session for one turn");
+  assert.equal(invocations[1].continuationId, "fat-thread");
+  assert.equal(invocations[2].continuationMode, "fresh", "the post-rotation session is a fresh provider session");
+  assert.notEqual(invocations[2].continuationId, "fat-thread", "the fresh session never carries the rotated session identity");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(rotations.length, 2, "trigger and handoff overrides are durable");
+  assert.match(rotations[0].reason ?? "", /observed turns 80 >= 80/u);
+  assert.equal(rotations[1].decision, "rotated", "the commissioned handoff is consumed exactly once");
+  const runs = readFileSync(argvLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(runs.map((run) => [run.handoffTurn, run.freshTurn]), [[false, false], [true, false], [false, true]]);
+  assert.equal(runs[1].resume, true, "the handoff turn resumes the rotated session");
+  assert.equal(runs[2].resume, false, "the fresh session does not resume anything");
+  const handoff = readFileSync(join(result.runDir, "rotations", "build.1.1.md"), "utf8");
+  assert.ok(Buffer.byteLength(handoff, "utf8") <= ROTATION_HANDOFF_MAX_BYTES, "the materialized handoff never exceeds 16 KiB");
+  assert.match(handoff, /## Handoff/u);
+  assert.match(handoff, /- done: fat session work/u);
+  const freshPrompt = readFileSync(/** @type {string} */ (invocations[2].promptPath), "utf8");
+  assert.match(freshPrompt, /Continue node build in a fresh provider session/u);
+  assert.match(freshPrompt, /Rotation handoff from the previous session/u);
+  assert.match(freshPrompt, /- pending: fresh session completion/u, "the handoff content carries over");
+  assert.match(freshPrompt, /Bounded git status --short/u);
+  assert.match(freshPrompt, /Current closed task packet/u);
+  assert.equal(freshPrompt.includes("fat session work"), true);
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "fresh session complete");
+});
+
+test("automatic rotation triggers on average cache-read input without 80 turns", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-cache-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-cache-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result } = await withRotatingCodex(directory, "cache", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(rotations.length, 2);
+  assert.match(rotations[0].reason ?? "", /average cache-read input 130000 >= 120000 tokens\/turn over 1 turns/u);
+  assert.equal((state.invocations ?? []).length, 3, "the cache trigger also rotates through the handoff into a fresh session");
+});
+
+test("automatic rotation still fires when the transcript outgrows the live observation window", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-fat-log-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-fat-log-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result } = await withRotatingCodex(directory, "fat-log", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(rotations.length, 2, "trigger and handoff fire despite the padding");
+  assert.match(rotations[0].reason ?? "", /observed turns 80 >= 80/u);
+  assert.equal((state.invocations ?? []).length, 3, "fat session, one-turn handoff, fresh session");
+  assert.equal((state.invocations ?? []).at(-1)?.continuationMode, "fresh");
+});
+
+test("a session under both rotation thresholds completes without rotating", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-under-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-under-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result } = await withRotatingCodex(directory, "no-threshold", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done");
+  assert.equal((state.invocations ?? []).length, 1, "no rotation, no handoff turn, no fresh session");
+  assert.deepEqual((state.executionOverrides ?? []).filter((item) => item.kind === "rotation"), [], "no premature rotation is recorded");
+  assert.equal(existsSync(join(result.runDir, "rotations")), false, "no handoff artifact materializes");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "completed without rotation");
+});
+
+test("a rotation without a resumable session fails with a precise bounded error", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-unresumable-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-unresumable-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result } = await withRotatingCodex(directory, "no-continuation", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "rotation_continuation_unavailable");
+  assert.match(state.error?.message ?? "", /no continuation identity/u, "the failure names exactly what is missing");
+  assert.ok(Buffer.byteLength(state.error?.message ?? "", "utf8") < 512, "the failure stays bounded");
+  assert.equal((state.invocations ?? []).length, 1, "no handoff turn was spent without a session to resume");
+});
+
+test("a rotation handoff that writes no document fails bounded instead of restarting work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-handoff-missing-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-handoff-missing-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const { result } = await withRotatingCodex(directory, "handoff-missing", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "rotation_handoff_missing");
+  assert.match(state.error?.message ?? "", /wrote no document/u);
+  assert.equal((state.invocations ?? []).length, 2, "the fresh session never started");
+});
+
+test("cancellation during a rotation handoff cancels the node without resurrecting it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-cancel-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-cancel-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = join(directory, ".runs", "rotation-cancel-run");
+  const canceler = (async () => {
+    await waitForValue(() => {
+      try {
+        const snapshot = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8"));
+        return (snapshot.invocations ?? []).length >= 2 && snapshot.status === "running" ? true : null;
+      } catch {
+        return null;
+      }
+    }, 30_000);
+    writeFileSync(join(runDir, "cancel.request.json"), "{}\n");
+  })();
+  const executable = rotatingCodex(directory, "handoff-parks").executable;
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = executable;
+  let result;
+  try {
+    result = await runContract(path);
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+  await canceler;
+  const state = nodeState(result);
+  assert.equal(state.status, "canceled");
+  assert.equal((state.invocations ?? []).length, 2, "the parked handoff turn is the last invocation");
+  assert.equal(result.ok, false);
+});
+
+test("resume continues a commissioned rotation handoff in a fresh session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-resume-"));
+  const path = writeContract(directory, fixture({
+    id: "rotation-resume-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  // Rewind to the rotation boundary: the handoff is commissioned but the
+  // fresh session has not started, exactly as if the controller died there.
+  const handoffPath = join(runDir, "rotations", "build.1.1.md");
+  mkdirSync(join(runDir, "rotations"));
+  writeFileSync(handoffPath, "## Handoff\n\n- done: rotation\n- pending: resume\n");
+  const nodePath = join(runDir, "nodes", "build.json");
+  const persisted = JSON.parse(readFileSync(nodePath, "utf8"));
+  writeFileSync(nodePath, JSON.stringify({
+    ...persisted,
+    status: "pending",
+    phase: "worker",
+    attempt: 1,
+    result: null,
+    gate: null,
+    error: null,
+    verification: null,
+    executionOverrides: [
+      { kind: "rotation", at: new Date().toISOString(), decision: "trigger", invocationId: persisted.invocations?.[0]?.id ?? "invocation", phase: "worker", reason: "observed turns 80 >= 80" },
+      { kind: "rotation", at: new Date().toISOString(), decision: "handoff", invocationId: "handoff-invocation", phase: "worker", reason: "observed turns 80 >= 80", result: handoffPath },
+    ],
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "done");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(rotations[1].decision, "rotated", "the resumed fresh session consumed the handoff exactly once");
+  const fresh = state.invocations?.at(-1);
+  assert.equal(fresh?.continuationMode, "fresh", "resume starts the fresh rotated session, not the rotated provider session");
+  assert.notEqual(fresh?.id, rotations[1].invocationId);
+  const freshPrompt = readFileSync(/** @type {string} */ (fresh?.promptPath), "utf8");
+  assert.match(freshPrompt, /Continue node build in a fresh provider session/u);
+  assert.match(freshPrompt, /- pending: resume/u, "the durable handoff content carries into the resumed fresh session");
+  assert.match(freshPrompt, /Bounded git status --short/u);
+  assert.match(freshPrompt, /Current closed task packet/u);
+});
+
+test("worker invocations send no tool policy to a driver that cannot enforce it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-tool-policy-"));
+  const marker = join(directory, ".runs", "tool-policy-request.json");
+  const provider = join(directory, "policy-provider.mjs");
+  writeFileSync(provider, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("policy-provider 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    writeFileSync(${JSON.stringify(marker)}, input);
+    const result = JSON.stringify({ status: "done", summary: "ok", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: null, usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 }, costUsd: null }));
+  });
+}
+`);
+  chmodSync(provider, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "tool-policy-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
+    runtimeRules: [],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await runContract(path);
+  assert.equal(nodeState(result).status, "done");
+  const request = JSON.parse(readFileSync(marker, "utf8"));
+  assert.equal(
+    "toolPolicy" in request,
+    false,
+    "an adapter without an enforceable hook surface receives no policy to pretend with; enforcement lives on the claude-compatible --settings boundary",
+  );
 });

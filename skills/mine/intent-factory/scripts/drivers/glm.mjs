@@ -1,4 +1,5 @@
 import { normalizeClaudeResult, parseVersion } from "./exec-jsonl.mjs";
+import { hookSettings } from "../tool-policy-hook.mjs";
 
 /** Default Z.ai Anthropic-compatible endpoint serving GLM models. */
 export const GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic";
@@ -27,6 +28,8 @@ export const glmDriver = {
     costBudget: true,
     usage: true,
     cost: true,
+    // The Claude-compatible hook surface enforces the tool policy mechanically.
+    toolPolicy: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
@@ -55,6 +58,7 @@ export const glmDriver = {
       "--permission-mode",
       runtime.permissionMode ?? "acceptEdits",
     ];
+    if (options.toolPolicy) args.push("--settings", JSON.stringify(hookSettings(options.toolPolicy)));
     if (runtime.reasoning) args.push("--effort", runtime.reasoning);
     if (options.maxCostUsd !== undefined) args.push("--max-budget-usd", String(options.maxCostUsd));
     if (options.schema) args.push("--json-schema", JSON.stringify(options.schema));

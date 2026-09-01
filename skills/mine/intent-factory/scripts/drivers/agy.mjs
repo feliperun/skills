@@ -15,6 +15,7 @@ export const agyDriver = {
     costBudget: false,
     usage: true,
     cost: false,
+    toolPolicy: false,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

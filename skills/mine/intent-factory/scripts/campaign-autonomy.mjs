@@ -642,6 +642,18 @@ function writeWatchCursor(campaignPath, position) {
 }
 
 /**
+ * The detached child re-enters the public CLI, whose interval unit is seconds.
+ * The launcher already converted seconds to milliseconds exactly once, so
+ * convert back at this boundary instead of leaking the internal unit.
+ *
+ * @param {number|undefined} intervalMs
+ * @returns {string}
+ */
+function intervalSeconds(intervalMs) {
+  return String((intervalMs ?? DEFAULT_INTERVAL_MS) / 1_000);
+}
+
+/**
  * Detach a campaign supervisor using the pinned controller and wait for its
  * readiness record. This is intentionally separate from model/provider work.
  *
@@ -655,7 +667,7 @@ export async function detachSelf(campaignPath, options = {}) {
   const cwd = resolve(campaignPath, "../../..");
   const campaignId = plan.campaignId;
   const nonce = randomUUID();
-  const child = spawn(process.execPath, [runnerPath, "campaign", "supervise", campaignId, "--cwd", cwd, "--interval", String(options.intervalMs ?? DEFAULT_INTERVAL_MS)], {
+  const child = spawn(process.execPath, [runnerPath, "campaign", "supervise", campaignId, "--cwd", cwd, "--interval", intervalSeconds(options.intervalMs)], {
     cwd,
     env: { ...process.env, INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE: nonce },
     detached: process.platform !== "win32",
@@ -804,13 +816,77 @@ function inspectRun(campaignPath, record) {
   const lease = readLease(runDir);
   const controllerAlive = Boolean(lease && !lease.invalid && leaseHealthy(lease) && pidAlive(/** @type {unknown} */ (lease.pid)));
   const allGreen = nodes.every((node) => node.status === "done" || node.status === "no-op");
-  const failedNode = nodes.find((node) => isFailureNode(node));
+  const failedNode = causalFailureNode(nodes, contract);
   const firstStatus = allGreen ? "done" : failedNode?.status ?? (controllerAlive ? "running" : "stalled");
-  const error = failedNode?.error ?? (failedNode?.gate ? { code: "gate_failed", message: failedNode.gate.summary ?? "gate failed" } : null);
-  const currentRuntime = failedNode?.runtime?.id ?? failedNode?.runtime ?? contract.runtimeDefaults.worker;
-  const failoverHistory = failedNode?.routing?.history?.filter(/** @param {JsonObject} entry */ (entry) => entry.role === "worker").map(/** @param {JsonObject} entry */ (entry) => entry.runtime) ?? [];
+  const error = failedNode?.error ?? (failedNode?.gate ? { code: "gate_failed", message: nodeRecord(failedNode, "gate")?.summary ?? "gate failed" } : null);
+  const currentRuntime = nodeRecord(failedNode, "runtime")?.id ?? failedNode?.runtime ?? contract.runtimeDefaults.worker;
+  const routingHistory = nodeRecord(failedNode, "routing")?.history;
+  const failoverHistory = Array.isArray(routingHistory) ? routingHistory.filter(/** @param {JsonObject} entry */ (entry) => entry.role === "worker").map(/** @param {JsonObject} entry */ (entry) => entry.runtime) : [];
   return { runDir, contractPath: join(runDir, "contract.json"), contract, nodes, failedNode, status: firstStatus, controllerAlive, allGreen, error, currentRuntime, failoverHistory };
 }
+
+/** @param {JsonObject|undefined} node @param {string} key @returns {JsonObject|null} */
+function nodeRecord(node, key) {
+  const value = node?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? /** @type {JsonObject} */ (value) : null;
+}
+
+/**
+ * Deterministically select the causal failure root from the observed node
+ * states. Directory order never decides the outcome, and a dependency-blocked
+ * descendant never masks the earlier failed, exhausted, or stalled node it
+ * depends on: a failing node whose own dependency is failing is a consequence,
+ * not a cause.
+ *
+ * @param {JsonObject[]} nodes
+ * @param {JsonObject} contract
+ * @returns {JsonObject|undefined}
+ */
+export function causalFailureNode(nodes, contract) {
+  const failing = nodes.filter((node) => isFailureNode(node));
+  if (failing.length <= 1) return failing.at(0);
+  const failingIds = new Set(failing.map((node) => String(node.id ?? "")));
+  const roots = failing.filter((node) => !dependenciesOf(contract, String(node.id ?? "")).some((dep) => failingIds.has(dep)));
+  const candidates = roots.length > 0 ? roots : failing;
+  return candidates.sort(compareFailureNodes(contract)).at(0);
+}
+
+/** @param {JsonObject} contract @param {string} id @returns {string[]} */
+function dependenciesOf(contract, id) {
+  if (!Array.isArray(contract.nodes)) return [];
+  for (const rawNode of contract.nodes) {
+    if (!rawNode || typeof rawNode !== "object" || Array.isArray(rawNode)) continue;
+    const node = /** @type {JsonObject} */ (rawNode);
+    if (node.id !== id) continue;
+    return Array.isArray(node.dependsOn) ? node.dependsOn.filter(/** @param {unknown} dep @returns {dep is string} */ (dep) => typeof dep === "string") : [];
+  }
+  return [];
+}
+
+/**
+ * Earlier contract nodes outrank later ones so multiple independent roots still
+ * resolve to one deterministic answer when readdir order changes.
+ *
+ * @param {JsonObject} contract
+ * @returns {(left: JsonObject, right: JsonObject) => number}
+ */
+function compareFailureNodes(contract) {
+  /** @type {Map<string, number>} */
+  const order = new Map();
+  if (Array.isArray(contract.nodes)) {
+    for (const [index, rawNode] of /** @type {unknown[]} */ (contract.nodes).entries()) {
+      if (!rawNode || typeof rawNode !== "object" || Array.isArray(rawNode)) continue;
+      const node = /** @type {JsonObject} */ (rawNode);
+      if (typeof node.id === "string") order.set(node.id, index);
+    }
+  }
+  /** @type {(node: JsonObject) => number} */
+  const rank = (node) => order.get(String(node.id ?? "")) ?? Number.MAX_SAFE_INTEGER;
+  return (left, right) => rank(left) - rank(right) || compareIds(String(left.id ?? ""), String(right.id ?? ""));
+}
+
+/** @param {string} left @param {string} right @returns {number} */
+function compareIds(left, right) { return left < right ? -1 : left > right ? 1 : 0; }
 
 /** @param {CampaignRun} record @returns {string} */
 function inferRunDir(record) {

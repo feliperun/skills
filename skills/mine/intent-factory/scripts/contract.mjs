@@ -41,7 +41,7 @@ const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependen
 const SNAPSHOT_RUNTIME_FIELDS = new Set(["id", ...RUNTIME_FIELDS, "capabilities"]);
 const CAPABILITY_FIELDS = new Set([
   "structuredOutput", "promptTransport", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget",
-  "usage", "cost", "maxArgvPromptBytes",
+  "usage", "cost", "toolPolicy", "maxArgvPromptBytes",
 ]);
 const GATE_RESULT_FIELDS = new Set(["verdict", "maxSeverity", "summary", "findings"]);
 const FINDING_FIELDS = new Set(["severity", "description", "evidence"]);
@@ -86,7 +86,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {import("./verification.mjs").VerificationCommandResult} VerificationCommandResult */
 /** @typedef {import("./verification.mjs").VerificationAttempt} VerificationAttempt */
 /** @typedef {{passed: boolean, commands?: VerificationCommandResult[], completed?: boolean, error?: string, attempts?: VerificationAttempt[]}} VerificationState */
-/** @typedef {{kind: "recovery"|"timeout", decision?: string, invocationId?: string, phase?: "worker"|"judge", result?: unknown, usage?: Usage, costUsd?: number|null, reason?: string, timeoutSec?: number, at?: string}} ExecutionOverride */
+/** @typedef {{kind: "recovery"|"timeout"|"rotation", decision?: string, invocationId?: string, phase?: "worker"|"judge", result?: unknown, usage?: Usage, costUsd?: number|null, reason?: string, timeoutSec?: number, at?: string}} ExecutionOverride */
 /** @typedef {{literal: string, paths: string[]}} WorkspaceScopeOrigin */
 /** @typedef {{schemaVersion: 1, files: string[], roots: string[], fileOrigins: WorkspaceScopeOrigin[], rootOrigins: WorkspaceScopeOrigin[]}} WorkspaceScopeBoundary */
 /** @typedef {{changedPaths: string[], unexpectedPaths: string[], changedPathCount: number, unexpectedPathCount: number, truncated: boolean, boundary?: WorkspaceScopeBoundary}} BoundedScope */
@@ -913,7 +913,7 @@ function validateSnapshotRuntime(value, label) {
 function validateCapabilities(value, label) {
   assertObject(value, label);
   rejectUnknown(value, CAPABILITY_FIELDS, label);
-  for (const name of ["structuredOutput", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget", "usage", "cost"]) {
+  for (const name of ["structuredOutput", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget", "usage", "cost", "toolPolicy"]) {
     if (typeof value[name] !== "boolean") throw new TypeError(`${label}.${name} must be boolean`);
   }
   if (!["stdin", "argv"].includes(/** @type {string} */ (value.promptTransport))) {

@@ -1,4 +1,5 @@
 import { normalizeClaudeResult, parseVersion } from "./exec-jsonl.mjs";
+import { hookSettings } from "../tool-policy-hook.mjs";
 
 /**
  * @type {import("./index.mjs").DriverAdapter}
@@ -14,6 +15,8 @@ export const claudeDriver = {
     costBudget: true,
     usage: true,
     cost: true,
+    // The Claude-compatible hook surface enforces the tool policy mechanically.
+    toolPolicy: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
@@ -42,6 +45,7 @@ export const claudeDriver = {
       "--permission-mode",
       runtime.permissionMode ?? "acceptEdits",
     ];
+    if (options.toolPolicy) args.push("--settings", JSON.stringify(hookSettings(options.toolPolicy)));
     if (runtime.reasoning) args.push("--effort", runtime.reasoning);
     if (options.maxCostUsd !== undefined) args.push("--max-budget-usd", String(options.maxCostUsd));
     if (options.schema) args.push("--json-schema", JSON.stringify(options.schema));

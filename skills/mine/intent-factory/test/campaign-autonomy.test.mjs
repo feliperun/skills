@@ -10,6 +10,8 @@ import {
   CAMPAIGN_LEASE_FILE,
   CAMPAIGN_OUTBOX_FILE,
   CAMPAIGN_STATE_FILE,
+  campaignStatus,
+  causalFailureNode,
   classifyTransition,
   configureCampaign,
   createRepairContract,
@@ -121,6 +123,7 @@ test("classifies bounded retries, failover, repairs, attention, and completion",
   assert.equal(classifyTransition({ authority, status: "stalled", retryCount: 1 }).reason, "retry_limit_exhausted");
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "provider_exhausted", currentRuntime: "luna" }).failoverTo, "sol");
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "provider_exhausted", currentRuntime: "sol" }).action, "attention");
+  assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "provider_exhausted", currentRuntime: "luna", run: { failoverHistory: ["sol"] } }).action, "attention");
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "retry_limit_exhausted" }).reason, "unclassified_terminal_failure");
   assert.equal(classifyTransition({ authority, status: "blocked", errorCode: "budget_exceeded" }).reason, "budget_exhausted");
   assert.equal(classifyTransition({ authority, status: "blocked", errorCode: "context_missing", repairCount: 0 }).action, "repair");
@@ -250,6 +253,75 @@ test("detached supervisor reports readiness from the pinned runner", async () =>
     const result = await detachSelf(value.campaignPath, { intervalMs: 100 });
     assert.ok(result.pid > 0);
     process.kill(result.pid, "SIGTERM");
+  } finally { cleanup(value); }
+});
+
+test("detached supervisor interval crosses the public CLI boundary once: 30 seconds to 30000 ms", async () => {
+  const value = tempRepo(`import { mkdirSync, renameSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const id = process.argv[4]; const cwd = process.argv[process.argv.indexOf("--cwd") + 1]; const nonce = process.env.INTENT_FACTORY_CAMPAIGN_BOOTSTRAP_NONCE; const path = join(cwd, ".runs", "campaigns", id); const ack = join(path, "controller-bootstrap.json." + nonce + ".json"); const temporary = ack + "." + process.pid + ".tmp"; mkdirSync(path, { recursive: true }); writeFileSync(join(path, "detached-argv.json"), JSON.stringify(process.argv)); writeFileSync(temporary, JSON.stringify({ status: "ready", pid: process.pid })); renameSync(temporary, ack); setInterval(() => {}, 1000);\n`);
+  try {
+    const result = await detachSelf(value.campaignPath, { intervalMs: 30_000 });
+    assert.ok(result.pid > 0);
+    process.kill(result.pid, "SIGTERM");
+    const argv = JSON.parse(readFileSync(join(value.campaignPath, "detached-argv.json"), "utf8"));
+    // The child re-enters the public CLI, so it must receive seconds, not the
+    // internal milliseconds; the child converts once back to 30000 ms.
+    assert.equal(argv[argv.indexOf("--interval") + 1], "30");
+  } finally { cleanup(value); }
+});
+
+/**
+ * A run whose provider root (runtime sol, no authorized route from it) failed
+ * exhausted while its dependent node is merely dependency-blocked.
+ *
+ * @param {{root: string}} value
+ * @returns {{contract: Record<string, unknown>, root: Record<string, unknown>, dependent: Record<string, unknown>}}
+ */
+function exhaustedRunWithBlockedDescendant(value) {
+  const runContract = fixture({
+    id: "initial-run",
+    campaignId: "campaign",
+    cwd: ".",
+    nodes: [
+      { id: "provider-root", type: "backend", taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }), gate: false, dependsOn: [] },
+      { id: "dependent", type: "backend", taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }), gate: false, dependsOn: ["provider-root"] },
+    ],
+  });
+  const runDir = join(value.root, ".runs", "initial-run");
+  mkdirSync(join(runDir, "nodes"), { recursive: true });
+  writeJsonAtomic(join(runDir, "contract.json"), runContract);
+  const root = { id: "provider-root", status: "exhausted", error: { code: "provider_exhausted", message: "sol is out of quota" }, runtime: { id: "sol" } };
+  const dependent = { id: "dependent", status: "blocked", blockedBy: ["provider-root"] };
+  writeJsonAtomic(join(runDir, "nodes", "dependent.json"), dependent);
+  writeJsonAtomic(join(runDir, "nodes", "provider-root.json"), root);
+  return { contract: runContract, root, dependent };
+}
+
+test("inspectRun reports the causal failure root regardless of node directory order", () => {
+  const value = tempRepo();
+  try {
+    const { contract, root, dependent } = exhaustedRunWithBlockedDescendant(value);
+    // The selection is pure: both readdir orders must resolve to the exhausted
+    // root, never to the dependency-blocked descendant.
+    assert.equal(causalFailureNode([dependent, root], contract)?.id, "provider-root");
+    assert.equal(causalFailureNode([root, dependent], contract)?.id, "provider-root");
+    const observed = /** @type {Record<string, unknown>} */ ((/** @type {Record<string, unknown>} */ ((/** @type {unknown[]} */ (campaignStatus(value.campaignPath).runs))[0])).observed);
+    const failedNode = /** @type {Record<string, unknown>} */ (observed.failedNode);
+    const error = /** @type {Record<string, unknown>} */ (observed.error);
+    assert.equal(failedNode.id, "provider-root");
+    assert.equal(observed.status, "exhausted");
+    assert.equal(error.code, "provider_exhausted");
+  } finally { cleanup(value); }
+});
+
+test("provider exhaustion with no authorized failover route is attention, never repair", async () => {
+  const value = tempRepo();
+  try {
+    exhaustedRunWithBlockedDescendant(value);
+    const status = await superviseCampaignOnce(value.campaignPath, { executor: async () => { throw new Error("no dispatch expected"); } });
+    const attention = /** @type {Record<string, unknown>} */ (status.attention);
+    assert.equal(status.status, "attention");
+    assert.equal(attention.code, "provider_exhausted_without_declared_failover");
+    assert.equal((/** @type {unknown[]} */ (status.runs)).length, 1);
   } finally { cleanup(value); }
 });
 

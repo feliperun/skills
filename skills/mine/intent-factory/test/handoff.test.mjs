@@ -28,12 +28,14 @@ function workerStdoutLog(runDir, nodeId = "build") {
 
 /**
  * Reopen the unknown_effect window left by a controller crash: withhold the
- * settlement and destroy the completed-turn proof so adoption cannot apply.
+ * settlement, the canonical worker-result file, and the completed-turn stream
+ * proof so adoption cannot apply.
  *
  * @param {string} runDir @param {string} invocationId @param {string} nodeId
  */
 function reopenCrashWindow(runDir, invocationId, nodeId = "build") {
   unlinkSync(join(runDir, "operations", `${invocationId}.settlement.json`));
+  rmSync(join(runDir, "results", `${nodeId}.json`), { force: true });
   const stdout = workerStdoutLog(runDir, nodeId);
   assert.ok(stdout, "worker stdout log is missing");
   writeFileSync(stdout, "");
