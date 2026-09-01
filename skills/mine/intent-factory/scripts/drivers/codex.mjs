@@ -1,6 +1,25 @@
 import { normalizeCodexResult, parseVersion, toml } from "./exec-jsonl.mjs";
 
 /**
+ * Bound the Codex harness preamble: a closed-packet worker or a read-only judge
+ * needs the shell and patch tools, not browser, computer-use, app, code-mode
+ * host or sub-agent tooling, MCP servers, or plugins. Measured on 2026-09-01
+ * with deepseek-v4-flash: 63,914 input tokens per trivial call with the
+ * ambient configuration, 12,653 with these overrides. They are emitted before
+ * the runtime's own `config` entries, so a contract can re-enable any of them.
+ */
+export const CODEX_PREAMBLE_OVERRIDES = Object.freeze([
+  "features.browser_use=false",
+  "features.browser_use_external=false",
+  "features.computer_use=false",
+  "features.apps=false",
+  "features.code_mode_host=false",
+  "features.multi_agent=false",
+  "mcp_servers={}",
+  "plugins={}",
+]);
+
+/**
  * @type {import("./index.mjs").DriverAdapter}
  */
 export const codexDriver = {
@@ -36,6 +55,7 @@ export const codexDriver = {
       ? ["exec", "resume", "--json"]
       : ["exec"];
     if (!continuationId) args.push("--json", "--sandbox", runtime.sandbox ?? "workspace-write");
+    for (const override of CODEX_PREAMBLE_OVERRIDES) args.push("-c", override);
     for (const [key, value] of Object.entries(runtime.config ?? {})) {
       args.push("-c", `${key}=${toml(value)}`);
     }

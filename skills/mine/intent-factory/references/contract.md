@@ -387,7 +387,15 @@ Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule
 (builds, tests, smoke scripts) needs `bypassPermissions`, because headless
 `acceptEdits` denies every non-trivial command and the worker can only return
 `blocked_context`. The default executable is `claude`; override it with
-`executable` or `INTENT_FACTORY_CLAUDE_BIN`. An agy runtime uses the
+`executable` or `INTENT_FACTORY_CLAUDE_BIN`. Claude-compatible adapters
+(`claude`, `glm`) bound the harness preamble on every invocation: no skills
+(`--disable-slash-commands`), no MCP servers (`--strict-mcp-config`), no
+settings files (`--setting-sources ""`; the explicit `--settings` that carries
+the tool-policy hooks still applies) and only the built-in tools named by the
+runtime's `tools` list (default `Read, Edit, Write, Bash, Glob, Grep`). With the
+ambient configuration a trivial glm-5.3 call cost 65,170 uncached input tokens;
+bounded, about 4,300 per turn. `--bare` is never used because it disables
+hooks and with them the mechanical tool policy. An agy runtime uses the
 installed `agy` CLI (or `INTENT_FACTORY_AGY_BIN`) and may set `printTimeout`; omit
 `reasoning` for models that do not accept `--effort`. A Codex runtime defaults
 to the `codex` binary (override with `executable` or `INTENT_FACTORY_CODEX_BIN`)
@@ -419,7 +427,13 @@ reporting, but neither monetary-budget enforcement, sandbox, nor permission
 negotiation.
 
 A Codex runtime may set `sandbox` to `read-only`, `workspace-write`, or
-`danger-full-access`; the default is `workspace-write`. Select the least
+`danger-full-access`; the default is `workspace-write`. The adapter also bounds
+the Codex preamble on every invocation by disabling browser, computer-use, app,
+code-mode host and sub-agent tooling, MCP servers and plugins
+(`CODEX_PREAMBLE_OVERRIDES` in `drivers/codex.mjs`), emitted before the
+runtime's own `config` entries so a contract can re-enable any of them. Measured
+with deepseek-v4-flash on 2026-09-01: 63,914 input tokens per trivial call with
+the ambient configuration, 12,653 bounded. Select the least
 privilege that completes the task. Package installation and other networked
 implementation work requires a sandbox whose environment permits network
 access; record that choice in the contract instead of relying on the caller's

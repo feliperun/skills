@@ -1,5 +1,6 @@
 import { normalizeClaudeResult, parseVersion } from "./exec-jsonl.mjs";
 import { hookSettings } from "../tool-policy-hook.mjs";
+import { claudePreambleArgs } from "./claude.mjs";
 
 /** Default Z.ai Anthropic-compatible endpoint serving GLM models. */
 export const GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic";
@@ -57,6 +58,7 @@ export const glmDriver = {
       "--verbose",
       "--permission-mode",
       runtime.permissionMode ?? "acceptEdits",
+      ...claudePreambleArgs(runtime),
     ];
     if (options.toolPolicy) args.push("--settings", JSON.stringify(hookSettings(options.toolPolicy)));
     if (runtime.reasoning) args.push("--effort", runtime.reasoning);

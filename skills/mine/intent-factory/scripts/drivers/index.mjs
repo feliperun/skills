@@ -44,7 +44,7 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string}|null}} ProviderEnvelope */
 
-/** @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime */
+/** @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime */
 
 /**
  * Mechanical worker tool policy sent to the provider boundary:

@@ -22,6 +22,8 @@ import {
   truncateToolOutput,
 } from "../scripts/drivers/exec-jsonl.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
+import { DEFAULT_CLAUDE_TOOLS } from "../scripts/drivers/claude.mjs";
+import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/drivers/codex.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
@@ -389,6 +391,12 @@ test("builds glm commands pinned to the Z.ai endpoint", () => {
       "--verbose",
       "--permission-mode",
       "acceptEdits",
+      "--disable-slash-commands",
+      "--strict-mcp-config",
+      "--setting-sources",
+      "",
+      "--tools",
+      "Read,Edit,Write,Bash,Glob,Grep",
       "--json-schema",
       JSON.stringify(JUDGE_SCHEMA),
     ]);
@@ -637,6 +645,33 @@ test("live session metrics expose only what each driver's events prove", () => {
   );
   assert.deepEqual(liveSessionMetrics("codex", "not json at all"), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "malformed input meters as zero");
   assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "unsupported drivers meter as zero");
+});
+
+test("the codex driver bounds the harness preamble before the runtime's own config overrides", () => {
+  const args = providerCommand({ driver: "codex", model: "m", config: { "features.apps": true } }, "work").args;
+  const pairs = [];
+  for (let index = 0; index < args.length; index += 1) if (args[index] === "-c") pairs.push(args[index + 1]);
+  for (const override of CODEX_PREAMBLE_OVERRIDES) assert.ok(pairs.includes(override), `${override} is emitted`);
+  assert.ok(pairs.indexOf("features.apps=false") < pairs.indexOf("features.apps=true"), "runtime config comes later and therefore wins");
+  const resumed = providerCommand({ driver: "codex", model: "m" }, "work", { continuationId: "thread-1" }).args;
+  assert.ok(resumed.includes("features.multi_agent=false"), "resumed sessions are bounded the same way");
+});
+
+test("claude-compatible drivers bound the harness preamble and accept a tools override", () => {
+  for (const runtime of [{ driver: "claude", model: "m" }, { driver: "glm", model: "glm-5.3[1m]" }]) {
+    const args = providerCommand(runtime, "work").args;
+    const sources = args.indexOf("--setting-sources");
+    assert.ok(args.includes("--disable-slash-commands"), `${runtime.driver} loads no skills`);
+    assert.ok(args.includes("--strict-mcp-config"), `${runtime.driver} loads no MCP servers`);
+    assert.equal(args[sources + 1], "", `${runtime.driver} loads no settings files`);
+    assert.deepEqual(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2), ["--tools", DEFAULT_CLAUDE_TOOLS.join(",")]);
+    assert.equal(args.includes("--bare"), false, "--bare would disable the hook surface that enforces the tool policy");
+    const custom = providerCommand({ ...runtime, tools: ["Read", "Bash"] }, "work").args;
+    assert.deepEqual(custom.slice(custom.indexOf("--tools"), custom.indexOf("--tools") + 2), ["--tools", "Read,Bash"]);
+    // The preamble flags precede the explicit hook settings, which still apply.
+    const policed = providerCommand(runtime, "work", { toolPolicy: { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES } }).args;
+    assert.ok(policed.indexOf("--setting-sources") < policed.indexOf("--settings"));
+  }
 });
 
 test("toolPolicy travels only the Claude-compatible hook settings boundary", () => {
