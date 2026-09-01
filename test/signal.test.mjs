@@ -9,6 +9,7 @@ import {
   syncAgentSignal,
 } from "../skills/mine/intent-factory/scripts/signal.mjs";
 import {
+  appendJournal,
   closeCampaign,
   initializeCampaign,
 } from "../skills/mine/intent-factory/scripts/campaign.mjs";
@@ -69,6 +70,13 @@ test("removes the block when everything is terminal", () => {
   const campaign = initializeCampaign(runsDir, { campaignId: "demo", goal: "g" });
   writeRunNodes(runsDir, "run-a", ["done", "failed"]);
   syncAgentSignal(runsDir);
+  appendJournal(campaign.path, {
+    type: "retrospective",
+    eventId: "demo-retro",
+    at: new Date().toISOString(),
+    sessionId: "test",
+    text: "Retrospective: done.",
+  });
   closeCampaign(campaign.path);
   writeRunNodes(runsDir, "run-a", ["done", "done"]);
   assert.equal(syncAgentSignal(runsDir), true);

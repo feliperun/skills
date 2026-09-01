@@ -268,6 +268,14 @@ test("campaigns close and implicit discovery considers only active campaigns", (
   const runsDir = join(directory, ".runs");
   initializeCampaign(runsDir, { campaignId: "alpha", goal: "First" });
   const beta = initializeCampaign(runsDir, { campaignId: "beta", goal: "Second" });
+  assert.throws(() => closeCampaign(beta.path), /no recorded retrospective/u);
+  appendJournal(beta.path, {
+    type: "retrospective",
+    eventId: "beta-retro",
+    at: new Date().toISOString(),
+    sessionId: "codex-1",
+    text: "Retrospective: shipped Second; no follow-ups.",
+  });
   const closed = closeCampaign(beta.path);
   assert.equal(closed.campaign.status, "closed");
   assert.equal(resolveCampaign(runsDir).campaign.id, "alpha");
@@ -714,6 +722,14 @@ test("campaign CLI lists, closes, and resolves questions", () => {
   assert.equal(show.status, 0, show.stderr);
   assert.doesNotMatch(show.stdout, /Is the handoff bounded\?/u);
 
+  const closeWithoutRetro = spawnSync(process.execPath, [runner, "campaign", "close", "beta", "--cwd", directory], { encoding: "utf8" });
+  assert.notEqual(closeWithoutRetro.status, 0);
+  assert.match(closeWithoutRetro.stderr, /no recorded retrospective/u);
+  const retro = spawnSync(process.execPath, [
+    runner, "campaign", "note", "beta", "--cwd", directory,
+    "--session-id", "codex-1", "--kind", "retrospective", "--text", "Retrospective: shipped B; improvements recorded.",
+  ], { encoding: "utf8" });
+  assert.equal(retro.status, 0, retro.stderr);
   const closed = spawnSync(process.execPath, [runner, "campaign", "close", "beta", "--cwd", directory], { encoding: "utf8" });
   assert.equal(closed.status, 0, closed.stderr);
   assert.match(closed.stdout, /beta closed/u);

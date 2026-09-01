@@ -43,6 +43,7 @@ const JOURNAL_TYPES = new Set([
   "next",
   "open-question",
   "question.resolved",
+  "retrospective",
 ]);
 
 const SESSION_REQUIRED_TYPES = new Set([
@@ -55,6 +56,7 @@ const SESSION_REQUIRED_TYPES = new Set([
   "next",
   "open-question",
   "question.resolved",
+  "retrospective",
 ]);
 
 /** @typedef {Record<string, unknown>} JsonObject */
@@ -78,6 +80,7 @@ const ENTRY_SHAPES = {
   next: ["at", "type", "eventId", "sessionId", "text"],
   "open-question": ["at", "type", "eventId", "sessionId", "questionId", "text"],
   "question.resolved": ["at", "type", "eventId", "sessionId", "questionId", "text"],
+  retrospective: ["at", "type", "eventId", "sessionId", "text"],
 };
 
 /**
@@ -230,6 +233,9 @@ export function closeCampaign(campaignPath, { at = new Date().toISOString(), eve
   requireTimestamp(at, "at");
   const campaign = readCampaign(campaignPath);
   if (campaign.status === "closed") throw new Error(`campaign already closed: ${campaign.id}`);
+  if (!readJournalForDedupe(campaignPath).some((entry) => entry.type === "retrospective")) {
+    throw new Error(`campaign ${campaign.id} has no recorded retrospective; record one with note --kind retrospective before close`);
+  }
   const closed = /** @type {Campaign} */ ({ ...campaign, status: "closed", closedAt: at, updatedAt: at });
   writeJsonAtomic(join(campaignPath, CAMPAIGN_FILE), closed);
   appendJournal(campaignPath, { type: "campaign.closed", at, eventId });
@@ -611,7 +617,7 @@ function foldEntries(state, entries) {
     else if (entry.type === "decision" && entry.decisionId !== undefined) next.decisions = setCapped(next.decisions, entry.decisionId, entry, next.evicted, "decisions");
     else if (entry.type === "supersede" && entry.supersedes !== undefined) delete next.decisions[entry.supersedes];
     else if (entry.type === "constraint") next.constraints = pushCapped(next.constraints, entry, "constraints", next.evicted);
-    else if (entry.type === "outcome") next.outcomes = pushCapped(next.outcomes, entry, "outcomes", next.evicted);
+    else if (entry.type === "outcome" || entry.type === "retrospective") next.outcomes = pushCapped(next.outcomes, entry, "outcomes", next.evicted);
     else if (entry.type === "next") next.next = entry;
     else if (entry.type === "open-question" && entry.questionId !== undefined) next.questions = setCapped(next.questions, entry.questionId, entry, next.evicted, "questions");
     else if (entry.type === "question.resolved" && entry.questionId !== undefined) delete next.questions[entry.questionId];

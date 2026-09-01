@@ -29,6 +29,7 @@ const NOTE_KINDS = new Set([
   "outcome",
   "next",
   "open-question",
+  "retrospective",
 ]);
 
 /** Flags that only apply to a single note kind; rejected for every other kind. */

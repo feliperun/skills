@@ -134,6 +134,10 @@ the public contract must not depend on them.
    answered. `campaign close <campaign> --cwd <repo>` marks the campaign
    terminal after the objective ships; a closed campaign rejects further
    attach/note/resolve writes but remains inspectable via `show` and `list`.
+   `close` refuses until a retrospective is recorded with
+   `campaign note <campaign> --kind retrospective --text <summary>`; the
+   end-of-campaign retrospective is mandatory and should name the concrete
+   improvements the next campaign adopts.
 
    The session-level layer is the cheap, disposable complement: flush
    material session events into the campaign while the orchestrator context

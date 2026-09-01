@@ -651,7 +651,7 @@ preflight probes strip the notification executable from their environment.
 node <skill-dir>/scripts/runner.mjs campaign list [--cwd <dir>]
 node <skill-dir>/scripts/runner.mjs campaign init <campaign-id> --cwd <dir> --goal "Goal"
 node <skill-dir>/scripts/runner.mjs campaign attach <campaign-id> --cwd <dir> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
-node <skill-dir>/scripts/runner.mjs campaign note <campaign-id> --cwd <dir> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
+node <skill-dir>/scripts/runner.mjs campaign note <campaign-id> --cwd <dir> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question|retrospective> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
 node <skill-dir>/scripts/runner.mjs campaign resolve <campaign-id> --cwd <dir> --session-id <session-id> --question-id <id> --text <answer>
 node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --cursor session-<session-id>
 node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --since <event-id>
@@ -664,6 +664,10 @@ single active one instead of guessing. `resolve` answers an `open-question`
 journal event and removes it from the handoff's open-questions section.
 `close` marks the campaign terminal; a closed campaign rejects further
 attach/note/resolve writes but remains inspectable via `show` and `list`.
+`close` refuses until a `retrospective` journal event exists: every campaign
+ends with a recorded retrospective (`note --kind retrospective`) that captures
+what to improve, so the autonomous completion path leaves the campaign active
+until one is recorded.
 `watch --cursor` returns ordered unseen notification events and atomically
 advances a durable consumer position; invoking it again returns no events until
 new material progress exists. `watch --since` is stateless and returns events
