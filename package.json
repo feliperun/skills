@@ -14,7 +14,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "for f in bin/*.mjs .claude/hooks/*.mjs skills/mine/intent-factory/scripts/*.mjs skills/mine/intent-factory/scripts/drivers/*.mjs skills/mine/intent-factory/test/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
+    "check": "for f in bin/*.mjs .claude/hooks/*.mjs skills/mine/intent-factory/scripts/*.mjs skills/mine/intent-factory/scripts/drivers/*.mjs skills/mine/intent-factory/scripts/notify/*.mjs skills/mine/intent-factory/test/*.mjs test/*.mjs; do node --check \"$f\" || exit 1; done",
     "typecheck": "tsc",
     "test": "node --test skills/mine/intent-factory/scripts/runner.test.mjs skills/mine/intent-factory/test/*.mjs test/*.mjs",
     "prepare": "husky"
