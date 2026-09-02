@@ -2629,7 +2629,7 @@ test("a wall-clock kill persists usage backfilled from the transcript", async ()
     timeoutSec: 1,
     nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood tokens" }), gate: false }],
   }));
-  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  const result = await withFakeCodex(directory, "token-flood-timeout", () => runContract(path));
   const state = nodeState(result);
   assert.equal(state.status, "exhausted");
   assert.equal(state.error?.code, "wall_clock_timeout");

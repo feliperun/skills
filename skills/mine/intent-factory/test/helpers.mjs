@@ -304,6 +304,15 @@ if (process.argv.includes("--version")) {
       let timer = setTimeout(step, 5);
       return;
     }
+    else if (mode === "token-flood-timeout") {
+      // One cumulative turn.completed usage event, then silence while alive:
+      // the wall-clock kill lands before 80 turns can trigger rotation.
+      // No SIGTERM handler: the timeout kill surfaces as a signaled death and
+      // the transcript backfills the observed usage.
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 600, output_tokens: 1 } }));
+      setTimeout(() => {}, 60_000);
+      return;
+    }
     else if (mode === "heartbeat") setInterval(() => console.error("working"), 10);
     else if (mode === "rollout-budget") {
       console.log(JSON.stringify({type:"turn.failed",error:{message:"shared rollout token budget exhausted"}}));
