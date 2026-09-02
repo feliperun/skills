@@ -111,6 +111,13 @@ progress. The outbox retains at most 100 events. If all 100 remain undelivered
 terminal events, new events are rejected with a warning; `watch` reads do not
 acknowledge transport delivery or free capacity.
 
+These progress records are human-channel feedback only. Outbox coalescing and
+retention do not authorize a control-session wake: the factory never wakes the
+session for progress. A session wake is reserved for `requiresUser: true`
+(blocking question, exhausted failover or campaign completion); `campaign
+sync` is user initiated. Ambient liveness is rendered from the derived
+`heartbeat.json` artifact described by Addendum 01, without API tokens.
+
 Set `INTENT_FACTORY_NOTIFY_BIN` to an executable that accepts one JSON event on
 stdin and exits zero on successful delivery. `campaign drain` retries pending
 events. At-least-once delivery is expected: a transport may receive an event

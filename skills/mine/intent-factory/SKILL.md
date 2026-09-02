@@ -105,11 +105,13 @@ Claude session from that capsule; the reverse handoff follows the same rule.
 No handoff is valid from an executing or unknown-effect checkpoint.
 
 Notifications are controller-only by construction: only the controller and
-supervisor code paths can enqueue bounded `node.terminal`, `run.terminal`, or
-attention events into the campaign outbox and drain them through the
-configured generic executable; the provider protocol carries no notification
-surface, and live preflight probes strip the notification executable from
-their environment.
+supervisor code paths can enqueue bounded human-channel events into the
+campaign outbox and drain them through the configured generic executable; the
+provider protocol carries no notification surface, and live preflight probes
+strip the notification executable from their environment. Progress never
+wakes the control session. Ambient status and system/Ford notifications are
+for the human; the session is involved only by `requiresUser: true`, and
+`campaign sync` is always user initiated.
 
 This release ends at the continuity kernel. Service-driver adapters,
 service-specific reconciliation, and a transactional store are later phases;
