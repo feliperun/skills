@@ -152,6 +152,14 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** @param {string} runDir */
+function assertRunMutable(runDir) {
+  if (!existsSync(join(runDir, "incident-freeze.json"))) return;
+  const error = /** @type {Error & {code: string}} */ (new Error("incident_frozen: run is frozen as immutable incident evidence"));
+  error.code = "incident_frozen";
+  throw error;
+}
+
 /** @param {string} campaignPath */
 async function drainNotificationsSafely(campaignPath) {
   try {
@@ -293,6 +301,7 @@ export async function runContract(contractPath) {
  */
 export async function resumeRun(runDirPath) {
   const runDir = resolve(runDirPath);
+  assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   assertCostCapability(contract);
@@ -5041,6 +5050,7 @@ function serializableContract(contract) {
  */
 export async function cancelRun(runDirPath) {
   const runDir = resolve(runDirPath);
+  assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   writeJsonAtomic(join(runDir, "cancel.request.json"), { requestedAt: new Date().toISOString(), pid: process.pid });
@@ -6172,6 +6182,7 @@ function hasSettledCheckpoint(runDir, state) {
  */
 export async function handoffRun(target, values = {}) {
   const runDir = resolve(target);
+  assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
   if (!existsSync(contractPath)) throw new Error(`not a run directory: ${runDir}`);
   const nodeId = typeof values.node === "string" ? values.node : typeof values.nodeId === "string" ? values.nodeId : "";

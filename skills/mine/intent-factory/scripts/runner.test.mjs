@@ -420,6 +420,23 @@ test("status --json and report --json emit stable machine-readable output", asyn
   assert.equal(reportPayload.nodes[0].revisions, 0);
 });
 
+test("incident freeze rejects resume mutations while status and report remain readable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-incident-freeze-"));
+  const path = writeContract(directory, fixture({ id: "incident-freeze-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  writeFileSync(join(runDir, "incident-freeze.json"), "{}\n");
+  await assert.rejects(
+    () => resumeRun(runDir),
+    (error) => error instanceof Error && /** @type {{code?: string}} */ (error).code === "incident_frozen",
+  );
+  const cli = fileURLToPath(new URL("./runner.mjs", import.meta.url));
+  for (const command of ["status", "report"]) {
+    const result = spawnSync(process.execPath, [cli, command, "--json", runDir], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).schemaVersion, 1);
+  }
+});
+
 test("cancel subcommand terminates a stale running node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-cancel-cli-"));
   const path = writeContract(directory, fixture({
