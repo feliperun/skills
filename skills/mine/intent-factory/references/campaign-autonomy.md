@@ -96,6 +96,23 @@ run or resolve the campaign through the normal control surface.
 - Notification delivery is advisory. A missing, failing, or unavailable
   notification transport never changes the campaign outcome.
 
+## Budget governance
+
+Per-node token budgets are cumulative weighted input budgets, not context-window
+limits. New contracts must carry a versioned `budgetProfile`; the controller
+derives and persists a `budgetDecision` from the profile, packet/preamble
+measurement, runtime capacity, remaining phase/campaign allowance and reserves
+for pending nodes and judges. A literal per-node number without that provenance
+is invalid. Budget extension is granted only from unused allowance and only to
+a node with observed progress.
+
+When a budget boundary is reached, the controller activates one predeclared
+continuation segment with the same packet hash, write scope and verification.
+If none is authorized, it records attention and updates heartbeat and human
+notification within one supervisor interval. Provider failover is used only
+for provider-reported exhaustion; a local budget stop never silently changes
+provider, invents a subnode or waits without liveness evidence.
+
 ## Notifications and progress
 
 Material node transitions are appended as `campaign.progress`; terminal

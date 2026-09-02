@@ -113,6 +113,14 @@ wakes the control session. Ambient status and system/Ford notifications are
 for the human; the session is involved only by `requiresUser: true`, and
 `campaign sync` is always user initiated.
 
+Per-node token budgets are cumulative weighted input budgets, not context-window
+limits. New contracts require a versioned, reproducible budget profile and
+reserve allowance for pending nodes and judges. A budget boundary may activate
+only a predeclared continuation with the same packet hash and write scope;
+otherwise it must become visible attention with heartbeat and human evidence
+within one supervisor interval. The factory must never sit silently on a
+budget stop.
+
 This release ends at the continuity kernel. Service-driver adapters,
 service-specific reconciliation, and a transactional store are later phases;
 the public contract must not depend on them.
