@@ -10,6 +10,7 @@ import {
   campaignDir,
   closeCampaign,
   discoverCampaigns,
+  HANDOFF_FILE,
   HANDOFF_BYTES,
   HANDOFF_LIMIT,
   JOURNAL_TEXT_BYTES,
@@ -317,6 +318,50 @@ test("journal appends are idempotent by event id", () => {
   assert.equal(journal.filter((entry) => entry.type === "intent").length, 1);
   const handoff = renderHandoff(created.path, runsDir);
   assert.equal(handoff.match(/Material intent/gu)?.length ?? 0, 1);
+});
+
+test("liveness journal entries validate, dedupe by event id and stay out of the projection and handoff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-campaign-liveness-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "amb", goal: "Prove ambient facts stay out of the handoff" });
+  const at = new Date().toISOString();
+  const fact = {
+    type: "liveness",
+    eventId: "live-1",
+    at,
+    campaignId: "amb",
+    runId: "run-1",
+    nodeId: "node-1",
+    phase: "P2",
+    checkpointsDone: 3,
+    checkpointsTotal: 7,
+    runtime: "codex",
+    state: "running",
+    weightedUsed: 2_340_112,
+    weightedCap: 6_000_000,
+    lastProgressAt: at,
+    attention: null,
+  };
+  assert.doesNotThrow(() => validateJournalEntry(fact));
+  const first = appendJournal(created.path, fact);
+  const second = appendJournal(created.path, { ...fact, eventId: "live-1" });
+  assert.equal(first.deduplicated, false);
+  assert.equal(second.deduplicated, true);
+  const journal = readJournal(created.path);
+  assert.equal(journal.filter((entry) => entry.type === "liveness").length, 1);
+  assert.throws(
+    () => appendJournal(created.path, { ...fact, eventId: "live-2", extra: "not allowed" }),
+    (error) => error instanceof TypeError && /unexpected field extra/u.test(error.message),
+  );
+  appendJournal(created.path, { type: "intent", eventId: "i-1", at, sessionId: "codex-1", text: "Continue after liveness" });
+  const handoff = renderHandoff(created.path, runsDir);
+  assert.ok(existsSync(join(created.path, PROJECTION_FILE)));
+  const projection = JSON.parse(readFileSync(join(created.path, PROJECTION_FILE), "utf8"));
+  assert.doesNotMatch(JSON.stringify(projection.projection), /live-1|node-1|weightedUsed/u);
+  assert.match(handoff, /Continue after liveness/u);
+  assert.doesNotMatch(handoff, /live-1|node-1|weightedUsed/u);
+  const handoffFile = readFileSync(join(created.path, HANDOFF_FILE), "utf8");
+  assert.doesNotMatch(handoffFile, /live-1|node-1|weightedUsed/u);
 });
 
 test("handoff projection recovers from deletion and corruption", () => {

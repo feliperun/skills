@@ -13,6 +13,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic, writeTextAtomic } from "./store.mjs";
+import { validateLivenessFact } from "./heartbeat.mjs";
 
 export const CAMPAIGN_DIR_NAME = "campaigns";
 export const CAMPAIGN_FILE = "campaign.json";
@@ -44,6 +45,7 @@ const JOURNAL_TYPES = new Set([
   "open-question",
   "question.resolved",
   "retrospective",
+  "liveness",
 ]);
 
 const SESSION_REQUIRED_TYPES = new Set([
@@ -61,7 +63,7 @@ const SESSION_REQUIRED_TYPES = new Set([
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {{id: string, goal: string, status: "active"|"closed", linkedRunIds: string[], createdAt: string, updatedAt: string, closedAt?: string}} Campaign */
-/** @typedef {{type: string, eventId: string, at: string, sessionId?: string, text?: string, tool?: string, transcript?: string|null, transcriptUnavailable?: boolean, format?: string|null, cursor?: string|null, decisionId?: string, supersedes?: string, runId?: string, questionId?: string}} JournalEntry */
+/** @typedef {{type: string, eventId: string, at: string, sessionId?: string, text?: string, tool?: string, transcript?: string|null, transcriptUnavailable?: boolean, format?: string|null, cursor?: string|null, decisionId?: string, supersedes?: string, runId?: string, questionId?: string, campaignId?: string, nodeId?: string|null, phase?: string, checkpointsDone?: number, checkpointsTotal?: number, runtime?: string|null, state?: string, weightedUsed?: number, weightedCap?: number, lastProgressAt?: string, attention?: string|null}} JournalEntry */
 /** @typedef {{updatedAt: string|null, decisions: Record<string, JournalEntry>, questions: Record<string, JournalEntry>, constraints: JournalEntry[], intents: JournalEntry[], outcomes: JournalEntry[], sessions: JournalEntry[], next: JournalEntry|null, evicted: Record<string, number>}} Projection */
 /** @typedef {{cursor: number, byte: number, size: number, projection: Projection}} ProjectionRecord */
 /** @typedef {{id: string, exists: boolean, total: number, summary: string, attention: {id: string, status: string, note: string}[], unreadable: string|null}} RunSummary */
@@ -81,6 +83,7 @@ const ENTRY_SHAPES = {
   "open-question": ["at", "type", "eventId", "sessionId", "questionId", "text"],
   "question.resolved": ["at", "type", "eventId", "sessionId", "questionId", "text"],
   retrospective: ["at", "type", "eventId", "sessionId", "text"],
+  liveness: ["at", "type", "eventId", "campaignId", "runId", "nodeId", "phase", "checkpointsDone", "checkpointsTotal", "runtime", "state", "weightedUsed", "weightedCap", "lastProgressAt", "attention"],
 };
 
 /**
@@ -367,6 +370,10 @@ export function validateJournalEntry(entry) {
   if (SESSION_REQUIRED_TYPES.has(type)) {
     requireText(record.sessionId, "entry.sessionId");
   }
+  if (type === "liveness") {
+    validateLivenessFact(record);
+    return;
+  }
   if (type === "session.attached") return validateSessionEntry(record);
   if (type === "run.registered") {
     requireText(record.runId, "entry.runId");
@@ -611,6 +618,7 @@ function foldEntries(state, entries) {
     evicted: { ...state.evicted },
   };
   for (const entry of entries) {
+    if (entry.type === "liveness") continue;
     next.updatedAt = entry.at;
     if (entry.type === "session.attached") next.sessions = pushCapped(next.sessions, entry, "sessions", next.evicted);
     else if (entry.type === "intent") next.intents = pushCapped(next.intents, entry, "intents", next.evicted);
