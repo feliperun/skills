@@ -359,9 +359,22 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
       break;
     }
     if (transition.action === "repair") {
-      const node = observed.failedNode;
+      const node = observed.failedNode && typeof observed.failedNode === "object"
+        ? /** @type {JsonObject} */ (observed.failedNode)
+        : null;
       if (!node) {
         setAttention(campaignPath, state, "invalid_state", `${record.id}: repair has no failed node evidence`);
+        break;
+      }
+      const observedContract = observed.contract && typeof observed.contract === "object"
+        ? /** @type {JsonObject} */ (observed.contract)
+        : null;
+      const observedNodes = Array.isArray(observedContract?.nodes) ? /** @type {JsonObject[]} */ (observedContract.nodes) : [];
+      const sourceNode = observedNodes.length
+        ? observedNodes.find((candidate) => candidate.id === node.id)
+        : null;
+      if (!sourceNode?.budgetProfile) {
+        setAttention(campaignPath, state, "budget_provenance_missing", `${record.id}:${String(node.id)} has no budgetProfile for a bounded repair`);
         break;
       }
       const created = createRepairContract(campaignPath, plan, state, record, /** @type {JsonObject} */ (node), observed);
@@ -480,6 +493,7 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
     : allowed[0];
   const usagePolicy = boundedUsagePolicy(source.usagePolicy, plan.authority.maxInputTokens);
   const sourceNode = source.nodes.find((candidate) => candidate.id === failedNode.id);
+  if (!sourceNode?.budgetProfile) throw new Error("budget_provenance_missing: source node has no budgetProfile for a bounded repair");
   const repairInputTokens = Math.min(plan.authority.maxInputTokens, sourceNode?.maxInputTokens ?? plan.authority.maxInputTokens);
   const repairCostUsd = plan.authority.maxCostUsd === null
     ? sourceNode?.maxCostUsd ?? source.maxCostUsd
@@ -528,6 +542,8 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
       definitionOfDone: ["The recorded failure is repaired", "Only the preauthorized verification passes"],
       gate: { enabled: false },
       maxInputTokens: repairInputTokens,
+      budgetProfile: sourceNode.budgetProfile,
+      progressPolicy: sourceNode.progressPolicy,
       maxCostUsd: repairCostUsd,
     }],
     sourceIdentity: { kind: "contract", id: repairId, campaignId: plan.campaignId },

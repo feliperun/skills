@@ -41,6 +41,57 @@ function nodeState(result, id = "build") {
   return state;
 }
 
+function budgetProfile(overrides = {}) {
+  return {
+    estimatedWeightedInputTokens: 500,
+    estimatedTurns: 2,
+    contextWindowTokens: 10_000,
+    safetyFraction: 0.75,
+    minimumSegmentTokens: 100,
+    growthIncrementTokens: 100,
+    preambleBytes: 400,
+    tokenizerEstimate: { bytes: 4, tokens: 1, source: "runner test measurement" },
+    continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
+    ...overrides,
+  };
+}
+
+/** @param {string} directory */
+function budgetContinuationCodex(directory) {
+  const executable = join(directory, "budget-continuation-codex.mjs");
+  const calls = join(directory, ".runs", "budget-continuation-calls.jsonl");
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) console.log("budget-continuation-codex 1.0.0");
+else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => { input += chunk; });
+  process.stdin.on("end", () => {
+    const continuation = input.startsWith("Continue node build in a fresh provider session");
+    appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ continuation }) + "\\n");
+    console.log(JSON.stringify({ type: "thread.started", thread_id: continuation ? "segment-2" : "segment-1" }));
+    if (continuation) {
+      const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
+      const result = JSON.stringify({ status: "done", summary: "continued exactly once", changedFiles: ["README.md"], verification: [], artifacts: [], missingContext: [] });
+      if (resultPath) writeFileSync(resultPath, result);
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1 } }));
+      return;
+    }
+    writeFileSync("README.md", "budget progress\\n");
+    let turns = 0;
+    setInterval(() => {
+      turns += 1;
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 20, output_tokens: 1 } }));
+    }, 30);
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return { executable, calls };
+}
+
 /** @param {import("node:child_process").ChildProcess} child @returns {number} */
 function childPid(child) {
   if (child.pid === undefined) throw new Error("child pid unavailable");
@@ -2636,7 +2687,7 @@ test("a wall-clock kill persists usage backfilled from the transcript", async ()
   assert.ok((state.usage?.inputTokens ?? 0) > 0, "killed worker reports its observed input tokens");
 });
 
-test("per-node maxInputTokens terminates an active worker over its cap", async () => {
+test("budget attention D36 terminates an active worker at its derived cap", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-node-cap-"));
   const path = writeContract(directory, fixture({
     id: "node-cap-run",
@@ -2647,14 +2698,85 @@ test("per-node maxInputTokens terminates an active worker over its cap", async (
       type: "backend",
       taskPacket: packet({ objective: "Flood tokens" }),
       maxInputTokens: 500,
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
       gate: false,
     }],
   }));
   const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "token_budget_exceeded");
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "budget_attention");
+  assert.equal(state.budgetDecision?.initialAllocationTokens, 500);
   assert.ok((state.usage?.inputTokens ?? 0) >= 500, "usage observed before the kill is persisted");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "budget_attention"));
+});
+
+test("budget failover boundary D37 never routes a local budget stop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-budget-no-failover-"));
+  const path = writeContract(directory, fixture({
+    id: "budget-no-failover-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: {
+      primary: { driver: "codex", model: "primary" },
+      backup: { driver: "codex", model: "backup" },
+    },
+    runtimeRules: [{ match: { currentRuntime: "primary", status: "exhausted" }, runtime: "backup" }],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      runtime: "primary",
+      taskPacket: packet({ objective: "Flood tokens locally" }),
+      maxInputTokens: 500,
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked");
+  assert.equal(state.error?.code, "budget_attention");
+  assert.deepEqual(state.invocations?.map(invocation => invocation.runtimeId), ["primary"]);
+  assert.equal(state.routing?.history.length, 0);
+});
+
+test("budget continuation D35 checkpoints and activates one predeclared segment", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-budget-continuation-"));
+  const provider = budgetContinuationCodex(directory);
+  const path = writeContract(directory, fixture({
+    id: "budget-continuation-run",
+    pollIntervalMs: 5,
+    timeoutSec: 5,
+    runtimes: { worker: { driver: "codex", model: "budget-test", executable: provider.executable } },
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Continue at the declared budget boundary" }),
+      maxInputTokens: 1_000,
+      budgetProfile: budgetProfile({
+        estimatedWeightedInputTokens: 500,
+        continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 500 },
+      }),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 100 },
+      gate: false,
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual(state.budgetState?.activatedSegments, [1, 2]);
+  assert.equal(state.budgetState?.pendingSegment, null);
+  const calls = readFileSync(provider.calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(calls.map(call => call.continuation), [false, true]);
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(events.filter(event => event.budgetAction?.type === "continuation_planned").length, 1);
+  assert.equal(events.filter(event => event.budgetAction?.type === "continuation_activated").length, 1);
 });
 
 test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {

@@ -31,6 +31,20 @@ import { delay, fixture, packet } from "./helpers.mjs";
 const runnerPath = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 const sourceRoot = dirname(dirname(runnerPath));
 
+function budgetProfile() {
+  return {
+    estimatedWeightedInputTokens: 50,
+    estimatedTurns: 2,
+    contextWindowTokens: 1_000,
+    safetyFraction: 0.75,
+    minimumSegmentTokens: 10,
+    growthIncrementTokens: 10,
+    preambleBytes: 40,
+    tokenizerEstimate: { bytes: 4, tokens: 1, source: "campaign test measurement" },
+    continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
+  };
+}
+
 function tempRepo(runnerCode = "process.exit(0);\n") {
   const root = mkdtempSync(join(tmpdir(), "campaign-autonomy-"));
   mkdirSync(join(root, "repair-root"), { recursive: true });
@@ -45,7 +59,14 @@ function tempRepo(runnerCode = "process.exit(0);\n") {
     id: "initial-run",
     campaignId: "campaign",
     cwd: ".",
-    nodes: [{ id: "build", type: "backend", taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }), gate: false }],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }),
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 1, maxDryHeartbeats: 3 },
+      gate: false,
+    }],
   }));
   const created = initializeCampaign(join(root, ".runs"), { campaignId: "campaign", goal: "Test campaign autonomy" });
   const configured = configureCampaign(created.path, {

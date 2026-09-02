@@ -91,6 +91,13 @@ import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs
 import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
+import {
+  canonicalBudgetHash,
+  deriveBudgetDecision,
+  grantBudgetExtension,
+  initialBudgetState,
+  planBudgetContinuation,
+} from "./budget.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").ValidatedNode} ValidatedNode */
@@ -262,6 +269,8 @@ export async function runContract(contractPath) {
         error: null,
         routing: { history: [], currentOverride: null },
         progress: null,
+        budgetDecision: null,
+        budgetState: null,
         invocations: [],
         executionOverrides: [],
       };
@@ -825,6 +834,15 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         { runId: basename(runDir), nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
         `${basename(runDir)}:${state.id}`,
       );
+      if (state.phase === "budget" && state.error?.code === "budget_attention") {
+        await notifyCampaign(
+          campaign.path,
+          "run.attention",
+          `${basename(runDir)}:${state.id}:budget_attention`,
+          `${state.id} needs budget attention: ${excerpt(state.error.message)}`,
+          { runId: basename(runDir), nodeId: state.id, code: "budget_attention" },
+        );
+      }
     }
     const fingerprint = statesFingerprint(states);
     if (fingerprint === notificationFingerprint) return;
@@ -941,6 +959,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
             startJudge(contract, node, state, runDir, running, state.result, lease);
             continue;
           }
+          if (!ensureBudgetDecision(contract, node, state, states, campaign.path, runDir, lease)) continue;
           state.attempt += 1;
           const prompt = state.gate?.verdict === "fail" ? retryPrompt(node, state.gate) : node.prompt;
           startWorker(contract, node, state, runDir, running, prompt, lease);
@@ -1227,6 +1246,14 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   // A commissioned rotation handoff outranks every continuation: the fresh
   // session must never resume (nor require) the rotated provider session.
   if (role === "worker") {
+    if (state.budgetState?.pendingSegment) {
+      assertBudgetContinuationIdentity(node, state);
+      return {
+        prompt: capsuleHandoffPrompt(contract, node, state, runDir),
+        continuationId: null,
+        mode: "fresh",
+      };
+    }
     const rotation = pendingRotationHandoff(state);
     if (rotation) {
       consumeRotationHandoff(state, rotation.at);
@@ -1480,10 +1507,14 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
           runtimeFingerprint: fingerprintRuntime(runtime),
           prompt: effectivePrompt,
         });
+        activateBudgetContinuation(runDir, node, state, lease);
       },
       onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
       onProgress: () => writeNode(runDir, state, lease),
     });
+    if (state.budgetState && state.budgetState.lastGrantedProgressSignature === null && state.progress?.heartbeatCount === 0) {
+      state.budgetState.lastGrantedProgressSignature = state.progress.progressSignature ?? null;
+    }
     transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lease);
     running.set(node.id, job);
   } catch (error) {
@@ -2814,6 +2845,35 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     await recordCampaignUsage(campaignPath, contract.usagePolicy, state.invocations.find((invocation) => invocation.id === job.invocation.id));
     state.usage = invocationUsage(state);
     state.costUsd = invocationCost(state);
+    if (job.budgetStop === "node" && state.budgetDecision && state.budgetState) {
+      if (state.budgetState.pendingSegment) {
+        try {
+          assertBudgetContinuationIdentity(job.node, state);
+          persistNodeCapsule(contract, job.node, state, runDir, lease, `continue predeclared budget segment ${state.budgetState.pendingSegment.segment}`);
+          transition(runDir, state, "pending", {
+            phase: "worker",
+            error: null,
+            blockedBy: [],
+            usage: state.usage,
+          }, lease);
+        } catch (error) {
+          state.budgetState.status = "attention";
+          transition(runDir, state, "blocked", {
+            phase: "budget",
+            error: { code: "budget_attention", message: excerpt(errorMessage(error)) },
+            usage: state.usage,
+          }, lease);
+        }
+      } else {
+        state.budgetState.status = "attention";
+        transition(runDir, state, "blocked", {
+          phase: "budget",
+          error: { code: "budget_attention", message: "derived node budget ended without an authorized progress-backed continuation" },
+          usage: state.usage,
+        }, lease);
+      }
+      continue;
+    }
     // A rotation-terminated worker settles its scope above and hands over to
     // the one-turn rotation handoff; a worker that finished anyway keeps the
     // normal completion path, so rotation never discards accepted work.
@@ -3522,6 +3582,122 @@ function weightedInput(usage, cacheReadWeight) {
   return Math.round(((usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0) * cacheReadWeight) * 1000) / 1000;
 }
 
+/** @param {ValidatedNode} node */
+function budgetIdentity(node) {
+  return {
+    packetHash: node.packetHash,
+    scopeHash: canonicalBudgetHash({ writeFiles: node.taskPacket.writeFiles ?? [], writeRoots: node.taskPacket.writeRoots ?? [] }),
+    verificationHash: canonicalBudgetHash(node.taskPacket.verification),
+  };
+}
+
+/**
+ * Persist the pure policy result before the first provider dispatch.
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
+ * @param {string} runDir
+ * @param {LeaseHandle} lease
+ */
+function ensureBudgetDecision(contract, node, state, states, campaignPath, runDir, lease) {
+  if (!node.budgetProfile) return true;
+  if (state.budgetDecision && state.budgetState) {
+    try {
+      assertBudgetContinuationIdentity(node, state);
+      return state.budgetDecision.status === "allocated" && state.budgetState.status !== "attention";
+    } catch (error) {
+      state.budgetState.status = "attention";
+      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_attention", message: excerpt(errorMessage(error)) } }, lease);
+      return false;
+    }
+  }
+  const weight = cacheReadWeightOf(contract);
+  const ledger = campaignUsage(campaignPath, contract.usagePolicy);
+  const campaignSpend = contract.usagePolicy === false
+    ? [...states.values()].reduce((total, item) => total + weightedInput(item.usage, weight), 0)
+    : ledger.budgetInputTokens;
+  const phaseSpend = contract.usagePolicy === false
+    ? contract.nodes.reduce((total, candidate) => candidate.phase === node.phase
+      ? total + weightedInput(states.get(candidate.id)?.usage, weight)
+      : total, 0)
+    : ledger.phases[`worker:${node.phase}`]?.budgetInputTokens ?? 0;
+  const campaignLimit = contract.usagePolicy === false ? contract.maxInputTokens : contract.usagePolicy.maxInputTokens;
+  const phaseLimit = contract.usagePolicy === false ? contract.maxInputTokens : contract.usagePolicy.maxPhaseInputTokens;
+  const judgeReserve = contract.usagePolicy === false
+    ? 0
+    : Math.max(0, contract.usagePolicy.judgeReserveInputTokens - ledger.judgeBudgetInputTokens);
+  const pendingReserveTokens = contract.nodes.reduce((total, candidate) => {
+    if (candidate.id === node.id || !candidate.budgetProfile) return total;
+    const candidateState = states.get(candidate.id);
+    return candidateState && !TERMINAL.has(candidateState.status)
+      ? total + candidate.budgetProfile.minimumSegmentTokens
+      : total;
+  }, 0);
+  const identity = budgetIdentity(node);
+  const runtime = routeRuntimeForState(contract, node, state, "worker");
+  const decision = deriveBudgetDecision(node.budgetProfile, {
+    ...identity,
+    runtimeId: runtime.id,
+    packetBytes: Buffer.byteLength(stableJson(node.taskPacket), "utf8"),
+    phaseRemainingTokens: Math.max(0, Math.floor(phaseLimit - phaseSpend)),
+    campaignRemainingTokens: Math.max(0, Math.floor(campaignLimit - campaignSpend)),
+    judgeReserveTokens: Math.max(0, Math.floor(judgeReserve)),
+    pendingReserveTokens,
+    explicitHardCeilingTokens: node.maxInputTokens ?? null,
+  });
+  state.budgetDecision = decision;
+  state.budgetState = initialBudgetState(decision);
+  writeNode(runDir, state, lease);
+  appendTransitionEvent(runDir, state, state.status, state.status, { budgetDecision: decision }, lease);
+  if (decision.status === "rejected") {
+    transition(runDir, state, "blocked", {
+      phase: "budget",
+      error: { code: "budget_attention", message: decision.rejectReason ?? "budget decision rejected" },
+    }, lease);
+    return false;
+  }
+  return true;
+}
+
+/** @param {ValidatedNode} node @param {NodeSnapshot} state */
+function assertBudgetContinuationIdentity(node, state) {
+  const decision = state.budgetDecision;
+  if (!decision) throw new Error("budget decision is missing");
+  const identity = budgetIdentity(node);
+  for (const key of /** @type {("packetHash"|"scopeHash"|"verificationHash")[]} */ (["packetHash", "scopeHash", "verificationHash"])) {
+    if (decision[key] !== identity[key]) throw new Error(`budget continuation ${key} does not match the frozen contract`);
+    if (state.budgetState?.pendingSegment?.[key] !== undefined && state.budgetState.pendingSegment[key] !== identity[key]) {
+      throw new Error(`pending budget continuation ${key} does not match the frozen contract`);
+    }
+  }
+}
+
+/** @param {string} runDir @param {ValidatedNode} node @param {NodeSnapshot} state @param {LeaseHandle} lease */
+function activateBudgetContinuation(runDir, node, state, lease) {
+  const budget = state.budgetState;
+  const pending = budget?.pendingSegment;
+  if (!budget || !pending) return;
+  assertBudgetContinuationIdentity(node, state);
+  if (budget.activatedSegments.includes(pending.segment)) {
+    budget.pendingSegment = null;
+    budget.status = "active";
+    writeNode(runDir, state, lease);
+    return;
+  }
+  budget.currentCapTokens += pending.allocationTokens;
+  budget.continuationRemainingTokens -= pending.allocationTokens;
+  budget.segment = pending.segment;
+  budget.activatedSegments = [...budget.activatedSegments, pending.segment];
+  budget.pendingSegment = null;
+  budget.status = "active";
+  writeNode(runDir, state, lease);
+  appendTransitionEvent(runDir, state, state.status, state.status, {
+    budgetAction: { type: "continuation_activated", segment: budget.segment, allocationTokens: pending.allocationTokens, id: pending.id },
+  }, lease);
+}
+
 /**
  * @param {ValidatedContract} contract
  * @param {string} runDir
@@ -3545,11 +3721,17 @@ function enforceLedgerBudget(contract, runDir, states, lease, campaignPath) {
   }
   const cacheReadWeight = policy === false ? 1 : (policy.cacheReadWeight ?? 1);
   for (const node of contract.nodes) {
-    if (node.maxInputTokens === undefined) continue;
     const state = states.get(node.id);
     const nodeSpent = state ? weightedInput(state.usage, cacheReadWeight) : 0;
-    if (state?.status === "pending" && nodeSpent >= node.maxInputTokens) {
-      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `node weighted input tokens (${nodeSpent}) reached the ${node.maxInputTokens} budget` } }, lease);
+    if (state?.status !== "pending" || state.budgetState?.pendingSegment) continue;
+    const cap = state.budgetState?.currentCapTokens ?? node.maxInputTokens;
+    if (cap !== undefined && nodeSpent >= cap) {
+      transition(runDir, state, "blocked", {
+        phase: "budget",
+        error: state.budgetDecision
+          ? { code: "budget_attention", message: `node weighted input tokens (${nodeSpent}) reached the derived ${cap} budget without a pending continuation` }
+          : { code: "budget_exceeded", message: `node weighted input tokens (${nodeSpent}) reached the ${cap} budget` },
+      }, lease);
     }
   }
 }
@@ -3720,10 +3902,63 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
     const seen = observeLiveInputTokens(job, cacheReadWeight);
     observed.set(nodeId, seen);
     liveSpent += seen;
-    if (job.node.maxInputTokens !== undefined && seen > job.node.maxInputTokens && !job.budgetStop) {
-      job.budgetStop = "node";
-      void terminateProcess(job).catch(() => {});
-      process.stdout.write(`[node] ${nodeId} input-token cap reached (${seen} > ${job.node.maxInputTokens}) · terminating\n`);
+    const persistedNode = weightedInput(job.state.usage, cacheReadWeight);
+    const cumulativeSeen = roundBudgetTokens(persistedNode + seen);
+    const budget = job.state.budgetState;
+    const cap = budget?.currentCapTokens ?? job.node.maxInputTokens;
+    if (cap !== undefined && cumulativeSeen > cap && !job.budgetStop) {
+      if (job.state.budgetDecision && budget) {
+        const progressSignature = job.state.progress?.heartbeatCount
+          ? job.state.progress.progressSignature ?? null
+          : null;
+        // Progress observed since the last grant authorizes the bounded
+        // extension and, when that is still insufficient, the predeclared
+        // continuation; granting the extension does not consume the evidence.
+        const progressEligible = Boolean(
+          progressSignature
+          && progressSignature !== budget.lastGrantedProgressSignature,
+        );
+        const extension = grantBudgetExtension(job.state.budgetDecision, budget, progressSignature);
+        const { grantedTokens, ...nextBudget } = extension;
+        let currentBudget = budget;
+        if (grantedTokens > 0) {
+          currentBudget = nextBudget;
+          job.state.budgetState = nextBudget;
+          writeNode(runDir, job.state, lease);
+          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
+            budgetAction: { type: "extension", grantedTokens, currentCapTokens: nextBudget.currentCapTokens, progressSignature },
+          }, lease);
+          process.stdout.write(`[node] ${nodeId} derived budget extended by ${grantedTokens} · cap ${nextBudget.currentCapTokens}\n`);
+          if (cumulativeSeen <= nextBudget.currentCapTokens) continue;
+        }
+        const pending = progressEligible && cumulativeSeen < job.state.budgetDecision.hardCapTokens
+          ? planBudgetContinuation(job.state.budgetDecision, currentBudget)
+          : null;
+        if (pending) {
+          currentBudget.pendingSegment = pending;
+          currentBudget.lastGrantedProgressSignature = progressSignature;
+          currentBudget.status = "continuing";
+          job.state.budgetState = currentBudget;
+          writeNode(runDir, job.state, lease);
+          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
+            budgetAction: { type: "continuation_planned", segment: pending.segment, allocationTokens: pending.allocationTokens, id: pending.id },
+          }, lease);
+        } else {
+          currentBudget.status = "attention";
+          job.state.budgetState = currentBudget;
+          writeNode(runDir, job.state, lease);
+          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
+            budgetAction: { type: "attention", observedTokens: cumulativeSeen, currentCapTokens: currentBudget.currentCapTokens },
+          }, lease);
+        }
+        job.budgetStop = "node";
+        void terminateProcess(job).catch(() => {});
+        process.stdout.write(`[node] ${nodeId} derived input budget reached (${cumulativeSeen} > ${cap}) · terminating\n`);
+      } else {
+        job.budgetStop = "node";
+        void terminateProcess(job).catch(() => {});
+        process.stdout.write(`[node] ${nodeId} input-token cap reached (${cumulativeSeen} > ${cap}) · terminating\n`);
+      }
     }
   }
   // Persisted usage is the normalized ledger shape (inputTokens excludes
