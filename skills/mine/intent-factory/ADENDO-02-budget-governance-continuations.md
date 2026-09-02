@@ -1,13 +1,13 @@
 ---
 title: "Addendum 02: systemic budget governance and deterministic continuations"
-version: 0.1.0
+version: 0.2.0
 status: ready
 date: 2026-09-02
 owner: Felipe Broering
 amends: "Intent Factory: efficiency, resilience and autonomy tech spec (0.6.0)"
 supersedes_sections: ["5.2 derived per-node budget", "10.3 ledger and budgets", "10.4 phase order"]
 adds_sections: ["B4.5", "B4.6", "ADR-0021", "ADR-0022"]
-baseline: feliperun/skills @ a70bdd8
+baseline: feliperun/skills @ 9c6dffc
 ---
 
 # Addendum 02: systemic budget governance and deterministic continuations
@@ -55,6 +55,12 @@ policy:
   "safetyFraction": 0.75,
   "minimumSegmentTokens": 100000,
   "growthIncrementTokens": 100000,
+  "preambleBytes": 24000,
+  "tokenizerEstimate": {
+    "bytes": 77404,
+    "tokens": 19000,
+    "source": "measured skill preamble"
+  },
   "continuation": {
     "enabled": true,
     "maxSegments": 2,
@@ -87,7 +93,9 @@ reason in `budgetDecision`. An extension is exactly
 after an observed progress signature changes. These formulas and profile
 fields are versioned policy, so a replay cannot silently reinterpret a budget.
 
-The controller computes and persists a `budgetDecision` before dispatch. It
+The controller computes and persists a `budgetDecision` before dispatch. A
+profile without attributable context-window, preamble and tokenizer inputs is
+invalid; a bare declared capacity is not sufficient provenance. The decision
 includes the policy version, packet bytes, measured preamble, runtime context
 capacity, phase and campaign remaining allowance, pending-node minimum
 reserves, the estimate, and the resulting initial and hard caps. Replaying the
@@ -105,7 +113,9 @@ silently waits.
 ## 4. ADR-0022: continuation is predeclared, not improvised
 
 When a node approaches its derived allocation with observed progress, the
-controller checkpoints the deterministic capsule and activates the next
+controller requests a soft boundary. Only after the current segment reaches a
+settled, verified checkpoint does it write the deterministic capsule and
+activate the next
 predeclared segment. The continuation reuses the exact task packet, write scope,
 verification and runtime identity unless the contract explicitly declares an
 allowed failover. It is idempotent, has a bounded segment count, and cannot
@@ -121,6 +131,10 @@ Budget exhaustion therefore has three deterministic outcomes:
 The controller never converts a budget stop into an implicit provider switch,
 dynamic task split or replan. This narrows rule 9 without weakening the
 planning boundary: continuation topology is frozen at authoring time.
+
+A hard-cap kill is never a safe checkpoint. If the worker crosses the hard cap
+before settling the soft boundary, the node enters `attention` with ambiguous
+effects and cannot continue automatically.
 
 ## 5. B4.5 — systemic budget controller
 
@@ -146,18 +160,34 @@ skills/mine/intent-factory/references/budget-governance.md
 
 | id | requirement | proof |
 |---|---|---|
-| d1 | no per-node cap is accepted without a reproducible `budgetProfile` and `budgetDecision` | `npm test -- --test-name-pattern="budget provenance"` |
-| d2 | initial allocation reserves all pending nodes and judge allowance | `npm test -- --test-name-pattern="budget reserve"` |
-| d3 | the same inputs produce byte-identical budget decisions | `npm test -- --test-name-pattern="budget deterministic"` |
-| d4 | a healthy node receives bounded extension from unused allowance, never from another node's reserve | `npm test -- --test-name-pattern="budget extension"` |
-| d5 | a budget boundary checkpoints and activates one predeclared continuation exactly once | `npm test -- --test-name-pattern="budget continuation"` |
-| d6 | a continuation preserves packet hash, write scope and verification | `npm test -- --test-name-pattern="continuation scope"` |
-| d7 | no authorized continuation settles as observable attention, never silent blocked | `npm test -- --test-name-pattern="budget attention"` |
-| d8 | every budget block/extension/continuation updates heartbeat and human notification within one supervisor interval | `npm test -- --test-name-pattern="budget liveness"` |
-| d9 | a provider quota failure may fail over, while a local budget stop never implicitly changes provider | `npm test -- --test-name-pattern="budget failover boundary"` |
-| d10 | a 1M-context runtime does not imply a 1M cumulative node allocation | `npm test -- --test-name-pattern="context budget distinction"` |
+| d1 | no per-node cap is accepted without a reproducible `budgetProfile` and `budgetDecision` | `node --test --test-name-pattern='budget provenance' skills/mine/intent-factory/test/budget.test.mjs skills/mine/intent-factory/test/contract.test.mjs` |
+| d2 | initial allocation reserves all pending nodes and judge allowance | `node --test --test-name-pattern='budget reserve' skills/mine/intent-factory/test/budget.test.mjs` |
+| d3 | the same inputs produce byte-identical budget decisions | `node --test --test-name-pattern='budget deterministic' skills/mine/intent-factory/test/budget.test.mjs` |
+| d4 | a healthy node receives bounded extension from unused allowance, never from another node's reserve | `node --test --test-name-pattern='budget extension' skills/mine/intent-factory/test/budget.test.mjs` |
+| d5 | a budget boundary checkpoints and activates one predeclared continuation exactly once | `node --test --test-name-pattern='budget continuation' skills/mine/intent-factory/test/budget.test.mjs skills/mine/intent-factory/scripts/runner.test.mjs` |
+| d6 | a continuation preserves packet hash, write scope and verification | `node --test --test-name-pattern='continuation scope' skills/mine/intent-factory/test/budget.test.mjs skills/mine/intent-factory/scripts/runner.test.mjs` |
+| d7 | no authorized continuation settles as observable attention, never silent blocked | `node --test --test-name-pattern='budget attention' skills/mine/intent-factory/test/budget.test.mjs` |
+| d8 | every budget block/extension/continuation updates heartbeat and human notification within one supervisor interval | `node --test --test-name-pattern='budget liveness' skills/mine/intent-factory/test/heartbeat.test.mjs skills/mine/intent-factory/test/campaign-autonomy.test.mjs` |
+| d9 | a provider quota failure may fail over, while a local budget stop never implicitly changes provider | `node --test --test-name-pattern='budget failover boundary' skills/mine/intent-factory/test/budget.test.mjs skills/mine/intent-factory/scripts/runner.test.mjs` |
+| d10 | a 1M-context runtime does not imply a 1M cumulative node allocation | `node --test --test-name-pattern='context budget distinction' skills/mine/intent-factory/test/budget.test.mjs` |
 
 ## 6. B4.6 — campaign watchdog and governance metrics
+
+**Write scope**
+
+```text
+skills/mine/intent-factory/scripts/heartbeat.mjs
+skills/mine/intent-factory/scripts/notify/index.mjs
+skills/mine/intent-factory/scripts/notify/os-macos.mjs
+skills/mine/intent-factory/scripts/campaign.mjs
+skills/mine/intent-factory/scripts/campaign-autonomy.mjs
+skills/mine/intent-factory/scripts/campaign-cli.mjs
+skills/mine/intent-factory/scripts/runner.mjs
+skills/mine/intent-factory/test/heartbeat.test.mjs
+skills/mine/intent-factory/test/campaign-autonomy.test.mjs
+skills/mine/intent-factory/scripts/runner.test.mjs
+skills/mine/intent-factory/references/campaign-autonomy.md
+```
 
 The supervisor records `budgetDecisionAge`, `budgetHeadroomAtDispatch`,
 `budgetExtensionRate`, `continuationRate`, `budgetAttentionLatencyP95` and
@@ -165,6 +195,22 @@ The supervisor records `budgetDecisionAge`, `budgetHeadroomAtDispatch`,
 run without an observed heartbeat transition within the configured liveness
 interval produces a human-channel attention event and a fresh heartbeat; it
 never remains invisible until a user happens to run `sync`.
+
+The derived metrics are written atomically to
+`.runs/campaigns/<id>/governance-metrics.json`. Budget decisions and state
+transitions provide their timestamps; metrics never infer them from log prose.
+This node pulls forward the heartbeat core and the macOS human notification
+adapter from B1.6 because observability is a prerequisite for budget safety.
+
+**Definition of Done**
+
+| id | requirement | proof |
+|---|---|---|
+| d1 | budget stop is visible in heartbeat and reaches a human channel within one supervisor interval | `node --test --test-name-pattern='budget liveness' skills/mine/intent-factory/test/heartbeat.test.mjs skills/mine/intent-factory/test/campaign-autonomy.test.mjs` |
+| d2 | a stale nonterminal run emits one deduplicated attention event and keeps a fresh heartbeat | `node --test --test-name-pattern='watchdog stale liveness' skills/mine/intent-factory/test/heartbeat.test.mjs skills/mine/intent-factory/test/campaign-autonomy.test.mjs` |
+| d3 | progress events never push to the human or session channels | `node --test --test-name-pattern='notify no progress push' skills/mine/intent-factory/test/heartbeat.test.mjs` |
+| d4 | the watchdog works for a legacy campaign without `plan.json` | `node --test --test-name-pattern='campaign liveness planless' skills/mine/intent-factory/test/campaign-autonomy.test.mjs` |
+| d5 | governance metrics are reproducible and `silentStallRate` is zero in D36/D38 | `node --test --test-name-pattern='governance metrics' skills/mine/intent-factory/test/heartbeat.test.mjs` |
 
 ## 7. New deterministic evals
 
@@ -184,14 +230,19 @@ This addendum is a gate before the next campaign phase:
 
 | Order | Item | Rule |
 |---|---|---|
-| 0a | repair the blocked phase-0 continuation using a derived budget decision | no handwritten 500k cap |
-| 0b | B4.5 systemic budget controller | required before new work |
-| 0c | B4.6 watchdog and governance metrics | required before phase completion |
-| 1 | Addendum 01 B1.6/B1.7 ambient feedback | only after 0a–0c are green |
+| 0a | freeze the failed run and checksum its evidence | the old run can be read but never resumed |
+| 0b | B4.5 budget policy, provenance and durable decision | final bootstrap under the legacy controller |
+| 0c | refresh the immutable controller snapshot | all later contracts require `budgetProfile` |
+| 0d | pull forward B1.6 heartbeat core and one human channel | removes the circular liveness dependency |
+| 0e | B4.5 runner integration and settled continuations | reserve before dispatch; hard kills never continue |
+| 0f | B4.6 watchdog, metrics and D33–D39 gate | required before campaign work resumes |
+| 1 | create a new pruned run for unfinished phase-0 nodes | never resume the frozen run or redo completed objectives |
+| 2 | finish Addendum 01 B1.6/B1.7 ambient feedback | status line and harness research remain here |
 
-The existing 500k phase-0 cap is not silently increased in place. The
-continuation contract must carry its derivation, reserved allowance and
-fallback policy, and the old blocked run remains immutable evidence.
+The existing 500k phase-0 cap is not silently increased in place. The failed
+run is frozen with a checksum manifest. A new pruned contract carries the
+derivation, reserved allowance and fallback policy for only the unfinished
+objectives.
 
 ## 9. Load-bearing rules
 
