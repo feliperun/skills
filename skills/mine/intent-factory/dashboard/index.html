@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Intent Factory</title>
+<style>
+  :root {
+    --bg: #f4f6fa;
+    --surface: #ffffff;
+    --surface-2: #f0f2f5;
+    --border: #e1e4ea;
+    --border-strong: #c9ceD8;
+    --text: #1b1f27;
+    --text-2: #5a6272;
+    --text-3: #8a91a0;
+    --accent: #315cf4;
+    --accent-soft: #e7edff;
+    --ok: #15803d;      --ok-soft: #dcfce7;
+    --warn: #b45309;    --warn-soft: #fef3c7;
+    --bad: #b91c1c;     --bad-soft: #fee2e2;
+    --info: #0e7490;    --info-soft: #cffafe;
+    --violet: #6d28d9;  --violet-soft: #ede9fe;
+    --muted: #64748b;   --muted-soft: #e7eaf0;
+    --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 12px 28px rgba(16, 24, 40, 0.055);
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --side: 288px; --feed: 344px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f17; --surface: #121823; --surface-2: #18202d; --border: #253044; --border-strong: #3a496180;
+      --text: #eef2f8; --text-2: #aab4c5; --text-3: #748096;
+      --accent: #7aa2ff; --accent-soft: #24448466;
+      --ok: #4ade80; --ok-soft: #14532d66; --warn: #fbbf24; --warn-soft: #78350f66; --bad: #f87171; --bad-soft: #7f1d1d66;
+      --info: #22d3ee; --info-soft: #164e6366; --violet: #a78bfa; --violet-soft: #4c1d9566; --muted: #94a3b8; --muted-soft: #33415566;
+      --shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 var(--sans);
+    display: grid; grid-template-rows: 56px minmax(0, 1fr); height: 100dvh; overflow: hidden;
+  }
+  a { color: var(--accent); }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; text-align: left; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .dim { color: var(--text-2); } .dimmer { color: var(--text-3); }
+  .hidden { display: none !important; }
+
+  /* top bar */
+  #top {
+    display: flex; align-items: center; gap: 14px; padding: 0 20px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent); border-bottom: 1px solid var(--border); backdrop-filter: blur(16px);
+  }
+  #top .brand { font-weight: 650; letter-spacing: -0.01em; display: flex; align-items: center; gap: 9px; }
+  #top .brand .logo { width: 24px; height: 24px; border-radius: 8px; background: linear-gradient(145deg, #87a6ff 0%, var(--accent) 45%, var(--violet) 100%); box-shadow: inset 0 0 0 1px rgba(255,255,255,.25), 0 6px 16px color-mix(in srgb, var(--accent) 28%, transparent); display: inline-block; }
+  #top .runsdir { color: var(--text-3); font-size: 12px; }
+  #top .spacer { flex: 1; }
+  #conn { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s ease-out infinite; }
+  .dot.lost { background: var(--bad); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+
+  /* layout */
+  #layout { display: grid; grid-template-columns: var(--side) minmax(0, 1fr) var(--feed); min-height: 0; }
+  #side { border-right: 1px solid var(--border); background: var(--surface); overflow-y: auto; padding: 18px 12px; }
+  #main { overflow-y: auto; padding: 30px 32px 72px; background: radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 36%); }
+  #main > * { width: 100%; max-width: 1120px; margin-left: auto; margin-right: auto; }
+  #feed { border-left: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 94%, var(--bg)); display: flex; flex-direction: column; min-height: 0; }
+
+  /* side: campaigns */
+  #side h2 { margin: 2px 8px 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); }
+  .camp { display: block; width: 100%; padding: 11px 11px; border-radius: 12px; border: 1px solid transparent; margin-bottom: 6px; transition: background .15s ease, border-color .15s ease, transform .15s ease; }
+  .camp:hover { background: var(--surface-2); }
+  .camp[aria-current="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 42%, transparent); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 10%, transparent); }
+  .camp .name { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; display: flex; gap: 8px; align-items: center; }
+  .camp .meta { color: var(--text-2); font-size: 12px; margin-top: 2px; }
+  .strip { display: flex; gap: 2px; margin-top: 8px; height: 6px; }
+  .strip i { flex: 1; max-width: 16px; border-radius: 2px; background: var(--muted); }
+
+  /* pills */
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.done { color: var(--ok); background: var(--ok-soft); }
+  .pill.running { color: var(--warn); background: var(--warn-soft); }
+  .pill.running::before { animation: blink 1.2s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0.35; } }
+  .pill.pending { color: var(--muted); background: var(--muted-soft); }
+  .pill.blocked { color: var(--warn); background: var(--warn-soft); }
+  .pill.failed, .pill.canceled, .pill.cancelled { color: var(--bad); background: var(--bad-soft); }
+  .pill.exhausted { color: var(--violet); background: var(--violet-soft); }
+  .pill.stalled, .pill.waiting_gate { color: var(--info); background: var(--info-soft); }
+  .pill.active { color: var(--accent); background: var(--accent-soft); }
+  .pill.closed, .pill.unknown, .pill.no-op { color: var(--muted); background: var(--muted-soft); }
+  .pill.small { font-size: 11px; padding: 0 7px; }
+
+  /* header */
+  .head h1 { margin: 0; font-size: clamp(22px, 2vw, 28px); font-weight: 720; letter-spacing: -0.035em; overflow-wrap: anywhere; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .head .goal { color: var(--text-2); margin: 8px 0 0; max-width: 82ch; font-size: 14px; }
+  .banner { margin-top: 14px; padding: 10px 14px; border-radius: 10px; border: 1px solid; font-size: 13px; }
+  .banner.bad { border-color: color-mix(in srgb, var(--bad) 45%, transparent); background: var(--bad-soft); color: var(--bad); }
+  .banner.warn { border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-soft); color: var(--warn); }
+
+  /* cards */
+  .card { background: color-mix(in srgb, var(--surface) 97%, transparent); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
+  .now { margin-top: 20px; padding: 18px 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 18px 28px; }
+  .now .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); font-weight: 600; }
+  .now .v { font-size: 18px; font-weight: 650; margin-top: 2px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+  .now .v.small { font-size: 14px; font-weight: 600; }
+  .now .sub { color: var(--text-2); font-size: 12px; }
+  .bar { position: relative; height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; margin-top: 8px; }
+  .bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 999px; }
+  .bar > i.warn { background: var(--warn); } .bar > i.bad { background: var(--bad); }
+  .bar > u { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text-3); }
+  .next { margin-top: 14px; padding: 12px 16px; border-left: 3px solid var(--accent); }
+  .next .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); font-weight: 600; display: flex; gap: 10px; }
+  .next p { margin: 4px 0 0; white-space: pre-wrap; }
+
+  section { margin-top: 28px; }
+  section > h3 { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  section > h3 .count { font-weight: 500; color: var(--text-3); text-transform: none; letter-spacing: 0; }
+
+  /* runs */
+  .run { margin-bottom: 12px; overflow: hidden; }
+  .run > summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 13px 16px; cursor: pointer; list-style: none; }
+  .run > summary::-webkit-details-marker { display: none; }
+  .run > summary::before { content: "›"; color: var(--text-3); font-size: 20px; line-height: 1; transition: transform .15s ease; }
+  .run[open] > summary::before { transform: rotate(90deg); }
+  .run[open] > summary { border-bottom: 1px solid var(--border); }
+  .run > summary .rid { font-weight: 650; font-size: 14px; overflow-wrap: anywhere; }
+  .run > summary .ago { margin-left: auto; color: var(--text-3); font-size: 12px; white-space: nowrap; }
+  .run .goal { color: var(--text-2); font-size: 13px; padding: 10px 16px 0; max-width: 84ch; }
+  table.nodes { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table.nodes th { text-align: left; font-size: 11px; font-weight: 600; color: var(--text-3); padding: 8px 12px 6px; border-bottom: 1px solid var(--border); letter-spacing: 0.04em; text-transform: uppercase; }
+  table.nodes td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  table.nodes tbody tr:last-child td, table.nodes tbody tr.detail td { border-bottom: none; }
+  table.nodes tbody tr.row { cursor: pointer; }
+  table.nodes tbody tr.row:hover td { background: var(--surface-2); }
+  td.node-id { font-weight: 600; overflow-wrap: anywhere; }
+  td.node-id .lane { display: block; color: var(--text-3); font-weight: 400; font-size: 12px; }
+  td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-2); }
+  td.budget { min-width: 150px; }
+  td.budget .bar { margin-top: 4px; height: 6px; }
+  td.budget .lbl { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  td.note { color: var(--text-2); font-size: 12.5px; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  tr.detail td { padding: 12px 16px 16px 16px; background: var(--surface-2); }
+  tr.detail dl { margin: 0; display: grid; grid-template-columns: 160px 1fr; gap: 4px 14px; font-size: 13px; }
+  tr.detail dt { color: var(--text-3); } tr.detail dd { margin: 0; overflow-wrap: anywhere; }
+  tr.detail .summary { margin: 10px 0 0; white-space: pre-wrap; max-width: 90ch; }
+  tr.flash td { animation: rowflash 1.8s ease-out; }
+  @keyframes rowflash { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
+
+  /* ledger */
+  .epoch { padding: 14px 16px; margin-bottom: 10px; }
+  .epoch .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; }
+  .epoch .name { font-weight: 650; overflow-wrap: anywhere; }
+  .epoch .nums { color: var(--text-2); font-size: 13px; }
+  .epoch .bar { height: 10px; }
+  .bar-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-3); margin-top: 5px; }
+
+  /* records */
+  details.rec { border-bottom: 1px solid var(--border); }
+  details.rec:last-child { border-bottom: none; }
+  details.rec > summary { cursor: pointer; list-style: none; padding: 10px 14px; display: flex; gap: 12px; align-items: baseline; }
+  details.rec > summary::-webkit-details-marker { display: none; }
+  details.rec > summary .kind { flex: none; min-width: 84px; }
+  details.rec > summary .txt { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  details.rec[open] > summary .txt { white-space: normal; }
+  details.rec > summary .when { color: var(--text-3); font-size: 12px; flex: none; }
+  details.rec .body { padding: 0 14px 14px 110px; white-space: pre-wrap; max-width: 90ch; color: var(--text); }
+  details.rec .body .ref { display: block; margin-top: 6px; color: var(--text-3); font-size: 12px; font-family: var(--mono); }
+  .kind.outcome { color: var(--ok); background: var(--ok-soft); } .kind.decision { color: var(--info); background: var(--info-soft); }
+  .kind.intent { color: var(--warn); background: var(--warn-soft); } .kind.constraint { color: var(--violet); background: var(--violet-soft); }
+  .kind.question, .kind.open-question { color: var(--bad); background: var(--bad-soft); } .kind.session, .kind.next, .kind.supersede, .kind.retrospective { color: var(--muted); background: var(--muted-soft); }
+  .kind { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 1.7; }
+
+  .notif { display: flex; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 13px; align-items: baseline; }
+  .notif:last-child { border-bottom: none; }
+  .notif .when { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+  .notif .type { font-family: var(--mono); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+  .notif.undelivered .when { color: var(--warn); }
+
+  /* feed */
+  #feed > header { padding: 16px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 10px; }
+  #feed > header h2 { margin: 0; font-size: 13px; font-weight: 650; }
+  #feed > header p { margin: 0; margin-left: auto; font-size: 12px; color: var(--text-3); }
+  #entries { overflow-y: auto; flex: 1; }
+  .entry { padding: 9px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .entry .t { color: var(--text-3); font-size: 11px; display: flex; gap: 8px; font-family: var(--mono); }
+  .entry .t .rid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry .x { margin-top: 2px; overflow-wrap: anywhere; }
+  .entry.new { animation: rowflash 1.8s ease-out; }
+  .entry .err { color: var(--bad); }
+  .entry .arrow { color: var(--text-3); }
+
+  #boot { grid-column: 1 / -1; place-items: center; color: var(--text-3); }
+  #boot:not([hidden]) { display: grid; }
+  .empty { color: var(--text-3); padding: 14px 16px; }
+
+  @media (max-width: 1280px) { #layout { grid-template-columns: var(--side) minmax(0, 1fr); } #feed { display: none; } }
+  @media (max-width: 880px) {
+    body { overflow: auto; height: auto; display: block; }
+    #layout { display: block; }
+    #side { border-right: none; border-bottom: 1px solid var(--border); }
+    #main { padding: 16px 14px 60px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.live, .pill.running::before, tr.flash td, .entry.new { animation: none; } }
+</style>
+</head>
+<body>
+<header id="top">
+  <span class="brand"><span class="logo"></span>Intent Factory</span>
+  <span class="runsdir mono" id="runsdir"></span>
+  <span class="spacer"></span>
+  <span id="conn"><span class="dot"></span><span id="conntext">connecting…</span></span>
+</header>
+<div id="layout">
+  <div id="boot">loading .runs …</div>
+  <aside id="side" hidden><h2>Campaigns</h2><nav id="campaigns" aria-label="Campaigns"></nav></aside>
+  <main id="main" hidden></main>
+  <aside id="feed" hidden>
+    <header><h2>Live feed</h2><p id="feedmeta"></p></header>
+    <div id="entries" aria-live="polite"></div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+const POLL_FALLBACK_MS = 3000;
+const TERMINAL = new Set(["done", "failed", "blocked", "exhausted", "cancelled", "canceled", "no-op"]);
+const PILL_STATES = new Set(["done", "running", "pending", "blocked", "failed", "canceled", "cancelled", "exhausted", "stalled", "no-op", "waiting_gate", "active", "closed"]);
+const state = {
+  snapshot: null,
+  selected: null,
+  nodeStatus: new Map(),
+  openDetails: new Set(),
+  openRuns: new Set(),
+  seenEvents: new Set(),
+  transport: "none",
+  source: null,
+  pollTimer: null,
+};
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+const fmtTokens = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "–";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
+  return String(Math.round(n));
+};
+const fmtAgo = (iso) => {
+  const t = typeof iso === "number" ? iso * 1000 : Date.parse(iso ?? "");
+  if (!Number.isFinite(t)) return "–";
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${(s / 3600).toFixed(1)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+};
+const fmtClock = (iso) => { const t = Date.parse(iso ?? ""); return Number.isFinite(t) ? new Date(t).toLocaleTimeString([], { hour12: false }) : "--:--:--"; };
+const fmtDur = (fromIso, toIso) => {
+  const a = Date.parse(fromIso ?? ""), b = toIso ? Date.parse(toIso) : Date.now();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return "–";
+  const m = Math.max(0, Math.round((b - a) / 60000));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+const pill = (status, extra = "") => `<span class="pill ${PILL_STATES.has(status) ? esc(status) : "unknown"} ${extra}">${esc(status)}</span>`;
+const stripHtml = (states) => states.length ? `<div class="strip" aria-hidden="true">${states.map((s) => `<i class="pill-bg ${esc(s)}" style="background:${colorVar(s)}"></i>`).join("")}</div>` : "";
+const colorVar = (s) => ({ done: "var(--ok)", running: "var(--warn)", pending: "var(--muted)", blocked: "var(--warn)", failed: "var(--bad)", canceled: "var(--bad)", cancelled: "var(--bad)", exhausted: "var(--violet)", stalled: "var(--info)" })[s] ?? "var(--muted)";
+
+/* ---------- sidebar ---------- */
+function renderSidebar() {
+  const { campaigns, corrupt } = state.snapshot.overview;
+  $("campaigns").innerHTML = campaigns.map((c) => {
+    const counts = Object.entries(c.nodeCounts).map(([s, n]) => `${n} ${s}`).join(" · ");
+    return `<button class="camp" data-id="${esc(c.id)}" aria-current="${c.id === state.selected}">
+      <span class="name">${esc(c.id)}${c.live ? `<span class="dot live" title="workers running"></span>` : ""}</span>
+      <span class="meta">${pill(c.status, "small")} · ${fmtTokens(c.weightedInputTokens)} weighted · ${c.runCount} runs</span>
+      ${counts ? `<span class="meta dimmer">${esc(counts)}</span>` : ""}
+      ${stripHtml(c.nodeStates)}
+    </button>`;
+  }).join("") + (corrupt.length ? `<p class="empty">unreadable: ${esc(corrupt.join(", "))}</p>` : "");
+  for (const button of $("campaigns").querySelectorAll("button")) button.addEventListener("click", () => selectCampaign(button.dataset.id));
+}
+
+/* ---------- main ---------- */
+function renderMain() {
+  const d = state.snapshot.detail;
+  if (!d) { $("main").innerHTML = `<p class="empty">${esc(state.snapshot.error ?? "no campaign selected")}</p>`; return; }
+  const c = d.campaign;
+  const parts = [headHtml(c, d), nowHtml(d), nextHtml(d), runsHtml(d.runs), ledgerHtml(d.ledger), recordsHtml(d)];
+  $("main").innerHTML = parts.join("");
+  $("main").querySelectorAll("tr.row[data-key]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const key = row.dataset.key;
+      if (state.openDetails.has(key)) state.openDetails.delete(key); else state.openDetails.add(key);
+      row.nextElementSibling.classList.toggle("hidden", !state.openDetails.has(key));
+    });
+  });
+  $("main").querySelectorAll("details.rec[data-key]").forEach((el) => el.addEventListener("toggle", () => {
+    if (el.open) state.openDetails.add(el.dataset.key); else state.openDetails.delete(el.dataset.key);
+  }));
+  $("main").querySelectorAll("details.run[data-run]").forEach((el) => el.addEventListener("toggle", () => {
+    if (el.open) state.openRuns.add(el.dataset.run); else state.openRuns.delete(el.dataset.run);
+  }));
+}
+
+function headHtml(c, d) {
+  const pendingCount = d.outbox?.pendingCount ?? 0;
+  const latestRun = d.runs[0];
+  const liveRun = d.runs.find((r) => (r.nodes ?? []).some((n) => n.status === "running"));
+  const problems = (liveRun ? [] : (latestRun?.nodes ?? []).filter((n) => ["blocked", "failed", "exhausted"].includes(n.status)));
+  return `<div class="head">
+    <h1>${esc(c.id)} ${pill(c.status)}</h1>
+    <p class="goal">${esc(c.goal)}</p>
+    ${problems.length ? `<div class="banner bad"><b>${problems.length} node${problems.length > 1 ? "s" : ""} need attention in ${esc(latestRun.id)}:</b> ${problems.map((n) => `${esc(n.id)} (${esc(n.status)}${n.error?.code ? `: ${esc(n.error.code)}` : ""})`).join(", ")}</div>` : ""}
+    ${pendingCount ? `<div class="banner warn">${pendingCount} notification${pendingCount > 1 ? "s" : ""} waiting for a human channel (no transport delivered them yet)</div>` : ""}
+  </div>`;
+}
+
+function nowHtml(d) {
+  const hb = d.heartbeat;
+  const liveRun = d.runs.find((r) => (r.nodes ?? []).some((n) => n.status === "running" || n.status === "pending")) ?? d.runs[0];
+  const running = liveRun?.nodes?.find((n) => n.status === "running");
+  const epochs = d.ledger?.epochs ?? [];
+  const latestEpoch = epochs[epochs.length - 1];
+  const used = hb?.weightedUsed ?? latestEpoch?.weightedInputTokens ?? 0;
+  const cap = hb?.weightedCap ?? latestEpoch?.policy?.maxInputTokens ?? 0;
+  const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+  const stateLabel = hb?.state ?? (running ? "running" : liveRun?.terminal ? (liveRun.nodes.every((n) => n.status === "done") ? "done" : "blocked") : "idle");
+  const lastProgress = hb ? hb.lastProgressAt : (liveRun?.updatedAt ?? null);
+  const done = hb ? hb.checkpoints.done : (liveRun?.nodes ?? []).filter((n) => n.status === "done").length;
+  const total = hb ? hb.checkpoints.total : (liveRun?.nodes ?? []).length;
+  return `<div class="card now">
+    <div><div class="k">State</div><div class="v">${pill(stateLabel)}</div><div class="sub">${hb ? "from heartbeat.json" : "derived from run snapshots"}</div></div>
+    <div><div class="k">Active node</div><div class="v small mono">${esc(hb?.activeNode ?? running?.id ?? "—")}</div><div class="sub">${esc(hb?.runtime ?? running?.runtime ?? "")}${running?.startedAt ? ` · ${fmtDur(running.startedAt)} elapsed` : ""}</div></div>
+    <div><div class="k">Checkpoints</div><div class="v">${done}<span class="dim">/${total}</span></div><div class="sub">${esc(liveRun?.id ?? "")}</div></div>
+    <div><div class="k">Last progress</div><div class="v">${fmtAgo(lastProgress)}</div><div class="sub">${lastProgress ? esc(typeof lastProgress === "number" ? new Date(lastProgress * 1000).toLocaleTimeString([], { hour12: false }) : fmtClock(lastProgress)) : "no observation yet"}</div></div>
+    <div style="grid-column: 1 / -1"><div class="k">Campaign weighted input</div>
+      <div class="bar"><i class="${pct > 90 ? "bad" : pct > 70 ? "warn" : ""}" style="width:${pct}%"></i>${latestEpoch?.policy?.judgeReserveInputTokens && cap ? `<u style="left:${100 - (latestEpoch.policy.judgeReserveInputTokens / cap) * 100}%" title="judge reserve"></u>` : ""}</div>
+      <div class="bar-labels"><span>${fmtTokens(used)} used</span><span>${cap ? `cap ${fmtTokens(cap)}` : "no cap"}${hb?.attention ? ` · <b style="color:var(--bad)">attention: ${esc(hb.attention)}</b>` : ""}</span></div>
+    </div>
+  </div>`;
+}
+
+function nextHtml(d) {
+  if (!d.next?.text) return "";
+  return `<div class="card next"><div class="k"><span>Next action</span><span>${fmtAgo(d.next.at)}</span></div><p>${esc(d.next.text)}</p></div>`;
+}
+
+function budgetCell(n) {
+  if (!n.budget?.capTokens) return `<td class="num">${fmtTokens(n.weightedInputTokens)}</td>`;
+  const pct = Math.min(100, (n.weightedInputTokens / n.budget.capTokens) * 100);
+  const seg = n.budget.maxSegments > 1 ? ` · seg ${n.budget.segment}/${n.budget.maxSegments}` : "";
+  return `<td class="budget"><span class="lbl">${fmtTokens(n.weightedInputTokens)} / ${fmtTokens(n.budget.capTokens)}${seg}${n.budget.status === "attention" ? " · attention" : ""}</span><div class="bar"><i class="${pct > 95 ? "bad" : pct > 80 ? "warn" : ""}" style="width:${pct}%"></i></div></td>`;
+}
+
+function runHtml(r) {
+  const open = state.openRuns.has(r.id);
+  if (r.corrupt) return `<details class="card run" data-run="${esc(r.id)}" ${open ? "open" : ""}><summary><span class="rid">${esc(r.id)}</span><span class="pill failed">unreadable</span><span class="dim">${esc(r.corrupt)}</span></summary></details>`;
+  const rows = (r.nodes ?? []).map((n) => {
+    const key = `${r.id}:${n.id}`;
+    const previous = state.nodeStatus.get(key);
+    const changed = previous !== undefined && previous !== n.status;
+    const open = state.openDetails.has(key);
+    const duration = n.startedAt ? fmtDur(n.startedAt, TERMINAL.has(n.status) ? n.updatedAt : null) : "–";
+    return `<tr class="row ${changed ? "flash" : ""}" data-key="${esc(key)}" title="show detail">
+      <td>${pill(n.status)}</td>
+      <td class="node-id">${esc(n.id)}<span class="lane">${esc(n.phase ?? "")}</span></td>
+      <td class="mono dim">${esc(n.runtime ?? "–")}${n.model ? `<br><span class="dimmer">${esc(n.model)}</span>` : ""}</td>
+      <td class="num">${n.attempt ?? 0}${n.revisions ? ` <span class="dimmer">r${n.revisions}</span>` : ""}</td>
+      <td class="num">${duration}</td>
+      ${budgetCell(n)}
+      <td class="note" title="${esc(n.note ?? "")}">${n.gate?.verdict ? `<span class="pill small ${n.gate.verdict === "pass" ? "done" : "blocked"}">gate ${esc(n.gate.verdict)}</span> ` : ""}${esc(n.error?.code ?? n.note ?? "")}</td>
+    </tr>
+    <tr class="detail ${open ? "" : "hidden"}"><td colspan="7">
+      <dl>
+        <dt>lane / execution phase</dt><dd>${esc(n.phase ?? "–")} / ${esc(n.executionPhase ?? "–")}</dd>
+        <dt>runtime</dt><dd class="mono">${esc(n.runtime ?? "–")} ${n.model ? `· ${esc(n.model)}` : ""}</dd>
+        <dt>invocations</dt><dd>${n.invocations ?? 0}${n.continuation ? ` · last ${esc(n.continuation)}` : ""}</dd>
+        <dt>usage in / out / cache</dt><dd>${fmtTokens(n.usage?.inputTokens)} / ${fmtTokens(n.usage?.outputTokens)} / ${fmtTokens(n.usage?.cacheReadInputTokens)} · weighted ${fmtTokens(n.weightedInputTokens)}</dd>
+        ${n.budget ? `<dt>derived budget</dt><dd>initial ${fmtTokens(n.budget.initialTokens)} · cap ${fmtTokens(n.budget.capTokens)} · hard cap ${fmtTokens(n.budget.hardCapTokens)} · segment ${n.budget.segment}/${n.budget.maxSegments} · ${esc(n.budget.status ?? "")}</dd>` : ""}
+        ${n.dependsOn?.length ? `<dt>depends on</dt><dd>${esc(n.dependsOn.join(", "))}</dd>` : ""}
+        ${n.gate ? `<dt>gate</dt><dd>${esc(n.gate.verdict)} · ${esc(n.gate.maxSeverity ?? "")} · ${n.gate.findings} finding${n.gate.findings === 1 ? "" : "s"}</dd>` : ""}
+        ${n.error ? `<dt>error</dt><dd class="err" style="color:var(--bad)">${esc(n.error.code)}: ${esc(n.error.message)}</dd>` : ""}
+        <dt>started / updated</dt><dd>${esc(fmtClock(n.startedAt))} / ${esc(fmtClock(n.updatedAt))}</dd>
+        ${n.costUsd != null ? `<dt>cost</dt><dd>$${Number(n.costUsd).toFixed(4)}</dd>` : ""}
+      </dl>
+      ${n.gate?.summary ? `<p class="summary dim">${esc(n.gate.summary)}</p>` : ""}
+    </td></tr>`;
+  }).join("");
+  return `<details class="card run" data-run="${esc(r.id)}" ${open ? "open" : ""}>
+    <summary>
+      <span class="rid">${esc(r.id)}</span>
+      ${r.terminal ? pill(r.nodes.every((n) => n.status === "done") ? "done" : "blocked", "small") : (r.leaseHealthy ? `<span class="pill small running">controller alive</span>` : `<span class="pill small failed">controller lost</span>`)}
+      <span class="dim">${esc(r.summary ?? "")}</span>
+      <span class="ago">${fmtTokens(r.totals?.weightedInputTokens)} weighted · started ${fmtAgo(r.startedAt)} · last event ${fmtAgo(r.lastEventAt)}</span>
+    </summary>
+    ${r.goal ? `<p class="goal">${esc(r.goal)}</p>` : ""}
+    <table class="nodes">
+      <thead><tr><th>state</th><th>node</th><th>runtime</th><th style="text-align:right">try</th><th style="text-align:right">elapsed</th><th>weighted / cap</th><th>note</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </details>`;
+}
+
+function runsHtml(runs) {
+  if (runs.length && state.openRuns.size === 0) state.openRuns.add(runs[0].id);
+  return `<section><h3>Runs <span class="count">${runs.length} · current run expanded</span></h3>${runs.length ? runs.map(runHtml).join("") : `<p class="empty">no runs linked yet</p>`}</section>`;
+}
+
+function ledgerHtml(ledger) {
+  const epochs = ledger?.epochs ?? [];
+  if (!epochs.length) return "";
+  return `<section><h3>Token ledger <span class="count">${epochs.length} epoch${epochs.length > 1 ? "s" : ""}</span></h3>${epochs.map((e) => {
+    const max = e.policy?.maxInputTokens ?? 0;
+    const pct = max > 0 ? Math.min(100, (e.weightedInputTokens / max) * 100) : 0;
+    const reservePct = max > 0 && e.policy?.judgeReserveInputTokens ? (e.policy.judgeReserveInputTokens / max) * 100 : null;
+    const roles = Object.entries(e.weightedByRole ?? {}).map(([role, w]) => `${role} ${fmtTokens(w)}`).join(" · ");
+    return `<div class="card epoch">
+      <div class="row"><span class="name mono">${esc(e.epoch)}</span><span class="nums">${fmtTokens(e.weightedInputTokens)} weighted of ${fmtTokens(max)} · ${fmtTokens(e.conservativeInputTokens)} raw · ${e.invocations} invocations${roles ? ` · ${esc(roles)}` : ""}</span></div>
+      <div class="bar"><i class="${pct > 90 ? "bad" : pct > 70 ? "warn" : ""}" style="width:${pct}%"></i>${reservePct != null ? `<u style="left:${100 - reservePct}%" title="judge reserve"></u>` : ""}</div>
+      <div class="bar-labels"><span>0</span><span>cap ${fmtTokens(max)}${reservePct != null ? ` · judge reserve ${fmtTokens(e.policy.judgeReserveInputTokens)}` : ""}</span></div>
+    </div>`;
+  }).join("")}</section>`;
+}
+
+function recordsHtml(d) {
+  const section = (title, entries, kind) => {
+    if (!entries?.length) return "";
+    return `<section><h3>${title} <span class="count">${entries.length}</span></h3><div class="card">${entries.map((e, i) => {
+      const key = `${kind}:${e.eventId ?? i}`;
+      const text = e.text ?? e.decisionId ?? "";
+      return `<details class="rec" data-key="${esc(key)}" ${state.openDetails.has(key) ? "open" : ""}>
+        <summary><span class="kind ${esc(kind)}">${esc(e.decisionId ?? kind)}</span><span class="txt">${esc(text)}</span><span class="when">${fmtAgo(e.at)}</span></summary>
+        <div class="body">${esc(text)}<span class="ref">${esc(fmtClock(e.at))} · ${esc(e.sessionId ?? "")}${e.supersedes ? ` · supersedes ${esc(e.supersedes)}` : ""}</span></div>
+      </details>`;
+    }).join("")}</div></section>`;
+  };
+  const notif = (d.outbox?.pending ?? []).concat(d.outbox?.recent ?? []);
+  const notifications = notif.length ? `<section><h3>Notifications <span class="count">${d.outbox?.pendingCount ?? 0} pending</span></h3><div class="card">${notif.map((n) =>
+    `<div class="notif ${n.deliveredAt ? "" : "undelivered"}"><span class="when">${fmtClock(n.at)}</span><span class="type">${esc(n.type ?? "")}</span><span>${esc(n.summary ?? "")}</span></div>`).join("")}</div></section>` : "";
+  return section("Decisions", d.decisions, "decision") +
+    section("Owner intents", d.intents, "intent") +
+    section("Attempts and outcomes", d.outcomes, "outcome") +
+    section("Constraints", d.constraints, "constraint") +
+    section("Open questions", d.questions, "question") +
+    notifications;
+}
+
+/* ---------- feed ---------- */
+function renderFeed() {
+  const d = state.snapshot.detail;
+  if (!d) { $("entries").innerHTML = ""; return; }
+  const entries = [];
+  for (const e of d.journalTail ?? []) entries.push({ at: e.at ?? "", kind: "journal", type: e.type, text: e.text ?? "", sessionId: e.sessionId, key: `j|${e.eventId ?? e.at}` });
+  for (const run of d.runs ?? []) for (const e of run.eventsTail ?? []) entries.push({ at: e.at ?? "", kind: "event", runId: run.id, node: e.node, from: e.from, to: e.to, runtime: e.runtime, attempt: e.attempt, error: e.error, budgetAction: e.budgetAction, budgetDecision: e.budgetDecision, key: `e|${run.id}|${e.at}|${e.node}|${e.to}|${e.budgetAction?.type ?? ""}` });
+  entries.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const shown = entries.slice(0, 150);
+  const html = shown.map((e) => {
+    const isNew = state.seenEvents.size > 0 && !state.seenEvents.has(e.key);
+    let body;
+    if (e.kind === "event") {
+      const extra = e.budgetAction ? ` · budget ${esc(e.budgetAction.type)}${e.budgetAction.grantedTokens ? ` +${fmtTokens(e.budgetAction.grantedTokens)}` : ""}` : e.budgetDecision ? ` · budget ${esc(e.budgetDecision.status)} ${fmtTokens(e.budgetDecision.initialAllocationTokens)}` : "";
+      body = `${pill(e.to, "small")} <span class="arrow">←</span> <span class="dim">${esc(e.from ?? "")}</span> · <b>${esc(e.node)}</b>${e.runtime ? ` · <span class="mono dim">${esc(e.runtime)}</span>` : ""}${extra}${e.error?.message ? ` · <span class="err">${esc(e.error.code ?? "")} ${esc(e.error.message)}</span>` : ""}`;
+    } else {
+      body = `<span class="kind ${esc(e.type)}">${esc(e.type)}</span> ${esc(e.text).slice(0, 260)}${e.text.length > 260 ? "…" : ""}`;
+    }
+    return `<div class="entry ${isNew ? "new" : ""}"><div class="t"><span>${fmtClock(e.at)}</span><span class="rid">${esc(e.runId ?? e.sessionId ?? "")}</span></div><div class="x">${body}</div></div>`;
+  }).join("");
+  $("entries").innerHTML = html || `<p class="empty">no activity yet</p>`;
+  state.seenEvents = new Set(shown.map((e) => e.key));
+  $("feedmeta").textContent = `${entries.length} entries · newest first`;
+}
+
+/* ---------- apply snapshot ---------- */
+function applySnapshot(snapshot) {
+  state.snapshot = snapshot;
+  if (!state.selected) state.selected = snapshot.selected ?? null;
+  renderSidebar();
+  renderMain();
+  renderFeed();
+  for (const run of snapshot.detail?.runs ?? []) for (const node of run.nodes ?? []) state.nodeStatus.set(`${run.id}:${node.id}`, node.status);
+  $("runsdir").textContent = snapshot.runsDir ?? "";
+  $("boot").hidden = true; $("side").hidden = false; $("main").hidden = false; $("feed").hidden = false;
+  setConnection(state.transport, snapshot.generatedAt);
+}
+
+function setConnection(transport, at) {
+  const dot = $("conn").querySelector(".dot");
+  dot.className = `dot ${transport === "stream" || transport === "poll" ? "live" : "lost"}`;
+  $("conntext").textContent = transport === "stream" ? `live · updated ${fmtClock(at)}` : transport === "poll" ? `polling · updated ${fmtClock(at)}` : "connection lost — reconnecting";
+}
+
+/* ---------- transport: SSE first, polling fallback ---------- */
+function connect() {
+  disconnect();
+  const url = `/api/stream${state.selected ? `?campaign=${encodeURIComponent(state.selected)}` : ""}`;
+  if (typeof EventSource !== "function") { startPolling(); return; }
+  const source = new EventSource(url);
+  state.source = source;
+  source.addEventListener("update", (event) => {
+    state.transport = "stream";
+    stopPolling();
+    try { applySnapshot(JSON.parse(event.data)); } catch (error) { console.error(error); }
+  });
+  source.addEventListener("error", () => {
+    // The browser retries the stream on its own; poll meanwhile so the page
+    // never freezes on a dropped connection.
+    state.transport = "none";
+    setConnection("none");
+    startPolling();
+  });
+}
+function disconnect() { if (state.source) { state.source.close(); state.source = null; } }
+async function pollOnce() {
+  try {
+    const response = await fetch(`/api/snapshot${state.selected ? `?campaign=${encodeURIComponent(state.selected)}` : ""}`, { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (state.transport !== "stream") state.transport = "poll";
+    applySnapshot(await response.json());
+  } catch {
+    state.transport = "none";
+    setConnection("none");
+  }
+}
+function startPolling() { if (state.pollTimer) return; pollOnce(); state.pollTimer = setInterval(() => { if (!document.hidden) pollOnce(); }, POLL_FALLBACK_MS); }
+function stopPolling() { if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; } }
+
+function selectCampaign(id) {
+  if (id === state.selected) return;
+  state.selected = id;
+  state.nodeStatus.clear(); state.seenEvents.clear(); state.openDetails.clear(); state.openRuns.clear();
+  history.replaceState(null, "", `#${encodeURIComponent(id)}`);
+  connect();
+}
+window.addEventListener("hashchange", () => {
+  const id = decodeURIComponent(location.hash.slice(1));
+  if (id && id !== state.selected) selectCampaign(id);
+});
+// Relative times ("3m ago") tick even when nothing changes on disk.
+setInterval(() => { if (state.snapshot && !document.hidden) { renderMain(); } }, 30_000);
+state.selected = decodeURIComponent(location.hash.slice(1)) || null;
+connect();
+</script>
+</body>
+</html>

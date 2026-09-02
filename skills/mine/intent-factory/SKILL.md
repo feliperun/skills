@@ -443,6 +443,17 @@ for several minutes even when healthy; keep the stall limit below the hard
 wall-clock timeout, but give review/writing nodes enough completion grace. A
 bounded, self-contained retry is preferable to repeating upstream research.
 
+## Dashboard
+
+`node skills/mine/intent-factory/dashboard/dashboard.mjs [--port 4173] [--cwd <repo>]`
+serves a read-only local dashboard on `127.0.0.1` for the humans watching a
+campaign: campaign list with per-node state strips, the active campaign's
+detail (next action, decisions, intents, outcomes, token ledger per epoch,
+notification outbox) and a live feed of journal entries and node transitions,
+refreshed every 2 seconds. It only ever reads `.runs/`, binds to localhost, and
+never writes campaign state — ambient observation only, per the pull-only
+liveness rule.
+
 ## Safety
 
 - Requires Node.js 22 or newer on `PATH`; TypeScript is a development-only
