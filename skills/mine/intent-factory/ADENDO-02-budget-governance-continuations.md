@@ -53,6 +53,8 @@ policy:
   "estimatedTurns": 12,
   "contextWindowTokens": 1000000,
   "safetyFraction": 0.75,
+  "minimumSegmentTokens": 100000,
+  "growthIncrementTokens": 100000,
   "continuation": {
     "enabled": true,
     "maxSegments": 2,
@@ -60,6 +62,30 @@ policy:
   }
 }
 ```
+
+Policy version `budget-v1` derives the allocation with no model judgment or
+magic per-node constant. Let `packetTokens` and `preambleTokens` be the
+measured UTF-8 byte counts converted with the configured tokenizer estimate;
+then:
+
+```text
+requestHeadroom = floor((contextWindowTokens - packetTokens - preambleTokens)
+                        * safetyFraction)
+contextAllowance = requestHeadroom * estimatedTurns
+available = min(phaseRemaining, campaignRemaining - judgeReserve)
+pendingReserve = sum(pendingNode.minimumSegmentTokens)
+continuationReserve = continuation.enabled
+  ? continuation.segmentReserveTokens : 0
+initial = min(estimatedWeightedInputTokens, contextAllowance,
+              available - pendingReserve - continuationReserve)
+```
+
+The controller rejects an allocation below `minimumSegmentTokens` unless the
+node is already complete, and records every operand, rounding step and reject
+reason in `budgetDecision`. An extension is exactly
+`min(growthIncrementTokens, unusedAvailableAfterReserves)` and is granted only
+after an observed progress signature changes. These formulas and profile
+fields are versioned policy, so a replay cannot silently reinterpret a budget.
 
 The controller computes and persists a `budgetDecision` before dispatch. It
 includes the policy version, packet bytes, measured preamble, runtime context
