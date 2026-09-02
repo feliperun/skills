@@ -15,6 +15,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { validateContract } from "./contract.mjs";
 import { TERMINAL } from "./lib.mjs";
 import {
+  acquireFileMutationLock,
   acquireLease,
   leaseHealthy,
   readJson,
@@ -382,8 +383,10 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
   if (state.status !== "attention" && state.runs.length > 0 && state.runs.every((record) => record.status === "done")) {
     state.status = "completed";
     state.updatedAt = now;
-    persistState(campaignPath, state);
+    // Evidence is durable before the derived status becomes visible:
+    // the outbox event exists before readers can observe "completed".
     enqueueNotification(campaignPath, "campaign.completed", "campaign", "campaign completed", { runCount: state.runs.length });
+    persistState(campaignPath, state);
     try {
       if (readCampaign(campaignPath).status === "active") closeCampaign(campaignPath, { at: now, eventId: stableId(`${plan.campaignId}:campaign.completed`) });
     } catch {
@@ -555,29 +558,55 @@ export function campaignStatus(campaignPath) {
 /**
  * Deliver pending notification events. Delivery is at-least-once: an event
  * stays pending until the configured executable exits successfully.
+ * Each delivery attempt is merged into a fresh durable read under the outbox
+ * mutation lock, so a concurrent enqueue can never be clobbered by a stale
+ * drainer snapshot.
  *
  * @param {string} campaignPath
  * @returns {Promise<{delivered: number, pending: number}>}
  */
 export async function drainNotifications(campaignPath) {
-  const outbox = readNotificationOutbox(campaignPath);
   const executable = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  if (!executable) return { delivered: 0, pending: outbox.filter((event) => !event.deliveredAt).length };
-  let delivered = 0;
-  for (const event of outbox) {
-    if (event.deliveredAt) continue;
-    event.attempts += 1;
-    const result = await deliverNotification(executable, event);
-    if (result.ok) {
-      event.deliveredAt = new Date().toISOString();
-      event.lastError = null;
-      delivered += 1;
-    } else {
-      event.lastError = result.error;
+  const snapshot = (() => {
+    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+    try {
+      return readNotificationOutbox(campaignPath);
+    } finally {
+      lock.release();
     }
-    writeOutbox(campaignPath, outbox);
+  })();
+  if (!executable) return { delivered: 0, pending: snapshot.filter((event) => !event.deliveredAt).length };
+  let delivered = 0;
+  for (const event of snapshot) {
+    if (event.deliveredAt) continue;
+    const attemptEvent = /** @type {NotificationEvent} */ ({ ...event, attempts: event.attempts + 1 });
+    const result = await deliverNotification(executable, attemptEvent);
+    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+    try {
+      const fresh = readNotificationOutbox(campaignPath);
+      const record = fresh.find((candidate) => candidate.eventId === event.eventId);
+      if (record) {
+        record.attempts = attemptEvent.attempts;
+        if (result.ok) {
+          record.deliveredAt = new Date().toISOString();
+          record.lastError = null;
+        } else {
+          record.lastError = result.error;
+        }
+        writeOutbox(campaignPath, fresh);
+      }
+      if (result.ok) delivered += 1;
+    } finally {
+      lock.release();
+    }
   }
-  return { delivered, pending: outbox.filter((event) => !event.deliveredAt).length };
+  const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+  try {
+    const fresh = readNotificationOutbox(campaignPath);
+    return { delivered, pending: fresh.filter((event) => !event.deliveredAt).length };
+  } finally {
+    lock.release();
+  }
 }
 
 /**
@@ -923,46 +952,53 @@ function setAttention(campaignPath, state, code, message) {
  * Append one notification event. Undelivered campaign.progress events are
  * coalesced by a bounded key: a newer enqueue rewrites the older pending event
  * in place instead of growing the outbox. Terminal events and delivered
- * history are never rewritten.
+ * history are never rewritten. The read-modify-write is serialized under the
+ * outbox mutation lock so concurrent enqueuers cannot lose each other's
+ * durable events.
  *
  * @param {string} campaignPath @param {string} type @param {string} key @param {string} summary @param {JsonObject} [data] @param {string} [progressCoalesceKey]
  */
 export function enqueueNotification(campaignPath, type, key, summary, data = {}, progressCoalesceKey = key) {
-  const outbox = readNotificationOutbox(campaignPath);
-  const eventId = stableId(`${campaignPath}:${type}:${key}`);
-  if (outbox.some((event) => event.eventId === eventId)) return;
-  const coalesceKey = type === CAMPAIGN_PROGRESS_TYPE ? boundedText(progressCoalesceKey, MAX_COALESCE_KEY_BYTES) : null;
-  const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
-  const event = /** @type {NotificationEvent} */ ({
-    eventId,
-    type,
-    campaignId,
-    at: new Date().toISOString(),
-    summary: boundedText(summary, 2 * 1024),
-    data: boundedJson(data, 2 * 1024),
-    deliveredAt: null,
-    attempts: 0,
-    lastError: null,
-  });
-  if (coalesceKey !== null) event.coalesceKey = coalesceKey;
-  const coalescedIndex = coalesceKey === null ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === type && candidate.coalesceKey === coalesceKey);
-  if (coalescedIndex >= 0) {
-    outbox[coalescedIndex] = event;
-    writeOutbox(campaignPath, outbox);
-    return;
-  }
-  while (outbox.length >= MAX_OUTBOX_EVENTS) {
-    const deliveredIndex = outbox.findIndex((candidate) => Boolean(candidate.deliveredAt));
-    const progressIndex = type === CAMPAIGN_PROGRESS_TYPE ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === CAMPAIGN_PROGRESS_TYPE);
-    const evictableIndex = deliveredIndex >= 0 ? deliveredIndex : progressIndex;
-    if (evictableIndex < 0) {
-      process.stderr.write("[warn] notification outbox is full of undelivered events; new event was not retained\n");
+  const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+  try {
+    const outbox = readNotificationOutbox(campaignPath);
+    const eventId = stableId(`${campaignPath}:${type}:${key}`);
+    if (outbox.some((event) => event.eventId === eventId)) return;
+    const coalesceKey = type === CAMPAIGN_PROGRESS_TYPE ? boundedText(progressCoalesceKey, MAX_COALESCE_KEY_BYTES) : null;
+    const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
+    const event = /** @type {NotificationEvent} */ ({
+      eventId,
+      type,
+      campaignId,
+      at: new Date().toISOString(),
+      summary: boundedText(summary, 2 * 1024),
+      data: boundedJson(data, 2 * 1024),
+      deliveredAt: null,
+      attempts: 0,
+      lastError: null,
+    });
+    if (coalesceKey !== null) event.coalesceKey = coalesceKey;
+    const coalescedIndex = coalesceKey === null ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === type && candidate.coalesceKey === coalesceKey);
+    if (coalescedIndex >= 0) {
+      outbox[coalescedIndex] = event;
+      writeOutbox(campaignPath, outbox);
       return;
     }
-    outbox.splice(evictableIndex, 1);
+    while (outbox.length >= MAX_OUTBOX_EVENTS) {
+      const deliveredIndex = outbox.findIndex((candidate) => Boolean(candidate.deliveredAt));
+      const progressIndex = type === CAMPAIGN_PROGRESS_TYPE ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === CAMPAIGN_PROGRESS_TYPE);
+      const evictableIndex = deliveredIndex >= 0 ? deliveredIndex : progressIndex;
+      if (evictableIndex < 0) {
+        process.stderr.write("[warn] notification outbox is full of undelivered events; new event was not retained\n");
+        return;
+      }
+      outbox.splice(evictableIndex, 1);
+    }
+    outbox.push(event);
+    writeOutbox(campaignPath, outbox);
+  } finally {
+    lock.release();
   }
-  outbox.push(event);
-  writeOutbox(campaignPath, outbox);
 }
 
 /** @param {string} campaignPath @returns {NotificationEvent[]} */

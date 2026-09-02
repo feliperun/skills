@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -25,8 +25,8 @@ import {
   superviseCampaignOnce,
   watchCampaign,
 } from "../scripts/campaign-autonomy.mjs";
-import { acquireLease, LeaseBusyError, writeJsonAtomic } from "../scripts/store.mjs";
-import { fixture, packet } from "./helpers.mjs";
+import { acquireFileMutationLock, acquireLease, LeaseBusyError, writeJsonAtomic } from "../scripts/store.mjs";
+import { delay, fixture, packet } from "./helpers.mjs";
 
 const runnerPath = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 const sourceRoot = dirname(dirname(runnerPath));
@@ -204,6 +204,64 @@ test("notification outbox is bounded, deduplicated, and retried", async () => {
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
     else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
+    cleanup(value);
+  }
+});
+
+test("outbox mutation lock serializes a cross-process enqueue without losing events", async () => {
+  const value = tempRepo();
+  /** @type {import("node:child_process").ChildProcess|null} */
+  let child = null;
+  let lock = null;
+  try {
+    const readyPath = join(value.root, "child-ready");
+    const autonomyPath = fileURLToPath(new URL("../scripts/campaign-autonomy.mjs", import.meta.url));
+    lock = acquireFileMutationLock(value.campaignPath, CAMPAIGN_OUTBOX_FILE);
+    const spawned = spawn(process.execPath, ["--input-type=module", "-e", `
+      import { writeFileSync } from "node:fs";
+      import { enqueueNotification } from ${JSON.stringify(autonomyPath)};
+      writeFileSync(${JSON.stringify(readyPath)}, "ready");
+      enqueueNotification(${JSON.stringify(value.campaignPath)}, "node.terminal", "child", "child done");
+    `], { stdio: ["ignore", "pipe", "pipe"] });
+    child = spawned;
+    let childStderr = "";
+    spawned.stderr?.on("data", (chunk) => { childStderr += chunk; });
+    const childExited = new Promise((resolve) => spawned.once("exit", (code) => resolve(code)));
+    let success = false;
+    try {
+      await waitFor(() => (existsSync(readyPath) ? true : null), 5_000);
+      await delay(300);
+      assert.equal(spawned.exitCode, null, `child exited while the outbox lock was held: ${childStderr}`);
+      assert.equal(readNotificationOutbox(value.campaignPath).some((event) => event.type === "node.terminal" && event.summary === "child done"), false, "child enqueued while the outbox lock was held");
+      const outbox = readNotificationOutbox(value.campaignPath);
+      outbox.push({
+        eventId: `parent-terminal-${Date.now()}`,
+        type: "node.terminal",
+        campaignId: "campaign",
+        at: new Date().toISOString(),
+        summary: "parent done",
+        data: {},
+        deliveredAt: null,
+        attempts: 0,
+        lastError: null,
+      });
+      writeJsonAtomic(join(value.campaignPath, CAMPAIGN_OUTBOX_FILE), outbox);
+      success = true;
+    } finally {
+      if (!success) { try { spawned.kill("SIGKILL"); } catch {} }
+      lock.release();
+      lock = null;
+    }
+    const exitCode = await Promise.race([childExited, delay(10_000).then(() => null)]);
+    assert.notEqual(exitCode, null, `child did not exit after lock release: ${childStderr}`);
+    assert.equal(exitCode, 0, childStderr);
+    const terminals = readNotificationOutbox(value.campaignPath).filter((event) => event.type === "node.terminal");
+    assert.equal(terminals.length, 2);
+    assert.equal(terminals.filter((event) => event.summary === "child done").length, 1);
+    assert.equal(terminals.filter((event) => event.summary === "parent done").length, 1);
+    assert.equal(new Set(terminals.map((event) => event.eventId)).size, 2);
+  } finally {
+    if (child && child.exitCode === null) { try { child.kill("SIGKILL"); } catch {} }
     cleanup(value);
   }
 });
@@ -438,11 +496,14 @@ test("public campaign CLI continues a detached controller after the launcher exi
     runPublicCampaignCli(root, ["start", campaignId, "--cwd", root], env);
     runPublicCampaignCli(root, ["supervise", campaignId, "--cwd", root, "--detach", "--interval", "0.01"], env);
 
-    const statePath = join(root, ".runs", "campaigns", campaignId, CAMPAIGN_STATE_FILE);
+    const campaignPath = join(root, ".runs", "campaigns", campaignId);
+    const statePath = join(campaignPath, CAMPAIGN_STATE_FILE);
     await waitFor(() => {
       try {
         const state = JSON.parse(readFileSync(statePath, "utf8"));
-        return state.status === "completed" ? state : null;
+        if (state.status !== "completed") return null;
+        const outbox = readNotificationOutbox(campaignPath);
+        return outbox.some(/** @param {{type: string}} event */ (event) => event.type === "campaign.completed") ? state : null;
       } catch {
         return null;
       }

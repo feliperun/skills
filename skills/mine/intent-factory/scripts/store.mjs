@@ -20,8 +20,8 @@ export const LEASE_FILE = "controller-lease.json";
 export const SUPERVISOR_LEASE_FILE = "supervisor-lease.json";
 export const BOOTSTRAP_FILE = "bootstrap.json";
 export const DEFAULT_LEASE_TTL_MS = 15_000;
-const LEASE_LOCK_TTL_MS = 5_000;
-const LEASE_LOCK_ATTEMPTS = 120;
+const FILE_LOCK_TTL_MS = 5_000;
+const FILE_LOCK_ATTEMPTS = 120;
 const JSONL_RECOVERY_TAIL_BYTES = 64 * 1024;
 
 /** @typedef {{schemaVersion: number, contractVersion: string, holderId: string, generation: number, pid: number, processStartToken: string|null, acquiredAt: string, renewedAt: string, expiresAt: string, invalid?: never}} LeaseRecord */
@@ -324,7 +324,7 @@ export function acquireLease(runDir, options) {
 
   const now = options.now ?? Date.now();
   for (;;) {
-    const lock = acquireLeaseMutationLock(runDir, /** @type {string} */ (options.fileName));
+    const lock = acquireFileMutationLock(runDir, /** @type {string} */ (options.fileName));
     try {
       const previous = readLeaseFile(path);
       if (previous && !previous.invalid) {
@@ -374,7 +374,7 @@ function createLeaseHandle(runDir, initial, ttlMs, options) {
   const renew = () => {
     if (released) return false;
     let renewed = null;
-    const lock = acquireLeaseMutationLock(runDir, /** @type {string} */ (options.fileName));
+    const lock = acquireFileMutationLock(runDir, /** @type {string} */ (options.fileName));
     try {
       const actual = readLeaseFile(join(runDir, /** @type {string} */ (options.fileName)));
       // A delayed heartbeat may find its own lease expired on disk; that is not
@@ -425,7 +425,7 @@ function createLeaseHandle(runDir, initial, ttlMs, options) {
   const release = () => {
     if (released) return;
     stopHeartbeat();
-    const lock = acquireLeaseMutationLock(runDir, /** @type {string} */ (options.fileName));
+    const lock = acquireFileMutationLock(runDir, /** @type {string} */ (options.fileName));
     try {
       const path = join(runDir, /** @type {string} */ (options.fileName));
       const actual = readLeaseFile(path);
@@ -464,17 +464,18 @@ function sameLease(left, right) {
 }
 
 /**
- * @param {string} runDir
+ * @param {string} directory
  * @param {string} fileName
  * @returns {{release: () => void}}
  */
-function acquireLeaseMutationLock(runDir, fileName) {
-  const path = join(runDir, `${basename(fileName)}.lock`);
-  for (let attempt = 0; attempt < LEASE_LOCK_ATTEMPTS; attempt += 1) {
+export function acquireFileMutationLock(directory, fileName) {
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${basename(fileName)}.lock`);
+  for (let attempt = 0; attempt < FILE_LOCK_ATTEMPTS; attempt += 1) {
     const holder = {
       pid: process.pid,
       holderId: randomUUID(),
-      expiresAt: new Date(Date.now() + LEASE_LOCK_TTL_MS).toISOString(),
+      expiresAt: new Date(Date.now() + FILE_LOCK_TTL_MS).toISOString(),
     };
     try {
       const fd = openSync(path, "wx", 0o600);
@@ -484,14 +485,14 @@ function acquireLeaseMutationLock(runDir, fileName) {
       } finally {
         closeSync(fd);
       }
-      fsyncDirectory(runDir);
+      fsyncDirectory(directory);
       return {
         release() {
           try {
             const current = readJson(path);
             if (current.holderId !== holder.holderId) return;
             unlinkSync(path);
-            fsyncDirectory(runDir);
+            fsyncDirectory(directory);
           } catch (error) {
             if (errorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
           }
@@ -514,13 +515,13 @@ function acquireLeaseMutationLock(runDir, fileName) {
       }
       const expired = current
         ? !Number.isFinite(Date.parse(/** @type {string} */ (current.expiresAt))) || Date.parse(/** @type {string} */ (current.expiresAt)) <= Date.now()
-        : !invalid || lockAgeMs > LEASE_LOCK_TTL_MS;
+        : !invalid || lockAgeMs > FILE_LOCK_TTL_MS;
       if (expired) {
         const stale = `${path}.stale.${process.pid}.${randomUUID()}`;
         try {
           renameSync(path, stale);
           unlinkSync(stale);
-          fsyncDirectory(runDir);
+          fsyncDirectory(directory);
         } catch (reclaimError) {
           if (errorCode(reclaimError) !== "ENOENT") throw reclaimError;
         }
@@ -530,7 +531,7 @@ function acquireLeaseMutationLock(runDir, fileName) {
       Atomics.wait(wait, 0, 0, 50);
     }
   }
-  throw new LeaseBusyError(`lease mutation lock is held for ${fileName}`);
+  throw new LeaseBusyError(`file mutation lock is held for ${fileName}`);
 }
 
 /**
