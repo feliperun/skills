@@ -42,7 +42,8 @@ not used for progress.
 The harness renders continuous state from a derived local artifact without API
 tokens. Claude Code's `statusLine` command receives session JSON on stdin,
 runs locally, and may refresh on a timer through `refreshInterval`. This is
-verified for Claude Code only; other harnesses enter B1.7 investigation.
+verified for Claude Code only; other harnesses enter B1.7 investigation. The
+official source is [Claude Code status line documentation](https://code.claude.com/docs/en/statusline).
 
 ## 4. Derived artifact: `heartbeat.json`
 
