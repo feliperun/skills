@@ -42,6 +42,21 @@ function packet(overrides = {}) {
   };
 }
 
+function budgetProfile(overrides = {}) {
+  return {
+    estimatedWeightedInputTokens: 100,
+    estimatedTurns: 2,
+    contextWindowTokens: 1_000,
+    safetyFraction: 0.75,
+    minimumSegmentTokens: 25,
+    growthIncrementTokens: 25,
+    preambleBytes: 40,
+    tokenizerEstimate: { bytes: 4, tokens: 1, source: "test measurement" },
+    continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 25 },
+    ...overrides,
+  };
+}
+
 /** @param {Record<string, unknown>} [overrides] */
 function fixture(overrides = {}) {
   return {
@@ -117,6 +132,11 @@ test("persisted loading defaults a missing budget so older runs stay readable", 
   assert.equal(loaded.maxInputTokens, DEFAULT_MAX_INPUT_TOKENS);
   // An invalid explicit value still fails under persisted loading.
   assert.throws(() => validateContract(helpers.fixture({ maxInputTokens: 0 }), path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
+  // A frozen run authored before budget profiles keeps its literal node cap readable.
+  const legacyNode = { id: "build", type: "backend", maxInputTokens: 500_000, taskPacket: packet(), gate: false };
+  const legacy = helpers.fixture({ nodes: [legacyNode] });
+  assert.equal(validateContract(legacy, path, { persisted: true }).nodes[0].maxInputTokens, 500_000);
+  assert.throws(() => validateContract(legacy, path), /requires budgetProfile provenance/u);
 });
 
 test("same-phase nodes must have a dependency order", () => {
@@ -750,6 +770,7 @@ test("validates node budgets and bounded progress policy", () => {
       id: "build",
       type: "backend",
       maxInputTokens: 100,
+      budgetProfile: budgetProfile(),
       maxCostUsd: 2.5,
       progressPolicy: { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 },
       taskPacket: packet(),
@@ -758,6 +779,7 @@ test("validates node budgets and bounded progress policy", () => {
   });
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
   assert.equal(contract.nodes[0].maxInputTokens, 100);
+  assert.equal(contract.nodes[0].budgetProfile?.estimatedWeightedInputTokens, 100);
   assert.equal(contract.nodes[0].maxCostUsd, 2.5);
   assert.deepEqual(contract.nodes[0].progressPolicy, { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 });
 
@@ -769,10 +791,17 @@ test("validates node budgets and bounded progress policy", () => {
     ["progressPolicy", { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 1.5 }],
   ])) {
     const invalid = writeFixture({
-      nodes: [{ id: "build", type: "backend", [field]: value, taskPacket: packet(), gate: false }],
+      nodes: [{ id: "build", type: "backend", [field]: value, ...(field === "maxInputTokens" ? { budgetProfile: budgetProfile(), progressPolicy: { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 } } : {}), taskPacket: packet(), gate: false }],
     });
     assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /maxInputTokens|maxCostUsd|progressPolicy/u);
   }
+});
+
+test("budget provenance rejects a per-node ceiling without a profile", () => {
+  const { path } = writeFixture({
+    nodes: [{ id: "build", type: "backend", maxInputTokens: 100, taskPacket: packet(), gate: false }],
+  });
+  assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /maxInputTokens requires budgetProfile provenance/u);
 });
 
 test("replayPolicy defaults to safe and accepts only its enumerated values", () => {
