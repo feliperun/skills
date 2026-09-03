@@ -3351,7 +3351,8 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
       first: { driver: "codex", model: "first", executable: first },
       second: { driver: "codex", model: "second", executable: second },
     },
-    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second", backoffSec: 0.25 }],
+    // The backoff window must exceed the event-loop delay under full-suite load so a poll journals paused_quota inside it.
+    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second", backoffSec: 2 }],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const backoffResult = await runContract(backoffPath);
@@ -3384,6 +3385,7 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
   const terminalStates = terminalFacts.map((fact) => fact.state);
   assert.ok(terminalStates.includes("failed"), `terminal quota exhaustion without a failover route journals failed (saw ${terminalStates.join(",")})`);
   assert.ok(!terminalStates.includes("paused_quota"), `terminal exhaustion must not be reported as a live quota pause (saw ${terminalStates.join(",")})`);
+  assert.equal(terminalStates.at(-1), "failed", `the terminal run's final liveness fact reports failed (saw ${terminalStates.join(",")})`);
 });
 
 test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {
