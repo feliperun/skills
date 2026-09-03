@@ -30,6 +30,7 @@ import {
   readCampaign,
   registerRun,
 } from "./campaign.mjs";
+import { readHeartbeat, recordLiveness } from "./heartbeat.mjs";
 
 export { campaignDir, initializeCampaign, registerRun } from "./campaign.mjs";
 export { acquireLease, writeJsonAtomic } from "./store.mjs";
@@ -44,12 +45,21 @@ export const CAMPAIGN_SNAPSHOT_DIR = "controller-snapshots";
 export const CAMPAIGN_BOOTSTRAP_FILE = "controller-bootstrap.json";
 export const CAMPAIGN_PLAN_VERSION = "1.0.0";
 export const CAMPAIGN_SCHEMA_VERSION = 1;
+export const LIVENESS_STALE_SEC = (() => {
+  const raw = process.env.INTENT_FACTORY_LIVENESS_SEC;
+  if (raw === undefined) return 2400;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : 2400;
+})();
 const MAX_OUTBOX_EVENTS = 100;
 const MAX_COALESCE_KEY_BYTES = 256;
 const MAX_EVENT_BYTES = 8 * 1024;
+const MAX_LAST_ERROR_CHARS = 200;
 const MAX_EVIDENCE_BYTES = 8 * 1024;
 const DEFAULT_INTERVAL_MS = 1_000;
 const TERMINAL_CAMPAIGN_STATES = new Set(["attention", "completed"]);
+const WATCHDOG_NODE_TERMINAL = new Set(["done", "failed", "blocked", "exhausted", "canceled", "cancelled"]);
+const USAGE_LEDGER_NAME = "usage-ledger.json";
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {{argv: string[]}} AllowedVerification */
@@ -331,6 +341,7 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
       setAttention(campaignPath, state, "invalid_state", String(observed.invalid));
       break;
     }
+    await watchRunLiveness(campaignPath, observed);
     const transition = classifyTransition({ plan, state: {
       retryCount: state.retries[record.id] ?? 0,
       repairCount: Object.keys(state.repairs).filter((id) => id.startsWith(`${record.id}:`)).length,
@@ -413,6 +424,24 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
   }
   try { await drainNotifications(campaignPath); } catch {}
   return campaignStatus(campaignPath);
+}
+
+/**
+ * Run the run-level liveness watchdog once for an observed nonterminal run.
+ * A failure only writes one stderr warning: observability never blocks a
+ * supervisor pass.
+ *
+ * @param {string} campaignPath
+ * @param {Record<string, unknown>} observed
+ */
+async function watchRunLiveness(campaignPath, observed) {
+  const status = String(observed.status ?? "");
+  if (observed.invalid !== undefined || status === "done" || status === "no-op") return;
+  try {
+    await checkRunLiveness(campaignPath, String(observed.runDir));
+  } catch (error) {
+    process.stderr.write(`[warn] run liveness check failed: ${errorMessage(error)}\n`);
+  }
 }
 
 /**
@@ -612,7 +641,7 @@ export async function drainNotifications(campaignPath, options = {}) {
             writeOutbox(campaignPath, fresh);
           } else if (result.failed.length > 0) {
             record.attempts = (record.attempts ?? 0) + 1;
-            record.lastError = result.failed[0].error;
+            record.lastError = boundedChars(result.failed[0].error, MAX_LAST_ERROR_CHARS);
             writeOutbox(campaignPath, fresh);
           }
         }
@@ -1080,6 +1109,176 @@ function writeOutbox(campaignPath, outbox) {
   writeJsonAtomic(join(campaignPath, CAMPAIGN_OUTBOX_FILE), bounded);
 }
 
+/**
+ * Run-level liveness watchdog (Addendum 02 B4.6 d2/d4, D38). A nonterminal
+ * run whose newest observed activity (heartbeat progress, heartbeat
+ * generation, or node snapshot update) is older than `staleSec` emits one
+ * deduplicated run.attention event and records a blocked liveness fact so the
+ * stall is visible within one supervisor interval. The staleness epoch is
+ * keyed by the last observed progress timestamp, so repeated passes in the
+ * same epoch add nothing. Only the campaign journal/outbox and the run node
+ * snapshots are read: no plan.json or control-state.json is required.
+ *
+ * @param {string} campaignPath
+ * @param {string} runDir
+ * @param {{now?: number, staleSec?: number}} [options]
+ * @returns {Promise<{stale: boolean, eventKey?: string}>}
+ */
+export async function checkRunLiveness(campaignPath, runDir, { now = Date.now(), staleSec = LIVENESS_STALE_SEC } = {}) {
+  const snapshots = readWatchdogNodes(runDir);
+  if (snapshots.length === 0) return { stale: false };
+  if (snapshots.every((node) => WATCHDOG_NODE_TERMINAL.has(String(node.status ?? "")))) return { stale: false };
+  let lastObservedMs = 0;
+  const heartbeat = readHeartbeat(campaignPath);
+  if (heartbeat !== null) {
+    lastObservedMs = Math.max(lastObservedMs, heartbeat.lastProgressAt * 1000, heartbeat.generatedAt * 1000);
+  }
+  for (const node of snapshots) {
+    const updatedAt = typeof node.updatedAt === "string" ? Date.parse(node.updatedAt) : Number.NaN;
+    if (Number.isFinite(updatedAt) && updatedAt > lastObservedMs) lastObservedMs = updatedAt;
+  }
+  if (!(now - lastObservedMs > staleSec * 1000)) return { stale: false };
+  const runId = basenameSafe(runDir);
+  const minutes = Math.max(0, Math.floor((now - lastObservedMs) / 60_000));
+  const lastObservedIso = new Date(lastObservedMs).toISOString();
+  const eventKey = `${runId}:stale_liveness:${lastObservedIso}`;
+  enqueueNotification(campaignPath, "run.attention", eventKey, `${runId} shows no progress for ${minutes} min`, {
+    runId,
+    code: "stale_liveness",
+    staleSec,
+    lastObservedAt: lastObservedIso,
+  });
+  try {
+    const ledger = readLedgerTotals(campaignPath);
+    const active = watchdogActiveNode(snapshots);
+    const done = snapshots.filter((node) => String(node.status) === "done").length;
+    const activePhase = typeof active.phase === "string" && Boolean(active.phase) ? String(active.phase) : "worker";
+    /** @type {import("./heartbeat.mjs").LivenessFact} */
+    const fact = {
+      type: "liveness",
+      eventId: stableId(`${runId}:stale_liveness:${lastObservedIso}`),
+      at: new Date().toISOString(),
+      campaignId: basenameSafe(campaignPath),
+      runId,
+      nodeId: typeof active.id === "string" && active.id ? active.id : null,
+      phase: activePhase,
+      checkpointsDone: done,
+      checkpointsTotal: snapshots.length,
+      runtime: watchdogRuntimeId(active),
+      state: "blocked",
+      weightedUsed: ledger.weightedUsed,
+      weightedCap: ledger.weightedCap,
+      lastProgressAt: lastObservedIso,
+      attention: `stale liveness: no progress for ${minutes} min`,
+    };
+    recordLiveness(campaignPath, fact);
+  } catch (error) {
+    process.stderr.write(`[warn] stale liveness record failed: ${errorMessage(error)}\n`);
+  }
+  return { stale: true, eventKey };
+}
+
+/**
+ * @param {string} runDir
+ * @returns {JsonObject[]}
+ */
+function readWatchdogNodes(runDir) {
+  const nodesPath = join(runDir, "nodes");
+  if (!existsSync(nodesPath)) return [];
+  /** @type {JsonObject[]} */
+  const snapshots = [];
+  for (const entry of readdirSync(nodesPath, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    try {
+      const node = plainObject(readJson(join(nodesPath, entry.name)));
+      if (node !== null) snapshots.push(node);
+    } catch {
+      // A snapshot that cannot be read cannot prove run activity.
+    }
+  }
+  return snapshots;
+}
+
+/**
+ * Newest activity the watchdog can attribute: a running node outranks every
+ * settled one, otherwise the newest snapshot by updatedAt wins.
+ *
+ * @param {JsonObject[]} snapshots
+ * @returns {JsonObject}
+ */
+function watchdogActiveNode(snapshots) {
+  const running = snapshots.find((node) => String(node.status) === "running");
+  if (running) return running;
+  /** @type {JsonObject|null} */
+  let newest = null;
+  for (const node of snapshots) {
+    if (newest === null) {
+      newest = node;
+      continue;
+    }
+    const left = typeof node.updatedAt === "string" ? Date.parse(node.updatedAt) : Number.NaN;
+    const right = typeof newest.updatedAt === "string" ? Date.parse(newest.updatedAt) : Number.NaN;
+    if (Number.isFinite(left) && (!Number.isFinite(right) || left > right)) newest = node;
+  }
+  return /** @type {JsonObject} */ (newest);
+}
+
+/**
+ * @param {JsonObject} node
+ * @returns {string|null}
+ */
+function watchdogRuntimeId(node) {
+  const runtime = plainObject(node.runtime);
+  if (runtime !== null && typeof runtime.id === "string" && Boolean(runtime.id)) return runtime.id;
+  return null;
+}
+
+/**
+ * Weighted usage from the campaign usage ledger when present; both sides fall
+ * back to zero so the watchdog never fabricates budget numbers.
+ *
+ * @param {string} campaignPath
+ * @returns {{weightedUsed: number, weightedCap: number}}
+ */
+function readLedgerTotals(campaignPath) {
+  try {
+    const ledger = plainObject(readJson(join(campaignPath, USAGE_LEDGER_NAME)));
+    const epochs = ledger === null ? null : plainObject(ledger.epochs);
+    if (epochs === null) return { weightedUsed: 0, weightedCap: 0 };
+    let weightedUsed = 0;
+    let weightedCap = 0;
+    for (const rawEpoch of Object.values(epochs)) {
+      const epoch = plainObject(rawEpoch);
+      if (epoch === null) continue;
+      const policy = plainObject(epoch.policy);
+      const cacheReadWeight = policy !== null && typeof policy.cacheReadWeight === "number" ? policy.cacheReadWeight : 1;
+      const cap = policy !== null && typeof policy.maxInputTokens === "number" ? policy.maxInputTokens : 0;
+      if (cap > weightedCap) weightedCap = cap;
+      const invocations = plainObject(epoch.invocations);
+      if (invocations === null) continue;
+      for (const rawInvocation of Object.values(invocations)) {
+        const invocation = plainObject(rawInvocation);
+        const usage = invocation === null ? null : plainObject(invocation.usage);
+        if (usage === null) continue;
+        const inputTokens = typeof usage.inputTokens === "number" && Number.isFinite(usage.inputTokens) ? usage.inputTokens : 0;
+        const cacheReadInputTokens = typeof usage.cacheReadInputTokens === "number" && Number.isFinite(usage.cacheReadInputTokens) ? usage.cacheReadInputTokens : 0;
+        weightedUsed += inputTokens + cacheReadInputTokens * cacheReadWeight;
+      }
+    }
+    return { weightedUsed: Math.round(weightedUsed), weightedCap: Math.round(weightedCap) };
+  } catch {
+    return { weightedUsed: 0, weightedCap: 0 };
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {JsonObject|null}
+ */
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? /** @type {JsonObject} */ (value) : null;
+}
+
 /** @param {string} executable @param {NotificationEvent} event @returns {Promise<{ok: boolean, error?: string}>} */
 function deliverNotification(executable, event) {
   return new Promise((resolveDelivery) => {
@@ -1299,6 +1498,19 @@ function nonNegativeNumber(value, label) { if (typeof value !== "number" || !Num
 function boundedJson(value, max) { const text = JSON.stringify(value); if (Buffer.byteLength(text, "utf8") <= max) return value; return { truncated: true, summary: boundedText(text, max - 32) }; }
 /** @param {unknown} value @param {number} max @returns {string} */
 function boundedText(value, max) { const text = String(value ?? "").replace(/[\u0000-\u001f\u007f]+/gu, " "); return Buffer.byteLength(text, "utf8") <= max ? text : `${Buffer.from(text, "utf8").subarray(0, max - 1).toString("utf8")}…`; }
+/**
+ * Bound a persisted delivery error by characters with an ellipsis marker so
+ * writeOutbox never silently drops a pending event because its retry history
+ * grew past the serialized event budget.
+ *
+ * @param {unknown} value
+ * @param {number} maxChars
+ * @returns {string}
+ */
+function boundedChars(value, maxChars) {
+  const text = String(value ?? "");
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
+}
 /** @param {unknown} value @returns {string} */
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`; if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(/** @type {JsonObject} */ (value)[key])}`).join(",")}}`; return JSON.stringify(value); }
 /** @param {string} value @returns {string} */

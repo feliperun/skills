@@ -88,10 +88,17 @@ import {
 } from "./verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
 import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
-import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
+import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
-import { CAMPAIGN_PROGRESS_TYPE, drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
-import { recordLiveness } from "./heartbeat.mjs";
+import {
+  CAMPAIGN_PROGRESS_TYPE,
+  LIVENESS_STALE_SEC,
+  checkRunLiveness,
+  drainNotifications,
+  enqueueNotification,
+  readNotificationOutbox,
+} from "./campaign-autonomy.mjs";
+import { deriveGovernanceMetrics, LIVENESS_JOURNAL_TYPE, recordLiveness, writeGovernanceMetrics } from "./heartbeat.mjs";
 import {
   canonicalBudgetHash,
   deriveBudgetDecision,
@@ -240,6 +247,11 @@ function activeLivenessNode(contract, states) {
 
 /**
  * Derive the run-level liveness state from the node snapshots alone.
+ * A run awaiting a provider backoff is persisted as a pending node whose
+ * routing override carries a future backoffUntil, so that shape - and only
+ * that shape - derives paused_quota. A snapshot where every node is already
+ * terminal is never paused_quota: terminal exhaustion with no remaining
+ * failover route reports failed instead.
  *
  * @param {Map<string, NodeSnapshot>} states
  * @returns {string}
@@ -249,17 +261,33 @@ function livenessState(states) {
   const running = all.filter((state) => state.status === "running");
   if (running.some((state) => state.phase !== "judge")) return "running";
   if (running.length > 0) return "waiting_gate";
-  if (all.some((state) => state.status === "exhausted" && /provider_exhausted|rate_limit|quota_exhausted|usage_limit/u.test(state.error?.code ?? ""))) return "paused_quota";
   if (all.some((state) => state.status === "blocked")) return "blocked";
   if (all.length > 0 && all.every((state) => state.status === "done")) return "done";
-  if (all.length > 0 && all.every((state) => TERMINAL.has(state.status)) && all.some((state) => state.status !== "done")) return "failed";
+  if (all.length > 0 && all.every((state) => TERMINAL.has(state.status))) return "failed";
+  if (all.some((state) => state.status === "pending" && routingBackoffActive(state, state.phase))) return "paused_quota";
   return "running";
 }
 
 /**
+ * Newest material transition time per node, keyed by run dir. transition() is
+ * the only funnel that changes a node's status or phase, and it stamps
+ * updatedAt with the transition time; invocation persistence and live provider
+ * updates overwrite state.updatedAt later without any status or phase change,
+ * so the raw updatedAt can no longer be read as progress. This map keeps the
+ * last transition time for every node this controller process observed and is
+ * cleared once a run is fully terminal.
+ *
+ * @type {Map<string, Map<string, string>>}
+ */
+const livenessTransitionAtByRun = new Map();
+/** @type {Map<string, string>} */
+const livenessProgressByRun = new Map();
+
+/**
  * Newest observed progress timestamp: every node's progress.lastProgressAt
- * plus the persisted updatedAt of each node (a status or phase change writes
- * it), never the current time. Falls back to the run startedAt.
+ * plus the transition time of every node whose status or phase changed while
+ * this controller process observed the run, never the current time. Falls
+ * back to the run startedAt.
  *
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} runDir
@@ -267,17 +295,19 @@ function livenessState(states) {
  */
 function lastLivenessProgressAt(states, runDir) {
   let newest = null;
+  const transitionAt = livenessTransitionAtByRun.get(runDir);
   for (const state of states.values()) {
     const progress = /** @type {{lastProgressAt?: unknown}|null|undefined} */ (state.progress);
     if (progress && typeof progress.lastProgressAt === "string") newest = newestIso(newest, progress.lastProgressAt);
-    if (typeof state.updatedAt === "string") newest = newestIso(newest, state.updatedAt);
+    const materialAt = transitionAt?.get(state.id);
+    if (typeof materialAt === "string") newest = newestIso(newest, materialAt);
   }
   if (newest !== null) return newest;
   try {
     const metadata = /** @type {{startedAt?: unknown}} */ (readJson(join(runDir, "run.json")));
     if (typeof metadata.startedAt === "string") return metadata.startedAt;
   } catch {}
-  return new Date().toISOString();
+  return "1970-01-01T00:00:00.000Z";
 }
 
 /**
@@ -309,6 +339,10 @@ function recordRunLiveness(campaign, runDir, contract, states, { attention: atte
         }
       }
     }
+    const currentProgress = lastLivenessProgressAt(states, runDir);
+    const previousMax = livenessProgressByRun.get(runDir);
+    const observed = previousMax === undefined ? currentProgress : newestIso(currentProgress, previousMax);
+    livenessProgressByRun.set(runDir, observed);
     /** @type {import("./heartbeat.mjs").LivenessFact} */
     const fact = {
       type: "liveness",
@@ -324,13 +358,26 @@ function recordRunLiveness(campaign, runDir, contract, states, { attention: atte
       state: livenessState(states),
       weightedUsed,
       weightedCap,
-      lastProgressAt: lastLivenessProgressAt(states, runDir),
+      lastProgressAt: observed,
       attention,
     };
     recordLiveness(campaign.path, fact);
   } catch (error) {
     process.stderr.write(`[warn] liveness record failed: ${errorMessage(error)}\n`);
   }
+}
+
+/**
+ * Release the per-run liveness memory once a controller finished driving the
+ * run. Clearing happens only after the terminal liveness facts are recorded,
+ * never before the final record, so the last fact still folds the terminal
+ * transitions.
+ *
+ * @param {string} runDir
+ */
+function clearRunLivenessMemory(runDir) {
+  livenessTransitionAtByRun.delete(runDir);
+  livenessProgressByRun.delete(runDir);
 }
 
 /**
@@ -1141,6 +1188,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   } catch (error) {
     if (!(error instanceof LeaseLostError)) throw error;
     await Promise.all([...running.values()].map((job) => terminateProcess(job)));
+    clearRunLivenessMemory(runDir);
     return { runDir, states, ok: false, error };
   } finally {
     process.removeListener("SIGINT", cancel);
@@ -1154,6 +1202,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   writeFindingsArtifact(runDir, contract, states);
   const failed = [...states.values()].filter((state) => state.status !== "done");
   recordRunLiveness(campaign, runDir, contract, states);
+  clearRunLivenessMemory(runDir);
   await notifyCampaign(
     campaign.path,
     "run.terminal",
@@ -4652,7 +4701,14 @@ function observeLiveInputTokens(job, cacheReadWeight = 1) {
 function transition(runDir, state, status, patch = {}, lease = null) {
   lease?.assert();
   const from = state.status;
-  Object.assign(state, patch, { status, updatedAt: new Date().toISOString() });
+  const updatedAt = new Date().toISOString();
+  Object.assign(state, patch, { status, updatedAt });
+  let transitionAt = livenessTransitionAtByRun.get(runDir);
+  if (!transitionAt) {
+    transitionAt = new Map();
+    livenessTransitionAtByRun.set(runDir, transitionAt);
+  }
+  transitionAt.set(state.id, updatedAt);
   writeNode(runDir, state, lease);
   const invocation = state.invocations?.at(-1);
   if (invocation && hasOperationSettlement(runDir, invocation.id)) {
@@ -6191,6 +6247,47 @@ function reusedDoneWarnings(contract) {
 }
 
 /**
+ * Project the supervised run's governance metrics after a pass and persist
+ * them atomically next to the campaign heartbeat. Advisory: a failure writes
+ * one stderr warning and never stops supervision.
+ *
+ * @param {string} runDir
+ * @param {string} campaignPath
+ */
+function writeGovernanceMetricsSafely(runDir, campaignPath) {
+  try {
+    const journal = readJournal(campaignPath);
+    const livenessFacts = journal.filter((entry) => entry.type === LIVENESS_JOURNAL_TYPE && entry.runId === basename(runDir));
+    const metrics = deriveGovernanceMetrics({
+      events: readRunEvents(runDir),
+      livenessFacts,
+      outbox: readNotificationOutbox(campaignPath),
+      now: Date.now(),
+      staleSec: LIVENESS_STALE_SEC,
+    });
+    writeGovernanceMetrics(campaignPath, metrics);
+  } catch (error) {
+    process.stderr.write(`[warn] governance metrics failed: ${errorMessage(error)}\n`);
+  }
+}
+
+/**
+ * @param {string} runDir
+ * @returns {Record<string, unknown>[]}
+ */
+function readRunEvents(runDir) {
+  const path = join(runDir, "events.jsonl");
+  if (!existsSync(path)) return [];
+  /** @type {Record<string, unknown>[]} */
+  const events = [];
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    events.push(/** @type {Record<string, unknown>} */ (JSON.parse(line)));
+  }
+  return events;
+}
+
+/**
  * @param {string} runDir
  * @param {number} intervalSec
  * @returns {Promise<void>}
@@ -6233,6 +6330,13 @@ export async function superviseRun(runDir, intervalSec) {
       supervisorLease.assert();
       const nodes = readRunNodes(runDir, contract);
       await drainNotificationsSafely(campaign.path);
+      try {
+        await checkRunLiveness(campaign.path, runDir);
+      } catch (error) {
+        process.stderr.write(`[warn] run liveness check failed: ${errorMessage(error)}\n`);
+      }
+      await drainNotificationsSafely(campaign.path);
+      writeGovernanceMetricsSafely(runDir, campaign.path);
       if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
         const failed = nodes.filter((node) => node.status !== "done");
         await notifyCampaign(

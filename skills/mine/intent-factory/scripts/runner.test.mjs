@@ -57,8 +57,14 @@ function budgetProfile(overrides = {}) {
   };
 }
 
-/** @param {string} directory */
-function budgetContinuationCodex(directory) {
+/**
+ * @param {string} directory
+ * @param {{continuationDelayMs?: number}} [options] hold the continuation
+ *   provider silent for the given delay before announcing its session so a
+ *   test can observe the persisted pending budget segment mid-run
+ */
+function budgetContinuationCodex(directory, options = {}) {
+  const continuationDelayMs = options.continuationDelayMs ?? 0;
   const executable = join(directory, "budget-continuation-codex.mjs");
   const calls = join(directory, ".runs", "budget-continuation-calls.jsonl");
   writeFileSync(executable, `#!${process.execPath}
@@ -71,21 +77,25 @@ else {
   process.stdin.on("end", () => {
     const continuation = input.startsWith("Continue node build in a fresh provider session");
     appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ continuation }) + "\\n");
-    console.log(JSON.stringify({ type: "thread.started", thread_id: continuation ? "segment-2" : "segment-1" }));
-    if (continuation) {
-      const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
-      const result = JSON.stringify({ status: "done", summary: "continued exactly once", changedFiles: ["README.md"], verification: [], artifacts: [], missingContext: [] });
-      if (resultPath) writeFileSync(resultPath, result);
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1 } }));
-      return;
-    }
-    writeFileSync("README.md", "budget progress\\n");
-    let turns = 0;
-    setInterval(() => {
-      turns += 1;
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 20, output_tokens: 1 } }));
-    }, 30);
+    const announce = () => {
+      console.log(JSON.stringify({ type: "thread.started", thread_id: continuation ? "segment-2" : "segment-1" }));
+      if (continuation) {
+        const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
+        const result = JSON.stringify({ status: "done", summary: "continued exactly once", changedFiles: ["README.md"], verification: [], artifacts: [], missingContext: [] });
+        if (resultPath) writeFileSync(resultPath, result);
+        console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1 } }));
+        return;
+      }
+      writeFileSync("README.md", "budget progress\\n");
+      let turns = 0;
+      setInterval(() => {
+        turns += 1;
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 20, output_tokens: 1 } }));
+      }, 30);
+    };
+    if (continuation && ${continuationDelayMs} > 0) setTimeout(announce, ${continuationDelayMs});
+    else announce();
   });
 }
 `);
@@ -3134,7 +3144,10 @@ test("wall-clock kill without usage charges the remaining derived cap", async ()
 
 test("budget continuation D35 checkpoints and activates one predeclared segment with identical continuation scope", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-budget-continuation-"));
-  const provider = budgetContinuationCodex(directory);
+  // The continuation provider stays silent before announcing its session so
+  // the persisted pending segment is observable from the node snapshot while
+  // it exists, before activateBudgetContinuation settles it.
+  const provider = budgetContinuationCodex(directory, { continuationDelayMs: 350 });
   const path = writeContract(directory, fixture({
     id: "budget-continuation-run",
     pollIntervalMs: 5,
@@ -3155,19 +3168,44 @@ test("budget continuation D35 checkpoints and activates one predeclared segment 
       gate: false,
     }],
   }));
-  const result = await runContract(path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done", state.error?.message);
-  assert.deepEqual(state.budgetState?.activatedSegments, [1, 2]);
-  assert.equal(state.budgetState?.pendingSegment, null);
-  const calls = readFileSync(provider.calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
-  assert.deepEqual(calls.map(call => call.continuation), [false, true]);
-  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  assert.equal(events.filter(event => event.budgetAction?.type === "continuation_planned").length, 1);
-  assert.equal(events.filter(event => event.budgetAction?.type === "continuation_activated").length, 1);
-  const planned = events.find((event) => event.budgetAction?.type === "continuation_planned");
-  const packetHash = state.budgetDecision?.packetHash;
-  assert.ok(packetHash && typeof planned?.budgetAction?.id === "string" && planned.budgetAction.id.startsWith(packetHash), `planned segment ${planned?.budgetAction?.id ?? ""} must carry the frozen decision packetHash ${packetHash ?? "missing"}`);
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  const runDir = join(contract.cwd, ".runs", contract.id);
+  const nodePath = join(runDir, "nodes", "build.json");
+  /** @type {{status: string, phase: string, pending: Record<string, unknown>, decision: Record<string, unknown>}[]} */
+  const pendingSamples = [];
+  const sampler = setInterval(() => {
+    try {
+      const node = JSON.parse(readFileSync(nodePath, "utf8"));
+      const pending = /** @type {Record<string, unknown>|null|undefined} */ (node.budgetState?.pendingSegment);
+      const decision = /** @type {Record<string, unknown>|null|undefined} */ (node.budgetDecision);
+      if (pending && decision) pendingSamples.push({ status: node.status, phase: node.phase, pending, decision });
+    } catch {}
+  }, 2);
+  try {
+    const result = await runContract(path);
+    const state = nodeState(result);
+    assert.equal(state.status, "done", state.error?.message);
+    assert.deepEqual(state.budgetState?.activatedSegments, [1, 2]);
+    assert.equal(state.budgetState?.pendingSegment, null);
+    // While the predeclared continuation was pending, its frozen identity hashes
+    // must equal the budget decision that authorized it.
+    assert.ok(pendingSamples.length > 0, "observed the pending segment before it was activated");
+    for (const sample of pendingSamples) {
+      assert.equal(sample.pending.packetHash, sample.decision.packetHash, "pending packetHash matches the budget decision while the segment exists");
+      assert.equal(sample.pending.scopeHash, sample.decision.scopeHash, "pending scopeHash matches the budget decision while the segment exists");
+      assert.equal(sample.pending.verificationHash, sample.decision.verificationHash, "pending verificationHash matches the budget decision while the segment exists");
+    }
+    const calls = readFileSync(provider.calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.deepEqual(calls.map(call => call.continuation), [false, true]);
+    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(events.filter(event => event.budgetAction?.type === "continuation_planned").length, 1);
+    assert.equal(events.filter(event => event.budgetAction?.type === "continuation_activated").length, 1);
+    const planned = events.find((event) => event.budgetAction?.type === "continuation_planned");
+    const packetHash = state.budgetDecision?.packetHash;
+    assert.ok(packetHash && typeof planned?.budgetAction?.id === "string" && planned.budgetAction.id.startsWith(packetHash), `planned segment ${planned?.budgetAction?.id ?? ""} must carry the frozen decision packetHash ${packetHash ?? "missing"}`);
+  } finally {
+    clearInterval(sampler);
+  }
 });
 
 test("budget liveness D36 records heartbeat attention and a human-channel event within one supervisor interval", async () => {
@@ -3213,6 +3251,139 @@ test("budget liveness D36 records heartbeat attention and a human-channel event 
   const attention = outbox.find((event) => event.type === "run.attention" && event.data?.code === "budget_attention");
   assert.ok(attention, "outbox holds the budget_attention run.attention event");
   assert.notEqual(attention.deliveredAt, null, "the attention event reached the human-channel transport");
+});
+
+test("liveness progress ignores invocation-only churn and never uses the current time", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-liveness-progress-"));
+  // The noise worker only emits provider turns (invocation updates rewrite
+  // node.updatedAt with no status or phase change); the build worker finishes.
+  // The slow notifier widens the gap between a transition and its liveness
+  // record so churn landing in that gap would otherwise advance lastProgressAt.
+  const executable = join(directory, "mixed-worker.mjs");
+  writeFileSync(executable, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) console.log("mixed-worker 1.0.0");
+else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => { input += chunk; });
+  process.stdin.on("end", () => {
+    if (input.includes("Noise flood")) {
+      console.log(JSON.stringify({ type: "thread.started", thread_id: "noise-thread" }));
+      let turns = 0;
+      setInterval(() => {
+        turns += 1;
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 10, output_tokens: 1 } }));
+      }, 10);
+      return;
+    }
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "build-thread" }));
+    const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
+    if (resultPath) writeFileSync(resultPath, JSON.stringify({ status: "done", summary: "build done", changedFiles: [], verification: [], artifacts: [], missingContext: [] }));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "build done" } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 1 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "liveness-progress-run",
+    pollIntervalMs: 5,
+    timeoutSec: 5,
+    maxInputTokens: 1_000_000,
+    runtimes: { worker: { driver: "codex", model: "mixed", executable } },
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimeRules: [],
+    nodes: [
+      { id: "noise", type: "backend", taskPacket: packet({ objective: "Noise flood" }), timeoutSec: 1, gate: false },
+      { id: "build", type: "backend", taskPacket: packet({ objective: "Build quickly" }), gate: false },
+    ],
+  }));
+  const notifier = join(directory, "notify-slow.mjs");
+  writeFileSync(notifier, `#!${process.execPath}\nsetTimeout(() => process.exit(0), 120);\n`);
+  chmodSync(notifier, 0o755);
+  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
+  try {
+    const result = await runContract(path);
+    assert.equal(nodeState(result, "noise").status, "exhausted", "the flooding node is stopped by its wall-clock deadline");
+    assert.equal(nodeState(result, "build").status, "done", "the quiet node completes");
+    const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
+    const journal = readFileSync(join(campaignPath, "journal.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const facts = journal.filter((entry) => entry.type === "liveness");
+    assert.ok(facts.length >= 2, "the run records liveness facts around its material transitions");
+    const transitions = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n")
+      .map(line => JSON.parse(line))
+      .filter((event) => event.node && event.from && event.to && event.from !== event.to);
+    assert.ok(transitions.length >= 2, "the run records distinct status transitions");
+    for (const fact of facts) {
+      const preceding = transitions.filter((event) => event.at <= fact.at);
+      assert.ok(preceding.length > 0, `every liveness fact follows a status transition (fact ${fact.at})`);
+      const newestTransitionAt = preceding.reduce((newest, event) => event.at > newest ? event.at : newest, "0");
+      assert.ok(
+        fact.lastProgressAt <= newestTransitionAt,
+        `liveness lastProgressAt ${fact.lastProgressAt} must not exceed the newest transition ${newestTransitionAt} recorded before fact ${fact.at} (invocation-only churn must not count as progress)`,
+      );
+    }
+    const newestTransitionAt = transitions.reduce((newest, event) => event.at > newest ? event.at : newest, "0");
+    assert.equal(facts.at(-1)?.lastProgressAt, newestTransitionAt, "the terminal liveness fact folds the last transition, never the current time");
+  } finally {
+    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
+  }
+});
+
+test("liveness state reports paused_quota only while a provider backoff is pending and failed once exhaustion is terminal", async () => {
+  // A failover edge with a future backoffUntil holds its node as pending, so
+  // liveness must report paused_quota for that shape and only that shape.
+  // Terminal exhaustion with no failover route derives failed even when the
+  // error is quota-flavored: the run is not waiting for a provider to come
+  // back, it is over.
+  const directory = mkdtempSync(join(tmpdir(), "runner-liveness-state-"));
+  const first = fakeCodex(directory, "exhausted");
+  const second = fakeCodex(directory, "pass");
+  const backoffPath = writeContract(directory, fixture({
+    id: "liveness-backoff-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    runtimeDefaults: { worker: "first", judge: "first" },
+    runtimes: {
+      first: { driver: "codex", model: "first", executable: first },
+      second: { driver: "codex", model: "second", executable: second },
+    },
+    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second", backoffSec: 0.25 }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const backoffResult = await runContract(backoffPath);
+  const backoffState = nodeState(backoffResult);
+  assert.equal(backoffState.status, "done", backoffState.error?.message);
+  const backoffFacts = readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "journal.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "liveness");
+  const backoffStates = backoffFacts.map((fact) => fact.state);
+  assert.ok(backoffStates.includes("paused_quota"), `a run awaiting its failover backoff journals paused_quota (saw ${backoffStates.join(",")})`);
+
+  const terminalDirectory = mkdtempSync(join(tmpdir(), "runner-liveness-terminal-"));
+  const quotaPrimary = fakeCodex(terminalDirectory, "quota-429");
+  const terminalPath = writeContract(terminalDirectory, fixture({
+    id: "liveness-quota-terminal-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: { primary: { driver: "codex", model: "primary", executable: quotaPrimary } },
+    runtimeRules: [],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const terminalResult = await runContract(terminalPath);
+  const terminalState = nodeState(terminalResult);
+  assert.equal(terminalState.status, "exhausted", terminalState.error?.message);
+  assert.equal(terminalState.error?.code, "quota_exhausted");
+  const terminalFacts = readFileSync(join(terminalDirectory, ".runs", "campaigns", "test-campaign", "journal.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type === "liveness");
+  const terminalStates = terminalFacts.map((fact) => fact.state);
+  assert.ok(terminalStates.includes("failed"), `terminal quota exhaustion without a failover route journals failed (saw ${terminalStates.join(",")})`);
+  assert.ok(!terminalStates.includes("paused_quota"), `terminal exhaustion must not be reported as a live quota pause (saw ${terminalStates.join(",")})`);
 });
 
 test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {

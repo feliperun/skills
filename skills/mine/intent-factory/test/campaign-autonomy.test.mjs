@@ -5,13 +5,15 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
+import { campaignDir, initializeCampaign, readJournal } from "../scripts/campaign.mjs";
 import {
+  CAMPAIGN_PLAN_FILE,
   CAMPAIGN_LEASE_FILE,
   CAMPAIGN_OUTBOX_FILE,
   CAMPAIGN_STATE_FILE,
   campaignStatus,
   causalFailureNode,
+  checkRunLiveness,
   classifyTransition,
   configureCampaign,
   createRepairContract,
@@ -25,6 +27,7 @@ import {
   superviseCampaignOnce,
   watchCampaign,
 } from "../scripts/campaign-autonomy.mjs";
+import { readHeartbeat } from "../scripts/heartbeat.mjs";
 import { acquireFileMutationLock, acquireLease, LeaseBusyError, writeJsonAtomic } from "../scripts/store.mjs";
 import { delay, fixture, packet } from "./helpers.mjs";
 
@@ -441,6 +444,47 @@ test("budget liveness drain pushes attention through adapters but never progress
   }
 });
 
+test("a failing adapter with a multi-kilobyte error leaves the event pending with a bounded lastError", async () => {
+  const value = tempRepo();
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  const longError = `adapter rejected: ${"e".repeat(6 * 1024)}`;
+  const adapter = {
+    id: "failing-push",
+    capabilities: { canPush: true, canWake: false, canRenderAmbient: false },
+    /** @returns {Promise<{ok: false, error: string}>} */
+    async deliver() {
+      return { ok: false, error: longError };
+    },
+  };
+  try {
+    if (previous !== undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    // Fill the bounded event fields so an unbounded persisted error would push
+    // the serialized event past the 8 KiB writeOutbox retention bound.
+    enqueueNotification(
+      value.campaignPath,
+      "run.attention",
+      "initial-run:build:budget_attention",
+      `attention ${"s".repeat(2 * 1024)}`,
+      { runId: "initial-run", nodeId: "build", code: "budget_attention", detail: "d".repeat(2 * 1024) },
+    );
+    const drained = await drainNotifications(value.campaignPath, { adapters: [adapter] });
+    assert.equal(drained.pending, 1, "the failed push must leave the event pending");
+    const outbox = readNotificationOutbox(value.campaignPath);
+    assert.equal(outbox.length, 1, "the oversized retry history must not erase the event");
+    const event = outbox[0];
+    assert.equal(event.deliveredAt, null, "the event stays undelivered");
+    assert.equal(event.attempts, 1);
+    assert.equal(typeof event.lastError, "string");
+    assert.ok((event.lastError ?? "").length <= 200, "lastError is bounded to 200 characters");
+    assert.ok((event.lastError ?? "").endsWith("…"), "lastError truncates with an ellipsis marker");
+    assert.ok(Buffer.byteLength(JSON.stringify(event), "utf8") <= 8 * 1024, "the retained event stays inside the serialized budget");
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
+    cleanup(value);
+  }
+});
+
 test("campaign progress events coalesce by key until delivered", async () => {
   const value = tempRepo();
   const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
@@ -570,6 +614,65 @@ test("public campaign CLI continues a detached controller after the launcher exi
     assert.equal(status.status, "completed");
     assert.equal(status.runs[0].observed.allGreen, true);
     assert.ok(status.outbox.some(/** @param {{type: string}} event */ (event) => event.type === "campaign.completed"));
+  } finally {
+    try { rmSync(root, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test("watchdog stale liveness emits one deduplicated attention event and refreshes the heartbeat", async () => {
+  const root = mkdtempSync(join(tmpdir(), "campaign-watchdog-"));
+  try {
+    const runsDir = join(root, ".runs");
+    const created = initializeCampaign(runsDir, { campaignId: "watchdog", goal: "Watchdog staleness" });
+    const runDir = join(runsDir, "stale-run");
+    mkdirSync(join(runDir, "nodes"), { recursive: true });
+    const updatedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    writeJsonAtomic(join(runDir, "nodes", "build.json"), { id: "build", status: "running", phase: "worker", updatedAt });
+    const first = await checkRunLiveness(created.path, runDir, { staleSec: 1 });
+    assert.equal(first.stale, true);
+    assert.equal(first.eventKey, `stale-run:stale_liveness:${updatedAt}`);
+    await checkRunLiveness(created.path, runDir, { staleSec: 1 });
+    const attention = readNotificationOutbox(created.path).filter((event) => event.type === "run.attention" && event.data?.code === "stale_liveness");
+    assert.equal(attention.length, 1, "repeated passes in the same staleness epoch enqueue exactly one event");
+    assert.deepEqual(attention[0].data, { runId: "stale-run", code: "stale_liveness", staleSec: 1, lastObservedAt: updatedAt });
+    const heartbeat = readHeartbeat(created.path);
+    assert.ok(heartbeat !== null, "the watchdog refreshes the heartbeat");
+    assert.equal(heartbeat.state, "blocked");
+    assert.match(String(heartbeat.attention), /stale liveness/u);
+    assert.equal(heartbeat.lastProgressAt, Math.floor(Date.parse(updatedAt) / 1000));
+    const liveness = readJournal(created.path).filter((entry) => entry.type === "liveness");
+    assert.equal(liveness.length, 1, "the staleness epoch journals exactly one liveness fact");
+    assert.equal(liveness[0].state, "blocked");
+    assert.equal(liveness[0].attention, "stale liveness: no progress for 120 min");
+  } finally {
+    try { rmSync(root, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test("campaign liveness planless works without plan.json", async () => {
+  const root = mkdtempSync(join(tmpdir(), "campaign-planless-"));
+  try {
+    const runsDir = join(root, ".runs");
+    const created = initializeCampaign(runsDir, { campaignId: "planless", goal: "Watchdog without a plan" });
+    const campaignPath = created.path;
+    assert.equal(existsSync(join(campaignPath, CAMPAIGN_PLAN_FILE)), false);
+    assert.equal(existsSync(join(campaignPath, CAMPAIGN_STATE_FILE)), false);
+    const runDir = join(runsDir, "planless-run");
+    mkdirSync(join(runDir, "nodes"), { recursive: true });
+    writeJsonAtomic(join(runDir, "nodes", "build.json"), {
+      id: "build",
+      status: "running",
+      phase: "worker",
+      updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    });
+    const result = await checkRunLiveness(campaignPath, runDir, { staleSec: 1 });
+    assert.equal(result.stale, true);
+    const outbox = readNotificationOutbox(campaignPath);
+    assert.equal(outbox.filter((event) => event.type === "run.attention" && event.data?.code === "stale_liveness").length, 1);
+    assert.equal(existsSync(join(campaignPath, CAMPAIGN_PLAN_FILE)), false, "the watchdog never writes a plan");
+    assert.equal(existsSync(join(campaignPath, CAMPAIGN_STATE_FILE)), false, "the watchdog never writes control state");
+    assert.equal(existsSync(join(campaignPath, "campaign.json")), true);
+    assert.equal(existsSync(join(campaignPath, "journal.jsonl")), true);
   } finally {
     try { rmSync(root, { recursive: true, force: true }); } catch {}
   }
