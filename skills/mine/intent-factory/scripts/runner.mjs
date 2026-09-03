@@ -91,6 +91,7 @@ import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs
 import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, drainNotifications, enqueueNotification } from "./campaign-autonomy.mjs";
+import { recordLiveness } from "./heartbeat.mjs";
 import {
   canonicalBudgetHash,
   deriveBudgetDecision,
@@ -185,6 +186,151 @@ async function notifyCampaign(campaignPath, type, key, summary, data = {}, progr
     return;
   }
   await drainNotificationsSafely(campaignPath);
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} maxChars
+ * @returns {string|null}
+ */
+function boundedChars(value, maxChars) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const chars = Array.from(value);
+  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
+}
+
+/**
+ * @param {string|null} left
+ * @param {string} right
+ * @returns {string}
+ */
+function newestIso(left, right) {
+  return left === null || right > left ? right : left;
+}
+
+/**
+ * The node whose liveness is reported: the running node when one exists, else
+ * the most recently updated node in contract order. Null only when the
+ * contract has no nodes.
+ *
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @returns {NodeSnapshot|null}
+ */
+function activeLivenessNode(contract, states) {
+  /** @type {NodeSnapshot[]} */
+  const ordered = [];
+  for (const node of contract.nodes) {
+    const state = states.get(node.id);
+    if (state !== undefined) ordered.push(state);
+  }
+  const running = ordered.find((state) => state.status === "running");
+  if (running) return running;
+  /** @type {NodeSnapshot|null} */
+  let newest = null;
+  for (const state of ordered) {
+    if (newest === null) {
+      newest = state;
+      continue;
+    }
+    if (state.updatedAt > newest.updatedAt) newest = state;
+  }
+  return newest;
+}
+
+/**
+ * Derive the run-level liveness state from the node snapshots alone.
+ *
+ * @param {Map<string, NodeSnapshot>} states
+ * @returns {string}
+ */
+function livenessState(states) {
+  const all = [...states.values()];
+  const running = all.filter((state) => state.status === "running");
+  if (running.some((state) => state.phase !== "judge")) return "running";
+  if (running.length > 0) return "waiting_gate";
+  if (all.some((state) => state.status === "exhausted" && /provider_exhausted|rate_limit|quota_exhausted|usage_limit/u.test(state.error?.code ?? ""))) return "paused_quota";
+  if (all.some((state) => state.status === "blocked")) return "blocked";
+  if (all.length > 0 && all.every((state) => state.status === "done")) return "done";
+  if (all.length > 0 && all.every((state) => TERMINAL.has(state.status)) && all.some((state) => state.status !== "done")) return "failed";
+  return "running";
+}
+
+/**
+ * Newest observed progress timestamp: every node's progress.lastProgressAt
+ * plus the persisted updatedAt of each node (a status or phase change writes
+ * it), never the current time. Falls back to the run startedAt.
+ *
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} runDir
+ * @returns {string}
+ */
+function lastLivenessProgressAt(states, runDir) {
+  let newest = null;
+  for (const state of states.values()) {
+    const progress = /** @type {{lastProgressAt?: unknown}|null|undefined} */ (state.progress);
+    if (progress && typeof progress.lastProgressAt === "string") newest = newestIso(newest, progress.lastProgressAt);
+    if (typeof state.updatedAt === "string") newest = newestIso(newest, state.updatedAt);
+  }
+  if (newest !== null) return newest;
+  try {
+    const metadata = /** @type {{startedAt?: unknown}} */ (readJson(join(runDir, "run.json")));
+    if (typeof metadata.startedAt === "string") return metadata.startedAt;
+  } catch {}
+  return new Date().toISOString();
+}
+
+/**
+ * Append one derived liveness fact and refresh the campaign heartbeat. A
+ * failure only writes one stderr warning: observability never stops the
+ * controller.
+ *
+ * @param {{path: string}} campaign
+ * @param {string} runDir
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {{attention?: string|null}} [options]
+ */
+function recordRunLiveness(campaign, runDir, contract, states, { attention: attentionOption } = {}) {
+  try {
+    const nodes = contract.nodes;
+    const active = activeLivenessNode(contract, states);
+    const usagePolicy = contract.usagePolicy;
+    const weightedUsed = usagePolicy === false
+      ? Math.round(nodes.reduce((total, node) => total + weightedInput(states.get(node.id)?.usage, 1), 0))
+      : Math.round(campaignUsage(campaign.path, usagePolicy).budgetInputTokens);
+    const weightedCap = usagePolicy === false ? contract.maxInputTokens : usagePolicy.maxInputTokens;
+    let attention = attentionOption || null;
+    if (attention === null) {
+      for (const state of states.values()) {
+        if (state.status === "blocked" && state.error?.code === "budget_attention") {
+          attention = boundedChars(state.error.message, 80);
+          break;
+        }
+      }
+    }
+    /** @type {import("./heartbeat.mjs").LivenessFact} */
+    const fact = {
+      type: "liveness",
+      eventId: randomUUID(),
+      at: new Date().toISOString(),
+      campaignId: basename(campaign.path),
+      runId: basename(runDir),
+      nodeId: active?.id ?? null,
+      phase: active ? active.phase : contract.id,
+      checkpointsDone: nodes.filter((node) => states.get(node.id)?.status === "done").length,
+      checkpointsTotal: nodes.length,
+      runtime: active?.runtime?.id ?? null,
+      state: livenessState(states),
+      weightedUsed,
+      weightedCap,
+      lastProgressAt: lastLivenessProgressAt(states, runDir),
+      attention,
+    };
+    recordLiveness(campaign.path, fact);
+  } catch (error) {
+    process.stderr.write(`[warn] liveness record failed: ${errorMessage(error)}\n`);
+  }
 }
 
 /**
@@ -392,6 +538,8 @@ export async function resumeRun(runDirPath) {
           },
           invocation?.runtimeId ?? null,
           lease,
+          states,
+          campaign.path,
         );
         continue;
       }
@@ -431,7 +579,7 @@ export async function resumeRun(runDirPath) {
             ? recoverWorkerResult(runDir, state, contract, node)
             : canonicalWorkerResultText(runDir, node.id) ?? recovery.result;
         } catch (error) {
-          applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error));
+          applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
           continue;
         }
         if (recovery.phase === "worker" && workerResult !== null && workerResult !== undefined) {
@@ -474,14 +622,14 @@ export async function resumeRun(runDirPath) {
           try {
             parsedWorkerResult = parseWorkerResult(String(extractJson(workerResult) ?? workerResult));
           } catch (error) {
-            applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error));
+            applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
             continue;
           }
           if (node.taskPacket.mode === "discovery" && parsedWorkerResult.status === "done") {
             try {
               parseDiscoveryResult(parsedWorkerResult, contract.cwd);
             } catch (error) {
-              applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error));
+              applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
               continue;
             }
           }
@@ -550,7 +698,7 @@ export async function resumeRun(runDirPath) {
         if (recovery.phase === "worker" && node.gate.enabled) {
           transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
         } else if (recovery.phase === "judge") {
-          applyJudgeResult(contract, node, state, recovery.result, runDir, lease);
+          applyJudgeResult(contract, node, state, recovery.result, runDir, lease, null, states, campaign.path);
         } else {
           transition(runDir, state, "done", { phase: "complete", error: null, blockedBy: [] }, lease);
         }
@@ -844,6 +992,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         { runId: basename(runDir), nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
         `${basename(runDir)}:${state.id}`,
       );
+      recordRunLiveness(campaign, runDir, contract, states);
       if (state.phase === "budget" && state.error?.code === "budget_attention") {
         await notifyCampaign(
           campaign.path,
@@ -944,7 +1093,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       });
       await enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeightOf(contract));
       blockDependents(contract, runDir, states, lease);
-      enforceTokenBudget(contract, runDir, states, running, lease);
+      enforceTokenBudget(contract, runDir, states, running, lease, campaign.path);
       enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
       enforceCostBudget(contract, runDir, states, lease, campaign.path);
 
@@ -980,7 +1129,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
           if (!ensureBudgetDecision(contract, node, state, states, campaign.path, runDir, lease)) continue;
           state.attempt += 1;
           const prompt = state.gate?.verdict === "fail" ? retryPrompt(node, state.gate) : node.prompt;
-          startWorker(contract, node, state, runDir, running, prompt, lease);
+          startWorker(contract, node, state, runDir, running, prompt, lease, states, campaign.path);
         }
       }
 
@@ -1004,6 +1153,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   renderCampaignHandoffSafely(campaign, runsDir, runDir);
   writeFindingsArtifact(runDir, contract, states);
   const failed = [...states.values()].filter((state) => state.status !== "done");
+  recordRunLiveness(campaign, runDir, contract, states);
   await notifyCampaign(
     campaign.path,
     "run.terminal",
@@ -1601,8 +1751,10 @@ function invocationBudgetLimit(contract, state) {
  * @param {Map<string, Job>} running
  * @param {string} prompt
  * @param {LeaseHandle} lease
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  */
-function startWorker(contract, node, state, runDir, running, prompt, lease) {
+function startWorker(contract, node, state, runDir, running, prompt, lease, states, campaignPath) {
   const runtime = routeRuntimeForState(contract, node, state, "worker");
   const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "worker", prompt);
   // The worker prompt directs the provider to write the canonical result file;
@@ -1672,7 +1824,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
           runtimeFingerprint: fingerprintRuntime(runtime),
           prompt: effectivePrompt,
         });
-        activateBudgetContinuation(runDir, node, state, lease);
+        activateBudgetContinuation(runDir, node, state, lease, contract, states, campaignPath);
       },
       onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
       onProgress: () => writeNode(runDir, state, lease),
@@ -3045,7 +3197,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         // treats a torn file as delivered work, so the rotation-handoff,
         // budget-continuation, exhaustion, and failure branches below decide.
         if (!job.rotationReason && envelope.status === "done") {
-          applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error));
+          applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
           continue;
         }
         adoptedWorkerResult = null;
@@ -3079,7 +3231,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // with any final message normalizes to done), so the one-turn handoff
     // starts unless the durable result was adopted above.
     if (!adoptedWorkerResult && job.phase === "worker" && job.rotationReason) {
-      if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease)) continue;
+      if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease, states, campaignPath)) continue;
       startRotationHandoff(contract, runDir, running, job, state, lease, envelope);
       continue;
     }
@@ -3099,12 +3251,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       if (state.budgetDecision && state.budgetState && rolloutBudgetExhausted(envelope.error?.message)) {
         const cacheReadWeight = cacheReadWeightOf(contract);
         const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-        if (applyDerivedBudgetStop(job.node, state, runDir, lease, cumulativeSeen)) {
+        if (applyDerivedBudgetStop(job.node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) {
           settleDerivedBudgetStop(contract, job.node, state, runDir, lease);
         }
         continue;
       }
-      handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease);
+      handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease, states, campaignPath);
       continue;
     }
     // A failed judge envelope (status failed, any code) is a provider failure,
@@ -3146,7 +3298,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           phase: "worker",
           error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
         }, lease);
-      } else if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease)) {
+      } else if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease, states, campaignPath)) {
         continue;
       } else {
         startResultMaterialization(
@@ -3187,14 +3339,14 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           }, lease);
           continue;
         }
-        applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error));
+        applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
         continue;
       }
       if (job.node.taskPacket.mode === "discovery" && workerResult.status === "done") {
         try {
           parseDiscoveryResult(workerResult, contract.cwd);
         } catch (error) {
-          applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error));
+          applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
           continue;
         }
       }
@@ -3209,13 +3361,13 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       }
       if (job.resultMaterialization && canReuseResultEvidence(state, job.node)) {
         consumeManualHandoff(state);
-        if (job.node.gate.enabled) applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running);
+        if (job.node.gate.enabled) applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running, states, campaignPath);
         else transition(runDir, state, "done", { phase: "complete", result: workerResult, error: null }, lease);
         continue;
       }
       await executeControllerVerification(contract, runDir, job.node, state, lease);
       if (!state.verification?.passed) {
-        applyVerificationFailure(contract, job.node, state, runDir, running, lease);
+        applyVerificationFailure(contract, job.node, state, runDir, running, lease, states, campaignPath);
         continue;
       }
       persistNodeCapsule(
@@ -3243,13 +3395,14 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
               reason: "worker completed; consume the judge reserve before ending the run",
             },
           }, lease);
+          recordRunLiveness({ path: campaignPath }, runDir, contract, states);
         }
         startJudge(contract, job.node, state, runDir, running, workerResult, lease);
       }
       else transition(runDir, state, "done", { phase: "complete", result: workerResult }, lease);
       continue;
     }
-    applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running);
+    applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running, states, campaignPath);
   }
 }
 
@@ -3265,8 +3418,10 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
  * @param {ProviderEnvelope} envelope
  * @param {string|null} currentRuntime
  * @param {LeaseHandle} lease
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  */
-function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lease) {
+function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lease, states, campaignPath) {
   const error = envelope.error ?? { code: "provider_exhausted", message: "provider exhausted" };
   // A native rollout-budget stop on a budgeted node settles through the
   // derived budget policy (extension, predeclared continuation, or
@@ -3274,7 +3429,7 @@ function handleProviderExhaustion(contract, runDir, node, state, role, envelope,
   if (state.budgetDecision && state.budgetState && rolloutBudgetExhausted(error.message)) {
     const cacheReadWeight = cacheReadWeightOf(contract);
     const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-    if (applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen)) {
+    if (applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) {
       settleDerivedBudgetStop(contract, node, state, runDir, lease);
     }
     return;
@@ -3453,9 +3608,11 @@ const JUDGE_MAX_FAILURES = 2;
  * @param {unknown} result
  * @param {string} runDir
  * @param {LeaseHandle} lease
- * @param {Map<string, Job>|null} [running]
+ * @param {Map<string, Job>|null} running
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  */
-function applyJudgeResult(contract, node, state, result, runDir, lease, running = null) {
+function applyJudgeResult(contract, node, state, result, runDir, lease, running, states, campaignPath) {
   /** @type {JudgeVerdict} */
   let verdict;
   try {
@@ -3476,7 +3633,7 @@ function applyJudgeResult(contract, node, state, result, runDir, lease, running 
     resetPhaseRouting(state);
     state.revisions += 1;
     state.attempt += 1;
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease);
+    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
     else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
   } else {
     transition(runDir, state, "exhausted", { phase: "judge", gate: verdict, error: { code: "revision_cap", message: verdict.summary } }, lease);
@@ -3513,8 +3670,10 @@ function verificationFailureVerdict(state) {
  * @param {string} runDir
  * @param {Map<string, Job>} running
  * @param {LeaseHandle} lease
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  */
-function applyVerificationFailure(contract, node, state, runDir, running, lease) {
+function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath) {
   const verdict = verificationFailureVerdict(state);
   state.gate = verdict;
   if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
@@ -3522,7 +3681,7 @@ function applyVerificationFailure(contract, node, state, runDir, running, lease)
     state.revisions += 1;
     state.attempt += 1;
     process.stdout.write(`[verification] ${node.id} retry · ${verdict.summary}\n`);
-    startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease);
+    startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
     return;
   }
   transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
@@ -3540,8 +3699,10 @@ function applyVerificationFailure(contract, node, state, runDir, running, lease)
  * @param {Map<string, Job>|null} running
  * @param {LeaseHandle} lease
  * @param {string} message
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  */
-function applyInvalidWorkerResult(contract, node, state, runDir, running, lease, message) {
+function applyInvalidWorkerResult(contract, node, state, runDir, running, lease, message, states, campaignPath) {
   const verdict = /** @type {GateResult} */ ({
     verdict: "fail",
     maxSeverity: "critical",
@@ -3558,7 +3719,7 @@ function applyInvalidWorkerResult(contract, node, state, runDir, running, lease,
     state.revisions += 1;
     state.attempt += 1;
     process.stdout.write(`[worker-result] ${node.id} retry · ${verdict.summary}\n`);
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease);
+    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
     else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
     return;
   }
@@ -3964,6 +4125,7 @@ function ensureBudgetDecision(contract, node, state, states, campaignPath, runDi
   state.budgetState = initialBudgetState(decision);
   writeNode(runDir, state, lease);
   appendTransitionEvent(runDir, state, state.status, state.status, { budgetDecision: decision }, lease);
+  recordRunLiveness({ path: campaignPath }, runDir, contract, states);
   if (decision.status === "rejected") {
     transition(runDir, state, "blocked", {
       phase: "budget",
@@ -3987,8 +4149,16 @@ function assertBudgetContinuationIdentity(node, state) {
   }
 }
 
-/** @param {string} runDir @param {ValidatedNode} node @param {NodeSnapshot} state @param {LeaseHandle} lease */
-function activateBudgetContinuation(runDir, node, state, lease) {
+/**
+ * @param {string} runDir
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {LeaseHandle} lease
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
+ */
+function activateBudgetContinuation(runDir, node, state, lease, contract, states, campaignPath) {
   const budget = state.budgetState;
   const pending = budget?.pendingSegment;
   if (!budget || !pending) return;
@@ -4009,6 +4179,7 @@ function activateBudgetContinuation(runDir, node, state, lease) {
   appendTransitionEvent(runDir, state, state.status, state.status, {
     budgetAction: { type: "continuation_activated", segment: budget.segment, allocationTokens: pending.allocationTokens, id: pending.id },
   }, lease);
+  recordRunLiveness({ path: campaignPath }, runDir, contract, states);
 }
 
 /**
@@ -4252,9 +4423,12 @@ function settleDerivedBudgetStop(contract, node, state, runDir, lease) {
  * @param {string} runDir
  * @param {LeaseHandle} lease
  * @param {number} cumulativeSeen weighted tokens already spent
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  * @returns {boolean} true when the spend is not covered and the node must stop
  */
-function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
+function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath) {
   const budget = state.budgetState;
   if (!state.budgetDecision || !budget) return false;
   const progressSignature = state.progress?.heartbeatCount ? state.progress.progressSignature ?? null : null;
@@ -4269,6 +4443,7 @@ function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
     appendTransitionEvent(runDir, state, state.status, state.status, {
       budgetAction: { type: "extension", grantedTokens, currentCapTokens: nextBudget.currentCapTokens, progressSignature },
     }, lease);
+    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
     process.stdout.write(`[node] ${node.id} derived budget extended by ${grantedTokens} · cap ${nextBudget.currentCapTokens}\n`);
     if (cumulativeSeen <= nextBudget.currentCapTokens) return false;
   }
@@ -4284,6 +4459,7 @@ function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
     appendTransitionEvent(runDir, state, state.status, state.status, {
       budgetAction: { type: "continuation_planned", segment: pending.segment, allocationTokens: pending.allocationTokens, id: pending.id },
     }, lease);
+    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
   } else {
     currentBudget.status = "attention";
     state.budgetState = currentBudget;
@@ -4291,6 +4467,7 @@ function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
     appendTransitionEvent(runDir, state, state.status, state.status, {
       budgetAction: { type: "attention", observedTokens: cumulativeSeen, currentCapTokens: currentBudget.currentCapTokens },
     }, lease);
+    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
   }
   return true;
 }
@@ -4308,9 +4485,11 @@ function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
  * @param {NodeSnapshot} state
  * @param {string} runDir
  * @param {LeaseHandle} lease
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
  * @returns {boolean} true when the dispatch was refused and the node settled
  */
-function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease) {
+function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease, states, campaignPath) {
   // A derived per-node budget (budgetProfile) applies with or without a
   // campaign usage policy; only a missing decision or cap means there is
   // nothing to refuse against.
@@ -4318,7 +4497,7 @@ function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease) {
   const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
   const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
   if (cumulativeSeen <= state.budgetState.currentCapTokens) return false;
-  if (!applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen)) return false;
+  if (!applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) return false;
   settleDerivedBudgetStop(contract, node, state, runDir, lease);
   return true;
 }
@@ -4340,8 +4519,9 @@ function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease) {
  * @param {Map<string, NodeSnapshot>} states
  * @param {Map<string, Job>} running
  * @param {LeaseHandle} lease
+ * @param {string} campaignPath
  */
-function enforceTokenBudget(contract, runDir, states, running, lease) {
+function enforceTokenBudget(contract, runDir, states, running, lease, campaignPath) {
   const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
   const workerCap = campaignWorkerCap(contract);
   const observed = new Map();
@@ -4363,7 +4543,7 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
     const cap = budget?.currentCapTokens ?? job.node.maxInputTokens;
     if (job.phase === "worker" && cap !== undefined && cumulativeSeen > cap && !job.budgetStop) {
       if (job.state.budgetDecision && budget) {
-        const stopped = applyDerivedBudgetStop(job.node, job.state, runDir, lease, cumulativeSeen);
+        const stopped = applyDerivedBudgetStop(job.node, job.state, runDir, lease, cumulativeSeen, contract, states, campaignPath);
         if (stopped) {
           job.budgetStop = "node";
           void terminateProcess(job).catch(() => {});
@@ -4410,6 +4590,7 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
             reason: "an active judge is protected from the run worker cap",
           },
         }, lease);
+        recordRunLiveness({ path: campaignPath }, runDir, contract, states);
       }
       continue;
     }

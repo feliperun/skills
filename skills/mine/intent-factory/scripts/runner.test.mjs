@@ -3132,7 +3132,7 @@ test("wall-clock kill without usage charges the remaining derived cap", async ()
   assert.equal(entries[0].usage.inputTokens, state.budgetState?.currentCapTokens);
 });
 
-test("budget continuation D35 checkpoints and activates one predeclared segment", async () => {
+test("budget continuation D35 checkpoints and activates one predeclared segment with identical continuation scope", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-budget-continuation-"));
   const provider = budgetContinuationCodex(directory);
   const path = writeContract(directory, fixture({
@@ -3165,6 +3165,54 @@ test("budget continuation D35 checkpoints and activates one predeclared segment"
   const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   assert.equal(events.filter(event => event.budgetAction?.type === "continuation_planned").length, 1);
   assert.equal(events.filter(event => event.budgetAction?.type === "continuation_activated").length, 1);
+  const planned = events.find((event) => event.budgetAction?.type === "continuation_planned");
+  const packetHash = state.budgetDecision?.packetHash;
+  assert.ok(packetHash && typeof planned?.budgetAction?.id === "string" && planned.budgetAction.id.startsWith(packetHash), `planned segment ${planned?.budgetAction?.id ?? ""} must carry the frozen decision packetHash ${packetHash ?? "missing"}`);
+});
+
+test("budget liveness D36 records heartbeat attention and a human-channel event within one supervisor interval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-liveness-"));
+  const path = writeContract(directory, fixture({
+    id: "node-cap-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Flood tokens" }),
+      maxInputTokens: 500,
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      gate: false,
+    }],
+  }));
+  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
+  const notifier = join(directory, "notify-success.mjs");
+  writeFileSync(notifier, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n");
+  chmodSync(notifier, 0o755);
+  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
+  let result;
+  try {
+    result = await withFakeCodex(directory, "token-flood", () => runContract(path));
+  } finally {
+    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
+  }
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "budget_attention");
+  const heartbeatPath = join(campaignPath, "heartbeat.json");
+  assert.equal(existsSync(heartbeatPath), true, "heartbeat.json exists in the campaign directory");
+  const heartbeat = JSON.parse(readFileSync(heartbeatPath, "utf8"));
+  assert.equal(heartbeat.state, "blocked");
+  assert.match(String(heartbeat.attention ?? ""), /budget/u, "heartbeat attention names the budget block");
+  const journal = readFileSync(join(campaignPath, "journal.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(journal.some((entry) => entry.type === "liveness"), "journal.jsonl records at least one liveness fact");
+  const outbox = readNotificationOutbox(campaignPath);
+  const attention = outbox.find((event) => event.type === "run.attention" && event.data?.code === "budget_attention");
+  assert.ok(attention, "outbox holds the budget_attention run.attention event");
+  assert.notEqual(attention.deliveredAt, null, "the attention event reached the human-channel transport");
 });
 
 test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {

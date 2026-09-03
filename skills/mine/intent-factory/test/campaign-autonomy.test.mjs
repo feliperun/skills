@@ -404,6 +404,43 @@ test("provider exhaustion with no authorized failover route is attention, never 
   } finally { cleanup(value); }
 });
 
+test("budget liveness drain pushes attention through adapters but never progress", async () => {
+  const value = tempRepo();
+  const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  /** @type {Record<string, unknown>[]} */
+  const delivered = [];
+  const adapter = {
+    id: "test-push",
+    capabilities: { canPush: true, canWake: false, canRenderAmbient: false },
+    /** @param {Record<string, unknown>} event */
+    async deliver(event) {
+      delivered.push(event);
+      return { ok: true };
+    },
+  };
+  try {
+    if (previous !== undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    enqueueNotification(value.campaignPath, "campaign.progress", "initial-run:build:running", "build running", { runId: "initial-run", nodeId: "build", status: "running" }, "initial-run");
+    enqueueNotification(value.campaignPath, "run.attention", "initial-run:build:budget_attention", "build needs budget attention", { runId: "initial-run", nodeId: "build", code: "budget_attention" });
+    const drained = await drainNotifications(value.campaignPath, { adapters: [adapter] });
+    assert.equal(drained.pending, 1, "only the never-pushed progress event stays pending");
+    assert.equal(delivered.length, 1, "the adapter saw exactly the attention event");
+    assert.equal(delivered[0].type, "run.attention");
+    const outbox = readNotificationOutbox(value.campaignPath);
+    const attention = outbox.find((event) => event.type === "run.attention");
+    assert.ok(attention, "run.attention event exists in the outbox");
+    assert.notEqual(attention.deliveredAt, null);
+    const progress = outbox.find((event) => event.type === "campaign.progress");
+    assert.ok(progress, "campaign.progress event exists in the outbox");
+    assert.equal(progress.deliveredAt, null, "campaign.progress is never delivered by an adapter");
+    assert.ok(!delivered.some((event) => event.type === "campaign.progress"), "progress was never handed to the adapter");
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;
+    cleanup(value);
+  }
+});
+
 test("campaign progress events coalesce by key until delivered", async () => {
   const value = tempRepo();
   const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;

@@ -22,6 +22,7 @@ import {
   readLease,
   writeJsonAtomic,
 } from "./store.mjs";
+import { loadNotifyAdapters, PUSH_EVENT_TYPES, pushNotification } from "./notify/index.mjs";
 import {
   campaignDir,
   closeCampaign,
@@ -574,14 +575,17 @@ export function campaignStatus(campaignPath) {
 /**
  * Deliver pending notification events. Delivery is at-least-once: an event
  * stays pending until the configured executable exits successfully.
+ * INTENT_FACTORY_NOTIFY_BIN stays the primary transport; when it is unset,
+ * undelivered push events are handed to the platform notify adapters.
  * Each delivery attempt is merged into a fresh durable read under the outbox
  * mutation lock, so a concurrent enqueue can never be clobbered by a stale
- * drainer snapshot.
+ * drainer snapshot, and the lock is never held across adapter I/O.
  *
  * @param {string} campaignPath
+ * @param {{adapters?: ReturnType<typeof loadNotifyAdapters>}} [options]
  * @returns {Promise<{delivered: number, pending: number}>}
  */
-export async function drainNotifications(campaignPath) {
+export async function drainNotifications(campaignPath, options = {}) {
   const executable = process.env.INTENT_FACTORY_NOTIFY_BIN;
   const snapshot = (() => {
     const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
@@ -591,8 +595,40 @@ export async function drainNotifications(campaignPath) {
       lock.release();
     }
   })();
-  if (!executable) return { delivered: 0, pending: snapshot.filter((event) => !event.deliveredAt).length };
   let delivered = 0;
+  if (!executable) {
+    const adapters = options.adapters ?? loadNotifyAdapters();
+    for (const event of selectPushableEvents(snapshot)) {
+      const result = await pushNotification(event, adapters);
+      const failed = result.delivered.length === 0;
+      const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+      try {
+        const fresh = readNotificationOutbox(campaignPath);
+        const record = fresh.find((candidate) => candidate.eventId === event.eventId);
+        if (record) {
+          if (result.delivered.length > 0) {
+            record.deliveredAt = new Date().toISOString();
+            record.lastError = null;
+            writeOutbox(campaignPath, fresh);
+          } else if (result.failed.length > 0) {
+            record.attempts = (record.attempts ?? 0) + 1;
+            record.lastError = result.failed[0].error;
+            writeOutbox(campaignPath, fresh);
+          }
+        }
+      } finally {
+        lock.release();
+      }
+      if (!failed) delivered += 1;
+    }
+    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
+    try {
+      const fresh = readNotificationOutbox(campaignPath);
+      return { delivered, pending: fresh.filter((event) => !event.deliveredAt).length };
+    } finally {
+      lock.release();
+    }
+  }
   for (const event of snapshot) {
     if (event.deliveredAt) continue;
     const attemptEvent = /** @type {NotificationEvent} */ ({ ...event, attempts: event.attempts + 1 });
@@ -623,6 +659,18 @@ export async function drainNotifications(campaignPath) {
   } finally {
     lock.release();
   }
+}
+
+/**
+ * Pure selection of the outbox events an adapter push may deliver: every
+ * undelivered event whose type is in PUSH_EVENT_TYPES. campaign.progress
+ * events are never pushable and stay pending for pull consumers.
+ *
+ * @param {NotificationEvent[]} outbox
+ * @returns {NotificationEvent[]}
+ */
+export function selectPushableEvents(outbox) {
+  return outbox.filter((event) => !event.deliveredAt && PUSH_EVENT_TYPES.has(event.type));
 }
 
 /**
