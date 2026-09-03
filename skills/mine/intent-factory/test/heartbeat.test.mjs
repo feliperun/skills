@@ -5,13 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeCampaign, JOURNAL_FILE } from "../scripts/campaign.mjs";
 import {
+  GOVERNANCE_METRICS_FILE,
   HEARTBEAT_FILE,
   HEARTBEAT_MAX_BYTES,
+  deriveGovernanceMetrics,
   deriveHeartbeat,
   readHeartbeat,
   rebuildHeartbeat,
   recordLiveness,
   validateLivenessFact,
+  writeGovernanceMetrics,
 } from "../scripts/heartbeat.mjs";
 import { PUSH_EVENT_TYPES, loadNotifyAdapters, pushNotification, routeNotification } from "../scripts/notify/index.mjs";
 import { createMacosNotifier } from "../scripts/notify/os-macos.mjs";
@@ -184,6 +187,94 @@ test("heartbeat pinned on failure leaves the previous heartbeat file untouched",
   assert.throws(() => recordLiveness(created.path, makeFact({ eventId: "bad-2" }), { generatedAt: EMISSION_AT, eventId: "bad-2" }));
   assert.deepEqual(readFileSync(heartbeatPath), before);
   assert.deepEqual(leftoverTemps(created.path), []);
+});
+
+test("heartbeat canonical write produces key-sorted compact bytes within 1 KiB", () => {
+  const { created } = makeCampaign();
+  const heartbeatPath = join(created.path, HEARTBEAT_FILE);
+  const recorded = recordLiveness(created.path, makeFact({ eventId: "canonical-1" }), { generatedAt: EMISSION_AT, eventId: "canonical-1" });
+  const text = readFileSync(heartbeatPath, "utf8");
+  assert.ok(Buffer.byteLength(text, "utf8") <= HEARTBEAT_MAX_BYTES, "the written bytes stay inside 1 KiB");
+  assert.equal(text, `${JSON.stringify(recorded.heartbeat)}\n`, "the file is exactly the compact key-sorted serialization plus one newline");
+  const stored = JSON.parse(text);
+  assert.deepEqual(Object.keys(stored), [...Object.keys(stored)].sort(), "the top-level keys are sorted");
+  assert.deepEqual(stored, recorded.heartbeat);
+  assert.equal(text.startsWith('{"activeNode":'), true);
+  assert.deepEqual(readHeartbeat(created.path), recorded.heartbeat);
+  assert.deepEqual(leftoverTemps(created.path), []);
+});
+
+test("heartbeat strict timestamps reject non-ISO values", () => {
+  assert.doesNotThrow(() => validateLivenessFact(makeFact()));
+  assert.doesNotThrow(() => validateLivenessFact(makeFact({ at: "2026-09-02T12:00:00.5+02:00" })));
+  for (const at of ["2026-09-02 12:00:00", "September 2, 2026", "2026-09-02T12:00:00", "2026-09-02T12:00:00Z "]) {
+    assert.throws(() => validateLivenessFact(makeFact({ at })), TypeError, `at ${JSON.stringify(at)} must be rejected`);
+  }
+  assert.throws(() => validateLivenessFact(makeFact({ lastProgressAt: "2026-09-02 12:00:00" })), TypeError);
+  assert.throws(
+    () => deriveHeartbeat(makeFact(), { generatedAt: "2026-09-02 12:00:00" }),
+    (error) => error instanceof TypeError && /ISO-8601/u.test(error.message),
+  );
+  assert.doesNotThrow(() => deriveHeartbeat(makeFact(), { generatedAt: 1_785_744_000 }));
+  assert.equal(deriveHeartbeat(makeFact(), { generatedAt: EMISSION_AT }).generatedAt, Math.floor(Date.parse(EMISSION_AT) / 1000));
+});
+
+test("governance metrics are reproducible and silentStallRate is zero for D36 and D38 fixtures", () => {
+  const metricsNow = Date.parse("2026-09-02T12:00:00.000Z");
+  /** @param {number} seconds @returns {string} */
+  const at = (seconds) => new Date(metricsNow + seconds * 1000).toISOString();
+  /** @type {Record<string, unknown>[]} */
+  const livenessFacts = [
+    { type: "liveness", eventId: "f1", at: at(0), runId: "run-a", state: "running" },
+    { type: "liveness", eventId: "f2", at: at(41 * 60), runId: "run-a", state: "blocked", attention: "stale liveness: no progress for 41 min" },
+  ];
+  /** @type {Record<string, unknown>[]} */
+  const coveredOutbox = [{
+    eventId: "attention-1",
+    type: "run.attention",
+    campaignId: "camp",
+    at: at(40 * 60 + 30),
+    summary: "attention",
+    data: { code: "stale_liveness", runId: "run-a" },
+    deliveredAt: null,
+    attempts: 0,
+    lastError: null,
+  }];
+  const input = { events: [], livenessFacts, outbox: coveredOutbox, now: metricsNow + 42 * 60 * 1000, staleSec: 2400 };
+  const first = deriveGovernanceMetrics(input);
+  const second = deriveGovernanceMetrics(input);
+  assert.deepEqual(first, second, "identical inputs give identical metrics");
+  assert.equal(JSON.stringify(first), JSON.stringify(second), "identical inputs give identical JSON");
+  assert.equal(first.silentStallRate, 0, "a stale gap covered by the stale_liveness attention is never silent");
+  const uncovered = deriveGovernanceMetrics({ ...input, outbox: [] });
+  assert.equal(uncovered.silentStallRate, 1, "an uncovered stale gap is fully silent");
+
+  /** @type {Record<string, unknown>[]} */
+  const events = [
+    { at: at(0), node: "a", from: "pending", to: "pending", budgetDecision: { extensionAllowanceTokens: 200 } },
+    { at: at(60), node: "a", from: "pending", to: "running", budgetAction: { type: "extension", grantedTokens: 10 } },
+    { at: at(120), node: "b", from: "pending", to: "pending", budgetDecision: { extensionAllowanceTokens: 100 } },
+    { at: at(180), node: "b", from: "pending", to: "running", budgetAction: { type: "continuation_activated", allocationTokens: 20 } },
+    { at: at(240), node: "c", from: "running", to: "running", budgetAction: { type: "attention", observedTokens: 900 } },
+    { at: at(250), node: "c", from: "running", to: "blocked" },
+  ];
+  const metrics = deriveGovernanceMetrics({ events, livenessFacts: [], outbox: [], now: metricsNow + 600 * 1000, staleSec: 2400 });
+  assert.equal(metrics.budgetHeadroomAtDispatch, 150);
+  assert.equal(metrics.budgetExtensionRate, 0.5);
+  assert.equal(metrics.continuationRate, 0.5);
+  assert.equal(metrics.budgetDecisionAge, 480, "newest decision belongs to a still-nonterminal node");
+  const latency = deriveGovernanceMetrics({
+    events,
+    livenessFacts: [],
+    outbox: [{ eventId: "ba-1", type: "run.attention", campaignId: "camp", at: at(400), summary: "budget attention", data: { code: "budget_attention", nodeId: "c" }, deliveredAt: null, attempts: 0, lastError: null }],
+    now: metricsNow + 600 * 1000,
+    staleSec: 2400,
+  });
+  assert.equal(latency.budgetAttentionLatencyP95, 160, "outbox minus the budgetAction attention event at");
+
+  const { created } = makeCampaign();
+  writeGovernanceMetrics(created.path, first);
+  assert.deepEqual(JSON.parse(readFileSync(join(created.path, GOVERNANCE_METRICS_FILE), "utf8")), first);
 });
 
 test("notify macos adapter records argv and escapes quotes for terminal and attention events", async () => {

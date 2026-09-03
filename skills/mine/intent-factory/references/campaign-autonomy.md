@@ -142,6 +142,56 @@ again after a process crash, so consumers should deduplicate by `eventId`.
 The repository contains no relay credentials, recipient details, or private
 transport implementation.
 
+When `INTENT_FACTORY_NOTIFY_BIN` is unset, `drain` falls back to the platform
+notify adapters bundled with the controller (the macOS `osascript` adapter on
+darwin, none elsewhere). Run-level attention events therefore reach a human
+channel on the same machine without any transport configuration, while
+`campaign.progress` events are never pushed by either delivery path.
+
+`heartbeat.json` is a derived read cache, not a source of truth. Liveness
+facts stay append-only in `journal.jsonl`; the heartbeat is rebuilt from the
+newest journal fact and rewritten atomically as a compact, key-sorted file at
+most 1 KiB. `readHeartbeat` tolerates a missing, stale or oversized file, and
+`rebuildHeartbeat` reproduces the recorded file byte-identically from the
+journal alone.
+
+## Run liveness watchdog
+
+Each supervised nonterminal run is checked once per supervisor interval for
+stale liveness. The staleness threshold is 40 minutes by default
+(`LIVENESS_STALE_SEC = 2400`, overridable with the
+`INTENT_FACTORY_LIVENESS_SEC` environment variable when it parses to a
+positive integer). A run is stale when none of its heartbeat progress,
+heartbeat generation, or newest node snapshot update is newer than the
+threshold.
+
+A stale run emits one `run.attention` event whose dedupe key is
+`<runId>:stale_liveness:<lastObservedAt ISO>` and records a `blocked` liveness
+fact whose `lastProgressAt` is that last observed activity, so the stall is
+visible within one supervisor interval and repeated passes in the same
+staleness epoch add nothing to the outbox or the journal. The watchdog reads
+only the run node snapshots and the campaign journal/outbox/heartbeat: it
+works for a legacy campaign directory that has only `campaign.json`,
+`journal.jsonl` and the run directory, with no `plan.json` or
+`control-state.json`.
+
+## Governance metrics
+
+The supervisor writes `.runs/campaigns/<id>/governance-metrics.json`
+atomically after each run pass. The projection is pure and deterministic and
+derives only from event, journal and outbox timestamps and structured fields;
+log prose is never parsed. All rates are numbers from 0 to 1 rounded to 4
+decimals.
+
+| Field | Meaning |
+| --- | --- |
+| `budgetDecisionAge` | seconds since the newest `budgetDecision` event of a nonterminal node, null when none |
+| `budgetHeadroomAtDispatch` | mean `extensionAllowanceTokens` over decisions, null when none |
+| `budgetExtensionRate` | `extension` actions divided by decisions |
+| `continuationRate` | `continuation_activated` actions divided by decisions |
+| `budgetAttentionLatencyP95` | 95th percentile of outbox `budget_attention` latency over the corresponding `budgetAction` attention event, null when none |
+| `silentStallRate` | fraction of consecutive liveness facts of a nonterminal run whose gap exceeded the stale threshold with no `stale_liveness` or `budget_attention` event between them; hard target zero |
+
 `campaign watch --cursor <consumer-id>` reads ordered unseen events and
 atomically advances a durable cursor before writing its JSON response; the same
 call then returns none until a new event arrives. It does not provide a

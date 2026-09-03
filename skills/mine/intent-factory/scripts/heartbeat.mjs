@@ -1,17 +1,21 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { appendJournal, readJournal } from "./campaign.mjs";
-import { writeJsonAtomic } from "./store.mjs";
+import { writeJsonAtomic, writeTextAtomic } from "./store.mjs";
 
 export const HEARTBEAT_FILE = "heartbeat.json";
 export const HEARTBEAT_MAX_BYTES = 1024;
 export const HEARTBEAT_SCHEMA_VERSION = 1;
 export const HEARTBEAT_STATES = ["running", "waiting_gate", "blocked", "paused_quota", "done", "failed"];
 export const LIVENESS_JOURNAL_TYPE = "liveness";
+export const GOVERNANCE_METRICS_FILE = "governance-metrics.json";
 
 const IDENTIFIER_BYTES = 128;
 const STRING_FIELD_CHARS = 64;
 const ATTENTION_CHARS = 80;
+const GOVERNANCE_STALE_SEC = 2400;
+const ISO_8601_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/u;
+const GOVERNANCE_TERMINAL_STATUSES = new Set(["done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled", "cancelled"]);
 const STATE_SET = new Set(HEARTBEAT_STATES);
 const LIVENESS_FIELDS = new Set([
   "type",
@@ -109,8 +113,9 @@ export function deriveHeartbeat(fact, { generatedAt = new Date().toISOString() }
     attention: fact.attention === null ? null : truncateChars(fact.attention, ATTENTION_CHARS),
     generatedAt: unixSeconds(generatedAt, "generatedAt"),
   };
-  assertBounded(JSON.stringify(sortObjectKeys(heartbeat)), "heartbeat");
-  return heartbeat;
+  const sorted = /** @type {Heartbeat} */ (sortObjectKeys(heartbeat));
+  assertBounded(JSON.stringify(sorted), "heartbeat");
+  return sorted;
 }
 
 /**
@@ -183,9 +188,9 @@ function heartbeatPath(campaignPath) {
  * @param {Heartbeat} heartbeat
  */
 function writeBoundedHeartbeat(campaignPath, heartbeat) {
-  const payload = `${JSON.stringify(heartbeat, null, 2)}\n`;
+  const payload = `${JSON.stringify(sortObjectKeys(heartbeat))}\n`;
   assertBounded(payload, "heartbeat.json");
-  writeJsonAtomic(heartbeatPath(campaignPath), heartbeat);
+  writeTextAtomic(heartbeatPath(campaignPath), payload);
 }
 
 /**
@@ -221,9 +226,13 @@ function unixSeconds(value, label) {
     }
     return value;
   }
-  const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
-  if (!Number.isFinite(ms)) throw new TypeError(`${label} must be an ISO-8601 timestamp`);
-  return Math.floor(ms / 1000);
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    if (!Number.isFinite(ms)) throw new TypeError(`${label} must be an ISO-8601 timestamp`);
+    return Math.floor(ms / 1000);
+  }
+  if (!isStrictIsoTimestamp(String(value))) throw new TypeError(`${label} must be an ISO-8601 timestamp`);
+  return Math.floor(Date.parse(String(value)) / 1000);
 }
 
 /**
@@ -349,9 +358,23 @@ function optionalBoundedString(value, label, maxChars) {
  * @param {string} label
  */
 function requireTimestampString(value, label) {
-  if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
-    throw new TypeError(`${label} must be an ISO-8601 timestamp`);
-  }
+  if (!isStrictIsoTimestamp(value)) throw new TypeError(`${label} must be an ISO-8601 timestamp`);
+}
+
+/**
+ * Accept only the ISO-8601 shapes the runtime itself writes: full date and
+ * time with optional 1-3 digit fraction and Z or numeric zone. Values like
+ * "2026-09-02 12:00:00" that Date.parse happens to tolerate are rejected.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isStrictIsoTimestamp(value) {
+  return (
+    typeof value === "string" &&
+    ISO_8601_TIMESTAMP.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
 }
 
 /**
@@ -362,4 +385,218 @@ function requireNonNegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || /** @type {number} */ (value) < 0) {
     throw new TypeError(`${label} must be a non-negative integer`);
   }
+}
+
+/**
+ * Pure, deterministic projection of the run governance metrics (Addendum 02
+ * B4.6). Inputs are timestamps and structured fields only; prose is never
+ * parsed. Rates and percentiles are rounded to 4 decimals, ages are seconds.
+ *
+ * @param {{events?: unknown[], livenessFacts?: unknown[], outbox?: unknown[], now?: number, staleSec?: number}} [input]
+ * @returns {{budgetDecisionAge: number|null, budgetHeadroomAtDispatch: number|null, budgetExtensionRate: number|null, continuationRate: number|null, budgetAttentionLatencyP95: number|null, silentStallRate: number}}
+ */
+export function deriveGovernanceMetrics({ events = [], livenessFacts = [], outbox = [], now = Date.now(), staleSec = GOVERNANCE_STALE_SEC } = {}) {
+  const decisions = [];
+  for (const rawEvent of events) {
+    const event = jsonObjectOf(rawEvent);
+    if (event !== null && isJsonObject(event.budgetDecision)) decisions.push(event);
+  }
+  let newestDecisionMs = null;
+  /** @type {number[]} */
+  const headrooms = [];
+  for (const event of decisions) {
+    const decision = /** @type {JsonObject} */ (event.budgetDecision);
+    const allowance = typeof decision.extensionAllowanceTokens === "number" && Number.isFinite(decision.extensionAllowanceTokens)
+      ? decision.extensionAllowanceTokens
+      : Number.NaN;
+    if (Number.isFinite(allowance)) headrooms.push(allowance);
+    const atMs = timestampMs(event.at);
+    if (!Number.isFinite(atMs)) continue;
+    if (typeof event.node === "string" && nodeIsTerminal(events, event.node)) continue;
+    if (newestDecisionMs === null || atMs > newestDecisionMs) newestDecisionMs = atMs;
+  }
+  const decisionCount = decisions.length;
+  const budgetDecisionAge = newestDecisionMs === null
+    ? null
+    : round4(Math.max(0, (now - newestDecisionMs) / 1000));
+  const budgetHeadroomAtDispatch = headrooms.length === 0
+    ? null
+    : round4(headrooms.reduce((sum, value) => sum + value, 0) / headrooms.length);
+  const budgetExtensionRate = decisionCount === 0 ? null : round4(Math.min(1, countBudgetActions(events, "extension") / decisionCount));
+  const continuationRate = decisionCount === 0 ? null : round4(Math.min(1, countBudgetActions(events, "continuation_activated") / decisionCount));
+  return {
+    budgetDecisionAge,
+    budgetHeadroomAtDispatch,
+    budgetExtensionRate,
+    continuationRate,
+    budgetAttentionLatencyP95: budgetAttentionLatencyP95(events, outbox),
+    silentStallRate: silentStallRateOf(livenessFacts, outbox, staleSec),
+  };
+}
+
+/**
+ * Write the governance metrics for a campaign atomically next to its
+ * heartbeat. The derivation is pure; this call only persists it.
+ *
+ * @param {string} campaignPath
+ * @param {ReturnType<typeof deriveGovernanceMetrics>} metrics
+ */
+export function writeGovernanceMetrics(campaignPath, metrics) {
+  writeJsonAtomic(join(campaignPath, GOVERNANCE_METRICS_FILE), metrics);
+}
+
+/**
+ * A node is terminal when its newest transition event settles it; decisions
+ * of already settled nodes do not contribute to budgetDecisionAge.
+ *
+ * @param {unknown[]} events
+ * @param {string} nodeId
+ * @returns {boolean}
+ */
+function nodeIsTerminal(events, nodeId) {
+  let status = null;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const rawEvent of events) {
+    const event = jsonObjectOf(rawEvent);
+    if (event === null || event.node !== nodeId || typeof event.to !== "string") continue;
+    const atMs = timestampMs(event.at);
+    if (!Number.isFinite(atMs) || atMs < newestMs) continue;
+    newestMs = atMs;
+    status = event.to;
+  }
+  return status !== null && GOVERNANCE_TERMINAL_STATUSES.has(status);
+}
+
+/**
+ * @param {unknown[]} events
+ * @param {string} actionType
+ * @returns {number}
+ */
+function countBudgetActions(events, actionType) {
+  let count = 0;
+  for (const rawEvent of events) {
+    const event = jsonObjectOf(rawEvent);
+    const action = event === null ? null : jsonObjectOf(event.budgetAction);
+    if (action !== null && action.type === actionType) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 95th percentile in seconds of attention outbox latency: the first
+ * budget_attention run.attention event for a node minus that node's
+ * budgetAction attention event timestamp.
+ *
+ * @param {unknown[]} events
+ * @param {unknown[]} outbox
+ * @returns {number|null}
+ */
+function budgetAttentionLatencyP95(events, outbox) {
+  /** @type {Map<string, number>} */
+  const firstOutboxAtByNode = new Map();
+  for (const rawEvent of outbox) {
+    const event = jsonObjectOf(rawEvent);
+    if (event === null || event.type !== "run.attention") continue;
+    const data = jsonObjectOf(event.data);
+    if (data === null || data.code !== "budget_attention" || typeof data.nodeId !== "string") continue;
+    const atMs = timestampMs(event.at);
+    if (!Number.isFinite(atMs)) continue;
+    const current = firstOutboxAtByNode.get(data.nodeId);
+    if (current === undefined || atMs < current) firstOutboxAtByNode.set(data.nodeId, atMs);
+  }
+  /** @type {number[]} */
+  const latencies = [];
+  for (const [nodeId, outboxAtMs] of firstOutboxAtByNode) {
+    let actionAtMs = null;
+    for (const rawEvent of events) {
+      const event = jsonObjectOf(rawEvent);
+      if (event === null || event.node !== nodeId) continue;
+      const action = jsonObjectOf(event.budgetAction);
+      if (action === null || action.type !== "attention") continue;
+      const atMs = timestampMs(event.at);
+      if (Number.isFinite(atMs) && (actionAtMs === null || atMs < actionAtMs)) actionAtMs = atMs;
+    }
+    if (actionAtMs === null) continue;
+    const latencySeconds = (outboxAtMs - actionAtMs) / 1000;
+    if (latencySeconds >= 0) latencies.push(latencySeconds);
+  }
+  if (latencies.length === 0) return null;
+  const ordered = [...latencies].sort((left, right) => left - right);
+  const rank = Math.min(ordered.length - 1, Math.ceil(ordered.length * 0.95) - 1);
+  return round4(ordered[rank]);
+}
+
+/**
+ * Fraction of consecutive liveness facts of a nonterminal run whose gap
+ * exceeded staleSec with no stale_liveness or budget_attention event between
+ * them. Terminal facts (done/failed) end the measured sequence; 0 when there
+ * are no qualifying gaps.
+ *
+ * @param {unknown[]} livenessFacts
+ * @param {unknown[]} outbox
+ * @param {number} staleSec
+ * @returns {number}
+ */
+function silentStallRateOf(livenessFacts, outbox, staleSec) {
+  /** @type {{atMs: number, eventId: string}[]} */
+  const facts = [];
+  for (const rawFact of livenessFacts) {
+    const fact = jsonObjectOf(rawFact);
+    if (fact === null || fact.type !== LIVENESS_JOURNAL_TYPE || typeof fact.at !== "string") continue;
+    if (fact.state === "done" || fact.state === "failed") continue;
+    const atMs = timestampMs(fact.at);
+    if (!Number.isFinite(atMs)) continue;
+    facts.push({ atMs, eventId: String(fact.eventId ?? "") });
+  }
+  facts.sort((left, right) => left.atMs - right.atMs || (left.eventId < right.eventId ? -1 : left.eventId > right.eventId ? 1 : 0));
+  let gaps = 0;
+  let silent = 0;
+  for (let index = 0; index + 1 < facts.length; index += 1) {
+    const gapSeconds = (facts[index + 1].atMs - facts[index].atMs) / 1000;
+    if (!(gapSeconds > staleSec)) continue;
+    gaps += 1;
+    if (!hasCoveringAttention(outbox, facts[index].atMs, facts[index + 1].atMs)) silent += 1;
+  }
+  return gaps === 0 ? 0 : round4(silent / gaps);
+}
+
+/**
+ * @param {unknown[]} outbox
+ * @param {number} fromMs
+ * @param {number} toMs
+ * @returns {boolean}
+ */
+function hasCoveringAttention(outbox, fromMs, toMs) {
+  for (const rawEvent of outbox) {
+    const event = jsonObjectOf(rawEvent);
+    if (event === null || event.type !== "run.attention") continue;
+    const data = jsonObjectOf(event.data);
+    if (data === null || (data.code !== "stale_liveness" && data.code !== "budget_attention")) continue;
+    const atMs = timestampMs(event.at);
+    if (Number.isFinite(atMs) && atMs > fromMs && atMs <= toMs) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {JsonObject|null}
+ */
+function jsonObjectOf(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? /** @type {JsonObject} */ (value) : null;
+}
+
+/** @param {unknown} value @returns {boolean} */
+function isJsonObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+/** @param {unknown} value @returns {number} */
+function timestampMs(value) {
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
+}
+
+/** @param {number} value @returns {number} */
+function round4(value) {
+  return Math.round(value * 10_000) / 10_000;
 }
