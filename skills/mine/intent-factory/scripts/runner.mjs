@@ -4037,6 +4037,12 @@ function enforceLedgerBudget(contract, runDir, states, lease, campaignPath) {
     const state = states.get(node.id);
     const nodeSpent = state ? weightedInput(state.usage, cacheReadWeight) : 0;
     if (state?.status !== "pending" || state.budgetState?.pendingSegment) continue;
+    // Only a pending node actually awaiting its gate judge (phase "judge"
+    // with a persisted done worker result) draws on the campaign judge
+    // reserve instead of the worker-derived per-node cap. A pending gated
+    // node that owes worker work (a revision re-dispatch) stays capped.
+    const workerResult = /** @type {{status?: string}|null|undefined} */ (state.result);
+    if (state.phase === "judge" && workerResult?.status === "done" && node.gate.enabled) continue;
     const cap = state.budgetState?.currentCapTokens ?? node.maxInputTokens;
     if (cap !== undefined && nodeSpent >= cap) {
       transition(runDir, state, "blocked", {

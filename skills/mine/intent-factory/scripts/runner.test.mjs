@@ -1902,6 +1902,61 @@ test("resume preserves a durable pending judge phase instead of resetting to wor
   assert.equal(final.attempt, 1, "the pending judge does not repeat the worker attempt");
 });
 
+test("ledger enforcement on resume lets a done budgeted worker reach its judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-gate-budget-resume-"));
+  const path = writeContract(directory, fixture({
+    id: "judge-gate-budget-resume-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    usagePolicy: { epoch: "judge-gate-budget-resume", maxInputTokens: 1_000_000, judgeReserveInputTokens: 500_000, maxPhaseInputTokens: 1_000_000, maxInvocationTokens: 100_000, cacheReadWeight: 1 },
+    nodes: [
+      { id: "gated", type: "backend", taskPacket: packet({ objective: "Finish at the derived cap" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
+      { id: "revision", type: "backend", taskPacket: packet({ objective: "Re-dispatch for a gate revision" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
+      { id: "sibling", type: "backend", taskPacket: packet({ objective: "No persisted result" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
+    ],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  /** @param {string} id @returns {string} */
+  const persistedPath = (id) => join(runDir, "nodes", `${id}.json`);
+  /** @type {Array<[id: string, phase: string, keepResult: boolean]>} */
+  const plans = [["gated", "judge", true], ["revision", "worker", true], ["sibling", "worker", false]];
+  for (const [id, phase, keepResult] of plans) {
+    /** @type {{budgetState?: {currentCapTokens?: number}|null, invocations?: Array<{id: string, phase: string, usage?: {inputTokens?: number, outputTokens?: number, cacheReadInputTokens?: number}|null}>|null, result?: unknown|null}} */
+    const persisted = JSON.parse(readFileSync(persistedPath(id), "utf8"));
+    const cap = Math.max(1, Math.ceil(persisted.budgetState?.currentCapTokens ?? 500));
+    const worker = (persisted.invocations ?? []).find((invocation) => invocation.phase === "worker");
+    const invocations = (persisted.invocations ?? []).map((invocation) => invocation.id === worker?.id
+      ? { ...invocation, usage: { inputTokens: cap, outputTokens: 0, cacheReadInputTokens: 0 } }
+      : { ...invocation, usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 } });
+    writeFileSync(persistedPath(id), JSON.stringify({
+      ...persisted,
+      status: "pending",
+      phase,
+      result: keepResult ? persisted.result : null,
+      gate: null,
+      error: null,
+      usage: undefined,
+      costUsd: undefined,
+      invocations,
+    }, null, 2));
+  }
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const gated = nodeState(resumed, "gated");
+  assert.equal(gated.status, "done", `done worker must reach its judge: ${gated.error?.message ?? gated.status}`);
+  assert.equal(gated.phase, "complete");
+  assert.equal(gated.error, null);
+  assert.equal(gated.attempt, 1, "the pending judge does not repeat the worker attempt");
+  assert.ok(gated.gate, "the re-dispatched judge records a verdict");
+  assert.ok((gated.invocations ?? []).filter((invocation) => invocation.phase === "judge").length >= 2, "the gate judge starts after resume");
+  const sibling = nodeState(resumed, "sibling");
+  assert.equal(sibling.status, "blocked", `an equivalent node without a worker result stays capped: ${sibling.error?.message ?? sibling.status}`);
+  assert.equal(sibling.error?.code, "budget_attention");
+  const revision = nodeState(resumed, "revision");
+  assert.equal(revision.status, "blocked", `a pending worker owing a gate revision stays capped despite its done result: ${revision.error?.message ?? revision.status}`);
+  assert.equal(revision.error?.code, "budget_attention");
+});
+
 test("resume gives a never-started pending node zero usage", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-never-started-"));
   const path = writeContract(directory, fixture({ id: "resume-never-started-run", pollIntervalMs: 10 }));
