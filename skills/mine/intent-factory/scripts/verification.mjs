@@ -345,6 +345,15 @@ function captureIgnoreSources(root) {
     }
     for (const entry of entries) {
       if (entry.name === ".git" || entry.name === ".runs") continue;
+      // Same exclusions as the entries snapshot (see the task-packet
+      // reference): `node_modules` at any depth, and the agent runtimes'
+      // scratch state at the root (`.claude`, `.codex`). Ignore files inside
+      // them never change what git sees of the workspace, while a package
+      // install or an agent worktree under `.claude/worktrees/` adds and
+      // removes `.gitignore` files mid-node — which used to fail the node
+      // with `snapshot_ignore_changed`.
+      if (entry.name === "node_modules") continue;
+      if (directory === root && (entry.name === ".claude" || entry.name === ".codex")) continue;
       const child = resolve(directory, entry.name);
       if (entry.isDirectory()) {
         walk(child);
@@ -397,6 +406,21 @@ function captureIgnoreSources(root) {
       return [{ path, kind: "symlink", digest: `link:${target}:${targetReal}` }];
     }
     if (!metadata.isFile()) throw fail("snapshot_unsupported_entry", `unsupported ignore source: ${path}`);
+    if (path === ".git/config") {
+      // Only the ignore-relevant settings of the repository config are part
+      // of the fingerprint. The file also carries branch tracking, remotes and
+      // worktree bookkeeping that any git client edits at will — a sibling
+      // session creating a tracking branch mid-node used to fail the node with
+      // `snapshot_ignore_changed` although no ignore rule had moved.
+      const relevant = readFileSync(child, "utf8")
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => /excludesfile/iu.test(line))
+        .sort()
+        .join("\n");
+      const bytes = Buffer.byteLength(relevant, "utf8");
+      return [{ path, kind: "file", digest: `config:${createHash("sha256").update(relevant).digest("hex")}:${bytes}`, size: bytes }];
+    }
     return [{ path, kind: "file", digest: fileIdentity(child, metadata).digest, size: metadata.size }];
   };
   return [...paths].sort().flatMap(capturePath);
