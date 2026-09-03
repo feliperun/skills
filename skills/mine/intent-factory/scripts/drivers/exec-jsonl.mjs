@@ -616,13 +616,18 @@ function classifyFailure(message) {
  * controller never owns the provider stream (the gate writes stdout straight
  * to the log fd), so budget enforcement polls this instead. Lenient by
  * design: unparsable or partial lines count as zero, and providers that only
- * report usage at completion (agy, exec-jsonl) meter as 0 mid-run.
+ * report usage at completion (agy, exec-jsonl, replay) meter as 0 mid-run.
  *
  * @param {string} driver
  * @param {string} stdout bounded transcript tail
  * @returns {{inputTokens: number|null, cacheReadInputTokens: number|null}}
  */
 export function liveUsage(driver, stdout) {
+  if (driver === "exec-jsonl" || driver === "replay") {
+    // Completion-only drivers: usage arrives in the terminal envelope, which
+    // the close path normalizes, never in a mid-run live observation.
+    return { inputTokens: null, cacheReadInputTokens: null };
+  }
   const events = parsedEvents(stdout);
   if (driver === "codex") {
     // turn.completed usage is cumulative for the session; the last one wins.
@@ -674,7 +679,7 @@ export function liveUsage(driver, stdout) {
 /**
  * Budgeted live meter: one number, with cache reads weighted by the campaign
  * policy so it is comparable with the persisted ledger. A provider that only
- * reports usage at completion (agy, exec-jsonl) meters as 0 mid-run.
+ * reports usage at completion (agy, exec-jsonl, replay) meters as 0 mid-run.
  *
  * @param {string} driver
  * @param {string} stdout bounded transcript tail
@@ -925,6 +930,10 @@ export class SessionMetricsParser {
       totals.completed = true;
     } else if (this.driver === "exec-jsonl" && record.type === "run.completed") {
       totals.completed = true;
+    } else if (this.driver === "replay" && typeof record.status === "string") {
+      // The replay envelope is the terminal record: the bin emits exactly one
+      // envelope line per invocation, so folding one proves completion.
+      totals.completed = true;
     }
     const item = eventItem(record);
     if (record.type === "item.completed" && item) {
@@ -975,6 +984,12 @@ function foldRecord(driver, totals, record) {
   }
   if (driver === "exec-jsonl" && record.type === "run.completed") {
     // The protocol carries no tool events; only a completed run proves a turn.
+    totals.turns += 1;
+    totals.cacheReadInputTokens += canonicalUsage(record.usage).cacheReadInputTokens ?? 0;
+  }
+  if (driver === "replay" && typeof record.status === "string") {
+    // A replayed envelope is the whole invocation: one completed turn, no
+    // tool events, usage only in the terminal record.
     totals.turns += 1;
     totals.cacheReadInputTokens += canonicalUsage(record.usage).cacheReadInputTokens ?? 0;
   }

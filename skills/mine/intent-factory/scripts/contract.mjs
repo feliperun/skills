@@ -36,7 +36,7 @@ const RUNTIME_FIELDS = new Set([
 ]);
 const GATE_FIELDS = new Set(["enabled", "runtime", "failOn", "maxRevisions", "requiredCapabilities"]);
 const MATCH_FIELDS = new Set(["id", "type", "runtime", "role", "status", "errorCode", "currentRuntime"]);
-const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "glm", "exec-jsonl"]);
+const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "glm", "exec-jsonl", "replay"]);
 const NODE_STATUSES = new Set(["pending", "running", "done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
 const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependency", "budget", "canceled"]);
 const SNAPSHOT_RUNTIME_FIELDS = new Set(["id", ...RUNTIME_FIELDS, "capabilities"]);
@@ -62,7 +62,7 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{mode: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], readFiles: string[], writeFiles?: string[], writeRoots?: string[], symbols: string[], decisions: string[], nonGoals: string[], verification: VerificationCommand[]}} TaskPacket */
 
-/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedRuntime */
+/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedRuntime */
 
 /** @typedef {{id?: string, type?: string, runtime?: string, role?: "worker"|"judge", status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RuntimeRuleMatch */
 

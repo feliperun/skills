@@ -246,6 +246,7 @@ The adapter capability matrix is exact:
 | `glm` | yes | no | yes | `--resume SESSION_ID`; `--max-budget-usd` |
 | `agy` | yes | no | no | `--conversation=SESSION_ID`; timeout/accounting fallback |
 | `exec-jsonl` | yes | yes | no | protocol `continuationId`; wrapper-enforced `maxInvocationTokens` |
+| `replay` | yes | yes | yes | recorded, not enforced: `--continuation` / `--max-invocation-tokens` / `--max-cost-usd` |
 
 `maxInvocationTokens` is sent only when the routed adapter declares the token
 budget capability. `maxCostUsd` is optional command data and is sent only when
@@ -382,7 +383,7 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
 
-`driver` is `claude`, `codex`, `agy`, `glm`, or `exec-jsonl`. A claude runtime accepts
+`driver` is `claude`, `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`. A claude runtime accepts
 `permissionMode` (default `acceptEdits`); a node that must execute commands
 (builds, tests, smoke scripts) needs `bypassPermissions`, because headless
 `acceptEdits` denies every non-trivial command and the worker can only return
@@ -425,6 +426,54 @@ for the binary, `args` for fixed arguments, and `versionArgs` when it does not
 accept `--version`. It supports structured output, continuation, and usage
 reporting, but neither monetary-budget enforcement, sandbox, nor permission
 negotiation.
+
+### Replay driver
+
+`replay` stands in for any provider in tests and evals: it emits recorded,
+already-normalized envelopes with zero model invocations, so controller
+behaviour (gates, budgets, resume, failover) is exercised deterministically
+after provider normalization. It declares the budget capabilities so the
+controller sends `maxInvocationTokens`/`maxCostUsd`, which the executable
+records without enforcing. The default executable is the sibling
+`scripts/drivers/replay-bin.mjs`; override it with `executable` or
+`INTENT_FACTORY_REPLAY_BIN`.
+
+```json
+{
+  "driver": "replay",
+  "model": "<label>",
+  "config": { "replay.recording": "<path to a JSONL recording, absolute or relative to the process cwd>" }
+}
+```
+
+Lines are consumed strictly in order through a `<recording>.cursor` sidecar
+(a missing cursor means 0); the live preflight prompt
+(`INTENT_FACTORY_PREFLIGHT_OK`) is answered synthetically and never consumes
+the recording. Each consumed line appends one record with `at`, `index`,
+`promptBytes`, and `args` to `<recording>.invocations.jsonl`. Recording line
+schema:
+
+```json
+{
+  "envelope": { "status": "done", "result": "<text>", "continuationId": null, "usage": { "inputTokens": 1, "outputTokens": 1, "cacheReadInputTokens": 0 }, "costUsd": null, "error": null },
+  "files": [{ "path": "out/file.txt", "content": "<text>" }],
+  "delayMs": 0,
+  "exitCode": 0,
+  "stdoutRaw": "<text>"
+}
+```
+
+`envelope` is an already-normalized provider envelope: `status` is `done`,
+`no-op`, `blocked`, `failed`, `exhausted`, `stalled`, or `canceled`, with
+canonical `result`, `continuationId`, `usage`, `costUsd`, and `error` fields.
+`files` entries are written relative to the run workspace only after
+containment checks (relative paths only, no `..` segment, no metadata root
+such as `.git`/`.runs`/`node_modules`/`.claude`/`.codex`, and no outward
+symlink); a violation emits a `replay_path_escape` failed envelope, writes
+nothing, leaves the cursor untouched, and exits 2. A missing line at the
+cursor emits `replay_exhausted` and exits 1. `delayMs` (milliseconds) delays
+before emitting, `stdoutRaw` replaces the envelope verbatim for
+protocol-failure tests, and `exitCode` sets the process exit status.
 
 A Codex runtime may set `sandbox` to `read-only`, `workspace-write`, or
 `danger-full-access`; the default is `workspace-write`. The adapter also bounds

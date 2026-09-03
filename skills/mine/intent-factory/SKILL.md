@@ -354,6 +354,7 @@ the public contract must not depend on them.
    | `glm` | yes | no | yes | `--resume SESSION_ID`; `--max-budget-usd` |
    | `agy` | yes | no | no | `--conversation=SESSION_ID`; timeout/accounting fallback |
    | `exec-jsonl` | yes | yes | no | protocol `continuationId`; wrapper-enforced `maxInvocationTokens` |
+   | `replay` | yes | yes | yes | recorded, not enforced: `--continuation` / `--max-invocation-tokens` / `--max-cost-usd` |
 
    `maxCostUsd` is optional command data, not a replacement for
    `maxInvocationTokens`. Never use ambient provider history: continuation is

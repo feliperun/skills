@@ -4,6 +4,7 @@ import { codexDriver } from "./codex.mjs";
 import { agyDriver } from "./agy.mjs";
 import { glmDriver } from "./glm.mjs";
 import { execJsonlDriver } from "./exec-jsonl.mjs";
+import { replayDriver } from "./replay.mjs";
 
 /** Current wire-contract version for runner protocol artifacts. */
 export const PROTOCOL_SCHEMA_VERSION = 1;
@@ -17,6 +18,7 @@ const DRIVERS = new Map([
   ["agy", agyDriver],
   ["glm", glmDriver],
   ["exec-jsonl", execJsonlDriver],
+  ["replay", replayDriver],
 ]);
 
 const CAPABILITY_NAMES = new Set([
@@ -44,7 +46,13 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string}|null}} ProviderEnvelope */
 
-/** @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime */
+/**
+ * One declared runtime. `driver` names a registered adapter (`claude`,
+ * `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`); replay requires
+ * `config["replay.recording"]` for commands.
+ *
+ * @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime
+ */
 
 /**
  * Mechanical worker tool policy sent to the provider boundary:
