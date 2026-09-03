@@ -119,7 +119,8 @@ reserve allowance for pending nodes and judges. A budget boundary may activate
 only a predeclared continuation with the same packet hash and write scope;
 otherwise it must become visible attention with heartbeat and human evidence
 within one supervisor interval. The factory must never sit silently on a
-budget stop.
+budget stop. The policy formulas and the budgetDecision/budgetState schemas
+are documented in [references/budget-governance.md](references/budget-governance.md).
 
 This release ends at the continuity kernel. Service-driver adapters,
 service-specific reconciliation, and a transactional store are later phases;

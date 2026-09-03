@@ -452,17 +452,29 @@ A node that exhausts its wall-clock budget is restarted by `resume` with the
 same bounded invocation timeout. A timeout override is used only when a human
 explicitly supplies one; resume never doubles the timeout automatically.
 
-`maxInputTokens` is mandatory on every contract and may be tightened per node.
-The controller meters active invocations live from their transcript tails each
-poll tick: a node whose observed input tokens pass its own cap is terminated
-immediately and labeled `exhausted` with `token_budget_exceeded`; once
-cumulative spend (persisted plus live-observed) reaches the contract budget,
-every running worker is stopped and pending nodes become `blocked` with
-`budget_exceeded`. A budget that cannot stop a running worker is not a budget.
-Usage is persisted before scope-gate evaluation, so kills, timeouts, stalls,
-and scope failures still report their real token cost — backfilled from the
-transcript when a provider died without a terminal usage event (agy and
-exec-jsonl only report at completion and meter as zero mid-run).
+`usagePolicy.maxInputTokens` is mandatory on every contract. A per-node
+`maxInputTokens` is legacy: on a node authored today it is only an explicit
+hard ceiling above the derived allocation and requires `budgetProfile` (see
+below). The controller meters active invocations live from their transcript
+tails each poll tick: a node whose observed input tokens pass its own cap is
+terminated immediately and labeled `exhausted` with `token_budget_exceeded`;
+once cumulative spend (persisted plus live-observed) reaches the contract
+budget, every running worker is stopped and pending nodes become `blocked`
+with `budget_exceeded`. A budget that cannot stop a running worker is not a
+budget. Usage is persisted before scope-gate evaluation, so kills, timeouts,
+stalls, and scope failures still report their real token cost — backfilled
+from the transcript when a provider died without a terminal usage event (agy
+and exec-jsonl only report at completion and meter as zero mid-run).
+
+### budgetProfile
+
+A node authored today that sets `maxInputTokens` must also declare a
+`budgetProfile`; persisted runs written before the field existed remain
+readable without it. A node `maxInputTokens` is only an explicit hard ceiling
+above the allocation derived from the profile — it is never the allocation
+itself. `budgetProfile` requires `progressPolicy`. The policy formulas,
+decision and state schemas, attention/liveness contract and the D33-D39
+evals are documented in [budget-governance.md](budget-governance.md).
 
 The usage policy stops new work at the campaign hard maximum while preserving
 the judge reserve. A soft phase limit rotates the provider session before the

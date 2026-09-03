@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   BUDGET_POLICY_VERSION,
   canonicalBudgetDecision,
@@ -76,6 +77,28 @@ test("budget reserve D34 keeps pending, judge, and continuation allowance intact
   assert.equal(extended.grantedTokens, 0);
 });
 
+test("budget extension D34 grants unused headroom without touching reserves", () => {
+  const decision = deriveBudgetDecision(profile({ estimatedWeightedInputTokens: 300_000 }), facts({
+    phaseRemainingTokens: 1_000_000,
+    campaignRemainingTokens: 1_000_000,
+    judgeReserveTokens: 100_000,
+    pendingReserveTokens: 200_000,
+  }));
+  assert.equal(decision.availableTokens, 900_000);
+  assert.equal(decision.initialAllocationTokens, 300_000);
+  assert.equal(decision.hardCapTokens, 700_000);
+  assert.equal(decision.extensionAllowanceTokens, 100_000);
+  const extended = grantBudgetExtension(decision, initialBudgetState(decision), "progress-signature-1");
+  assert.equal(extended.grantedTokens, 100_000);
+  assert.equal(extended.currentCapTokens, 400_000);
+  assert.equal(extended.extensionRemainingTokens, 0);
+  assert.equal(grantBudgetExtension(decision, extended, "progress-signature-1").grantedTokens, 0);
+  assert.equal(grantBudgetExtension(decision, extended, "progress-signature-2").grantedTokens, 0);
+  assert.equal(decision.pendingReserveTokens, 200_000);
+  assert.equal(decision.judgeReserveTokens, 100_000);
+  assert.equal(decision.continuationReserveTokens, 300_000);
+});
+
 test("budget continuation D35 is bounded and deterministic", () => {
   const decision = deriveBudgetDecision(profile(), facts());
   const state = initialBudgetState(decision);
@@ -123,4 +146,9 @@ test("budget replay D39 emits byte-identical canonical JSON", () => {
     JSON.parse(JSON.stringify(facts())),
   ));
   assert.equal(replayed, expected);
+});
+
+test("watchdog D38 reference pins the stale-liveness fixture to campaign-autonomy", () => {
+  const source = readFileSync(new URL("./campaign-autonomy.test.mjs", import.meta.url), "utf8");
+  assert.ok(source.includes("watchdog stale liveness"));
 });
