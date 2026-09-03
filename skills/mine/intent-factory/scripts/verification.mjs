@@ -336,6 +336,11 @@ function captureIgnoreSources(root) {
     try {
       entries = readdirSync(directory, { withFileTypes: true });
     } catch (error) {
+      // A directory that vanished between the parent's readdir and this one
+      // (a test suite's temporary tree under an ignored `target/`, a build
+      // cache being rotated) is not a snapshot failure: it holds no ignore
+      // source any more. Only a directory that exists and cannot be read is.
+      if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return;
       throw fail("snapshot_read_error", `cannot inspect workspace directory ${relativeWorkspacePath(root, directory)}: ${error instanceof Error ? error.message : String(error)}`);
     }
     for (const entry of entries) {
