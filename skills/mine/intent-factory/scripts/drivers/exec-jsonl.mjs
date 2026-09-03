@@ -233,13 +233,13 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
     ? messages.findLast((event) => extractJson(eventItem(event)?.text) !== null) ?? messages.at(-1)
     : messages.at(-1);
   const failure = events.findLast((event) => event.type === "turn.failed" || event.type === "error");
-  if (failure || exitCode !== 0) {
+  if (failure) {
     const errorRecord = /** @type {Record<string, unknown>|undefined} */ (failure?.error);
     return failed(
       "provider_error",
       typeof errorRecord?.message === "string" ? errorRecord.message
         : typeof failure?.message === "string" ? failure.message
-        : `Codex exited with code ${exitCode}`,
+        : "Codex failed",
       undefined,
       continuationId,
       canonicalUsage(errorRecord?.usage ?? failure?.usage, { inputIncludesCache: true }),
@@ -248,6 +248,19 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   if (!completed) return failed("incomplete_stream", "Codex emitted no turn.completed event", undefined, continuationId);
   const text = eventItem(message)?.text;
   const textResult = typeof text === "string" ? text : null;
+  // A finished turn with a final message is accepted work regardless of the
+  // harness exit code: the exit code is evidence about the harness, not about
+  // the result. Only a turn that ended without any final message still
+  // reports the non-zero exit as a provider error.
+  if (exitCode !== 0 && typeof text !== "string") {
+    return failed(
+      "provider_error",
+      `Codex exited with code ${exitCode}`,
+      undefined,
+      continuationId,
+      canonicalUsage(completed.usage, { inputIncludesCache: true }),
+    );
+  }
   const result = options.preferStructured ? extractJson(textResult) ?? textResult : textResult;
   return {
     status: result?.trim() ? "done" : "no-op",
@@ -573,13 +586,13 @@ const CODEX_TOOL_ITEM_TYPES = new Set(["tool_call", "command_execution", "mcp_to
 
 /**
  * Session evidence from a bounded live transcript: completed turns, cache-read
- * input, and tool invocations. Each driver exposes only what its own events
- * prove, and anything unparsable or unsupported meters as zero — a live
- * observation never throws.
+ * input, tool invocations, and whether the driver's terminal record has been
+ * folded. Each driver exposes only what its own events prove, and anything
+ * unparsable or unsupported meters as zero — a live observation never throws.
  *
  * @param {string} driver
  * @param {string} stdout bounded transcript tail
- * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
  */
 export function liveSessionMetrics(driver, stdout) {
   const parser = new SessionMetricsParser(driver);
@@ -598,9 +611,9 @@ export function liveSessionMetrics(driver, stdout) {
  * authoritative session total, which replaces the partial sum.
  *
  * @param {string} driver
- * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number}|null} previous
+ * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number, completed?: boolean}|null} previous
  * @param {string} window bounded transcript window of complete lines
- * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
  */
 export function accumulateSessionMetrics(driver, previous, window) {
   const parser = new SessionMetricsParser(driver, previous ?? undefined);
@@ -632,7 +645,7 @@ const CACHE_READ_PATTERN = /"(?:cache_read_input_tokens|cached_input_tokens|cach
 export class SessionMetricsParser {
   /**
    * @param {string} driver
-   * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number}} [previous]
+   * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number, completed?: boolean}} [previous]
    */
   constructor(driver, previous = {}) {
     this.driver = driver;
@@ -640,9 +653,14 @@ export class SessionMetricsParser {
       turns: previous.turns ?? 0,
       cacheReadInputTokens: previous.cacheReadInputTokens ?? 0,
       toolCalls: previous.toolCalls ?? 0,
+      completed: previous.completed === true,
     };
     /** @type {string|null} */
     this.continuationId = null;
+    /** @type {string|null} Most recent folded item-completed type, for the codex completion rule. */
+    this.lastItemType = null;
+    /** @type {string|null} Text of the most recent folded agent message, for the codex completion rule. */
+    this.lastAgentText = null;
     /** @type {Buffer} */
     this.pending = Buffer.alloc(0);
     /** @type {{head: Buffer, tail: Buffer, streamedToolUse: number, carry: Buffer}|null} */
@@ -674,9 +692,14 @@ export class SessionMetricsParser {
     if (this.pending.length > 0 || this.oversized) this.completeRecord();
   }
 
-  /** @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number}} */
+  /** @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}} */
   metrics() {
-    return { ...this.totals };
+    return {
+      turns: this.totals.turns,
+      cacheReadInputTokens: this.totals.cacheReadInputTokens,
+      toolCalls: this.totals.toolCalls,
+      completed: this.totals.completed === true,
+    };
   }
 
   /**
@@ -755,6 +778,40 @@ export class SessionMetricsParser {
     const record = /** @type {Record<string, unknown>} */ (event);
     foldRecord(this.driver, this.totals, record);
     this.continuationId ??= recordContinuationId(this.driver, record);
+    this.foldCompletionEvidence(record);
+  }
+
+  /**
+   * Fold the completion evidence one parsed record proves into the sticky
+   * totals. A driver is completed when its terminal record was folded; for
+   * codex that means a turn.completed that ends the turn with the
+   * result-carrying final agent message, so a live observation never treats a
+   * still-working or already-answered session ambiguously.
+   *
+   * @param {Record<string, unknown>} record
+   */
+  foldCompletionEvidence(record) {
+    const totals = this.totals;
+    if (this.driver === "codex") {
+      if (record.type === "turn.completed" && this.lastItemType === "agent_message"
+        && extractJson(this.lastAgentText) !== null) {
+        totals.completed = true;
+      }
+    } else if ((this.driver === "claude" || this.driver === "glm") && record.type === "result") {
+      totals.completed = true;
+    } else if (this.driver === "exec-jsonl" && record.type === "run.completed") {
+      totals.completed = true;
+    }
+    const item = eventItem(record);
+    if (record.type === "item.completed" && item) {
+      this.lastItemType = String(item.type ?? "");
+      this.lastAgentText = this.lastItemType === "agent_message" && typeof item.text === "string"
+        ? item.text
+        : null;
+    } else {
+      this.lastItemType = null;
+      this.lastAgentText = null;
+    }
   }
 }
 
@@ -765,7 +822,7 @@ export class SessionMetricsParser {
  * a terminal result event carries the authoritative session total.
  *
  * @param {string} driver
- * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number}} totals
+ * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}} totals
  * @param {Record<string, unknown>} record
  */
 function foldRecord(driver, totals, record) {
@@ -805,7 +862,7 @@ function foldRecord(driver, totals, record) {
  * oversized record is never silently skipped.
  *
  * @param {string} driver
- * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number}} totals
+ * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}} totals
  * @param {{head: string, tail: string, toolUse: number}} fragments
  */
 function foldFragmentRecord(driver, totals, fragments) {
@@ -819,6 +876,7 @@ function foldFragmentRecord(driver, totals, fragments) {
     } else if (text.includes('"type":"result"')) {
       const sessionTotal = lastCacheRead(text);
       if (sessionTotal !== null) totals.cacheReadInputTokens = sessionTotal;
+      totals.completed = true;
     }
     return;
   }
@@ -827,6 +885,11 @@ function foldFragmentRecord(driver, totals, fragments) {
       totals.turns += 1;
       const cacheRead = lastCacheRead(text);
       totals.cacheReadInputTokens = Math.max(totals.cacheReadInputTokens, cacheRead ?? 0);
+      // Fragment approximation of the parsed-record completion rule: the
+      // turn ends with the final agent message when that message appears
+      // before the completed marker in the retained head and tail.
+      const agentAt = text.indexOf('"type":"agent_message"');
+      if (agentAt >= 0 && agentAt < text.indexOf('"type":"turn.completed"')) totals.completed = true;
     } else if (text.includes('"type":"item.completed"') && [...CODEX_TOOL_ITEM_TYPES].some((type) => text.includes(`"type":"${type}"`))) {
       totals.toolCalls += 1;
     }
@@ -836,6 +899,7 @@ function foldFragmentRecord(driver, totals, fragments) {
     totals.turns += 1;
     const cacheRead = lastCacheRead(text);
     if (cacheRead !== null) totals.cacheReadInputTokens += cacheRead;
+    totals.completed = true;
   }
 }
 
@@ -881,7 +945,7 @@ function fragmentContinuationId(driver, fragments) {
  * @param {string} driver
  * @returns {boolean}
  */
-function isClaudeFamily(driver) {
+export function isClaudeFamily(driver) {
   return driver === "claude" || driver === "glm";
 }
 

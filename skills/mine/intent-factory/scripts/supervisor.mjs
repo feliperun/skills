@@ -309,7 +309,7 @@ function observeInvocation(job) {
  * generic metrics are zero for a provider that does not expose them.
  *
  * @param {Job} job
- * @returns {{continuationId: string|null, turns: number, cacheReadInputTokens: number, toolCalls: number}}
+ * @returns {{continuationId: string|null, turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
  */
 export function monitorInvocation(job) {
   try {
@@ -335,7 +335,7 @@ export function monitorInvocation(job) {
     }
     return { continuationId: parser.continuationId, ...parser.metrics() };
   } catch {
-    return { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0 };
+    return { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false };
   }
 }
 

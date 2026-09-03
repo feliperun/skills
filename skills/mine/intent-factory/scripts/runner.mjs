@@ -41,7 +41,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "./drivers/index.mjs";
-import { extractJson, liveInputTokens, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
+import { extractJson, isClaudeFamily, liveInputTokens, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   captureSourceIdentity,
@@ -1085,7 +1085,17 @@ function routingBackoffActive(state, phase) {
  * re-reads its whole (cheap) context each turn — the opposite of the intent.
  */
 export const ROTATION_MAX_TURNS = 80;
+/**
+ * claude-family transcripts fold one record per assistant turn, so the
+ * 80-turn ceiling calibrated for provider turns would force a handoff every
+ * few minutes on glm workers that mostly read and grep. The higher ceiling
+ * is calibrated for those per-record turns; the cache-read average rule is
+ * driver-independent and still applies.
+ */
+export const ROTATION_MAX_TURNS_CLAUDE_FAMILY = 600;
 export const ROTATION_AVG_CACHE_READ_TOKENS = 120_000;
+/** The cache-read average is only trusted across at least two observed turns. */
+export const ROTATION_MIN_TURNS_FOR_AVERAGE = 2;
 export const ROTATION_HANDOFF_MAX_BYTES = 16 * 1024;
 
 /** First line of the one-turn rotation-handoff prompt. */
@@ -1093,19 +1103,25 @@ const ROTATION_HANDOFF_PROMPT_HEADER = "The worker session is being rotated.";
 
 /**
  * The rotation trigger for one live worker observation, or null when the
- * session is still within budget. Zero observed turns never trigger: without
- * a completed turn there is no per-turn average to trust.
+ * session is still within budget. A finished session never triggers: once the
+ * driver's terminal record was folded, rotation is a decision about the next
+ * continuation, not a reason to disturb work already delivered. Zero observed
+ * turns never trigger either, and the cache-read average is only trusted
+ * across at least ROTATION_MIN_TURNS_FOR_AVERAGE turns.
  *
- * @param {{turns: number, cacheReadInputTokens: number}} metrics
+ * @param {{turns: number, cacheReadInputTokens: number, completed?: boolean}} metrics
  * @param {number} [cacheReadWeight] campaign cache-read weight; 1 preserves the raw comparison
+ * @param {string} [driver] provider driver; claude-family drivers fold per-record turns
  * @returns {string|null}
  */
-export function rotationTrigger(metrics, cacheReadWeight = 1) {
-  if (metrics.turns >= ROTATION_MAX_TURNS) {
-    return `observed turns ${metrics.turns} >= ${ROTATION_MAX_TURNS}`;
+export function rotationTrigger(metrics, cacheReadWeight = 1, driver = "codex") {
+  if (metrics.completed === true) return null;
+  const turnCeiling = isClaudeFamily(driver) ? ROTATION_MAX_TURNS_CLAUDE_FAMILY : ROTATION_MAX_TURNS;
+  if (metrics.turns >= turnCeiling) {
+    return `observed turns ${metrics.turns} >= ${turnCeiling}`;
   }
   const weightedCacheRead = metrics.cacheReadInputTokens * cacheReadWeight;
-  if (metrics.turns > 0 && weightedCacheRead >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
+  if (metrics.turns >= ROTATION_MIN_TURNS_FOR_AVERAGE && weightedCacheRead >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
     return `weighted cache-read input ${Math.round(weightedCacheRead / metrics.turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${metrics.turns} turns`;
   }
   return null;
@@ -1113,8 +1129,11 @@ export function rotationTrigger(metrics, cacheReadWeight = 1) {
 
 /**
  * Rotate any live worker session whose observed metrics crossed a rotation
- * threshold. The trigger is persisted before the provider is terminated so a
- * controller loss between trigger and termination still resumes honestly.
+ * threshold, or advise a fresh session for the next continuation of a worker
+ * that already finished with a bloated weighted cache read. The trigger is
+ * persisted before the provider is terminated so a controller loss between
+ * trigger and termination still resumes honestly; a finished invocation is
+ * never terminated.
  *
  * @param {string} runDir
  * @param {Map<string, Job>} running
@@ -1124,8 +1143,25 @@ export function rotationTrigger(metrics, cacheReadWeight = 1) {
 async function enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeight = 1) {
   for (const [nodeId, job] of running) {
     if (job.closed || job.phase !== "worker" || job.rotationReason || job.rotationHandoff || job.resultMaterialization) continue;
-    const reason = rotationTrigger(monitorInvocation(job), cacheReadWeight);
-    if (!reason) continue;
+    const metrics = monitorInvocation(job);
+    const reason = rotationTrigger(metrics, cacheReadWeight, job.runtime.driver);
+    if (!reason) {
+      const weightedCacheRead = metrics.cacheReadInputTokens * cacheReadWeight;
+      if (metrics.completed === true && weightedCacheRead >= ROTATION_AVG_CACHE_READ_TOKENS
+        && !rotationOverrideForInvocation(job.state, job.invocation.id)) {
+        const turns = Math.max(1, metrics.turns);
+        const adviseReason = `completed worker turn with weighted cache-read input ${Math.round(weightedCacheRead / turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${turns} turns; the next continuation starts fresh`;
+        recordExecutionOverride(runDir, job.state, {
+          kind: "rotation",
+          decision: "advise-fresh",
+          invocationId: job.invocation.id,
+          phase: "worker",
+          reason: adviseReason,
+        }, lease);
+        process.stdout.write(`[node] ${nodeId} completed worker session advises a fresh continuation · ${adviseReason}\n`);
+      }
+      continue;
+    }
     job.rotationReason = reason;
     recordExecutionOverride(runDir, job.state, {
       kind: "rotation",
@@ -1144,6 +1180,51 @@ function rotationInvocationIds(state) {
   return new Set((state.executionOverrides ?? [])
     .filter((item) => item.kind === "rotation" && typeof item.invocationId === "string")
     .map((item) => /** @type {string} */ (item.invocationId)));
+}
+
+/**
+ * Whether a rotation override was already recorded for one invocation, so an
+ * advise-fresh decision is persisted exactly once per invocation.
+ *
+ * @param {NodeSnapshot} state
+ * @param {string} invocationId
+ * @returns {boolean}
+ */
+function rotationOverrideForInvocation(state, invocationId) {
+  return (state.executionOverrides ?? []).some((item) => item.kind === "rotation"
+    && item.invocationId === invocationId);
+}
+
+/**
+ * The most recent unconsumed advise-fresh decision awaiting the next
+ * continuation of the node, mirroring pendingRotationHandoff.
+ *
+ * @param {NodeSnapshot} state
+ * @returns {{at: string}|null}
+ */
+function pendingAdviseFresh(state) {
+  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
+    if (item.kind !== "rotation" || item.decision !== "advise-fresh") continue;
+    if (typeof item.at !== "string") continue;
+    return { at: item.at };
+  }
+  return null;
+}
+
+/**
+ * Consume the advise-fresh decision so exactly one fresh continuation is
+ * started per completed bloated invocation; later attempts never replay it.
+ *
+ * @param {NodeSnapshot} state
+ * @param {string} at
+ */
+function consumeAdviseFresh(state, at) {
+  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
+    if (item.kind === "rotation" && item.decision === "advise-fresh" && item.at === at) {
+      item.decision = "advised";
+      return;
+    }
+  }
 }
 
 /**
@@ -1268,6 +1349,17 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
       consumeRotationHandoff(state, rotation.at);
       return {
         prompt: rotationFreshPrompt(contract, node, state, runDir, rotation.handoffPath),
+        continuationId: null,
+        mode: "fresh",
+      };
+    }
+    // A completed bloated invocation advised a fresh continuation: like a
+    // consumed rotation, the next attempt never reuses that provider session.
+    const advise = pendingAdviseFresh(state);
+    if (advise) {
+      consumeAdviseFresh(state, advise.at);
+      return {
+        prompt: capsuleHandoffPrompt(contract, node, state, runDir),
         continuationId: null,
         mode: "fresh",
       };
@@ -1484,12 +1576,23 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
   writeJsonAtomic(snapshotPath, baseline);
   state.phase = "worker";
   state.runtime = runtime;
-  // A new worker attempt has no accepted result yet. Clearing the prior
-  // attempt prevents resume from mistaking an old checkpoint for this one.
+  // A new worker attempt has no accepted result yet. The canonical result
+  // file is cleared only when the previous attempt was explicitly rejected
+  // (failed gate verdict) or when no valid canonical file exists: a valid
+  // file at the start of a continuation attempt is durable evidence and must
+  // stay in place so the completion path can adopt it.
   state.result = null;
   state.verification = null;
   state.scope = null;
-  clearWorkerResultFile(runDir, node.id);
+  let existingCanonicalResult = null;
+  try {
+    existingCanonicalResult = readWorkerResultFile(runDir, node.id);
+  } catch {
+    existingCanonicalResult = null;
+  }
+  if (state.gate?.verdict === "fail" || existingCanonicalResult === null) {
+    clearWorkerResultFile(runDir, node.id);
+  }
   const previousInvocation = state.invocations?.at(-1);
   if (previousInvocation && hasOperationSettlement(runDir, previousInvocation.id)) {
     settleInvocation(runDir, previousInvocation, { nextState: operationNextState(state) });
@@ -2854,33 +2957,44 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     await recordCampaignUsage(campaignPath, contract.usagePolicy, state.invocations.find((invocation) => invocation.id === job.invocation.id));
     state.usage = invocationUsage(state);
     state.costUsd = invocationCost(state);
-    if (job.budgetStop === "node" && state.budgetDecision && state.budgetState) {
-      if (state.budgetState.pendingSegment) {
-        try {
-          assertBudgetContinuationIdentity(job.node, state);
-          persistNodeCapsule(contract, job.node, state, runDir, lease, `continue predeclared budget segment ${state.budgetState.pendingSegment.segment}`);
-          transition(runDir, state, "pending", {
-            phase: "worker",
-            error: null,
-            blockedBy: [],
-            usage: state.usage,
-          }, lease);
-        } catch (error) {
-          state.budgetState.status = "attention";
-          transition(runDir, state, "blocked", {
-            phase: "budget",
-            error: { code: "budget_attention", message: excerpt(errorMessage(error)) },
-            usage: state.usage,
-          }, lease);
+    // A closed worker whose canonical result file is valid and whose scope
+    // passed is completed work, no matter what the provider envelope or the
+    // exit code said. The durable file is adopted before the rotation-handoff,
+    // budget-continuation, exhaustion and failure branches and enters the
+    // normal verification/gate flow with that result; a present-but-invalid
+    // file still fails exactly as the done path fails it today.
+    /** @type {import("./worker-result.mjs").WorkerResult|null} */
+    let adoptedWorkerResult = null;
+    if (job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization) {
+      try {
+        adoptedWorkerResult = readWorkerResultFile(runDir, job.node.id);
+      } catch (error) {
+        // A present-but-invalid canonical file fails exactly as the done path
+        // fails it today, but only when the worker actually finished: a
+        // rotated, killed, budget-stopped, or exhausted invocation never
+        // treats a torn file as delivered work, so the rotation-handoff,
+        // budget-continuation, exhaustion, and failure branches below decide.
+        if (!job.rotationReason && envelope.status === "done") {
+          applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error));
+          continue;
         }
-      } else {
-        state.budgetState.status = "attention";
-        transition(runDir, state, "blocked", {
-          phase: "budget",
-          error: { code: "budget_attention", message: "derived node budget ended without an authorized progress-backed continuation" },
-          usage: state.usage,
-        }, lease);
+        adoptedWorkerResult = null;
       }
+    }
+    if (adoptedWorkerResult) {
+      settleInvocation(runDir, job.invocation, {
+        status: "done",
+        usage: envelope.usage ?? null,
+        costUsd: typeof envelope.costUsd === "number" ? envelope.costUsd : null,
+        structuredResult: true,
+        result: adoptedWorkerResult,
+        receipts: providerReceipts(envelope),
+        error: null,
+        nextState: operationNextState(state),
+      });
+    }
+    if (!adoptedWorkerResult && job.budgetStop === "node" && state.budgetDecision && state.budgetState) {
+      settleDerivedBudgetStop(contract, job.node, state, runDir, lease);
       continue;
     }
     // A rotation-terminated worker settles its scope above and hands over to
@@ -2890,11 +3004,16 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       finishRotationHandoff(contract, job.node, state, runDir, job, lease, envelope);
       continue;
     }
-    if (job.phase === "worker" && job.rotationReason && envelope.status !== "done") {
+    // A worker the controller rotated did not deliver an accepted canonical
+    // result: the envelope's status cannot prove completion (a killed turn
+    // with any final message normalizes to done), so the one-turn handoff
+    // starts unless the durable result was adopted above.
+    if (!adoptedWorkerResult && job.phase === "worker" && job.rotationReason) {
+      if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease)) continue;
       startRotationHandoff(contract, runDir, running, job, state, lease, envelope);
       continue;
     }
-    if (hasCostBudget(contract, job.node) && envelope.costUsd === null) {
+    if (!adoptedWorkerResult && hasCostBudget(contract, job.node) && envelope.costUsd === null) {
       transition(runDir, state, "failed", {
         phase: job.phase,
         result: state.result,
@@ -2903,7 +3022,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       }, lease);
       continue;
     }
-    if (envelope.status === "exhausted") {
+    if (!adoptedWorkerResult && envelope.status === "exhausted") {
         handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease);
       continue;
     }
@@ -2912,12 +3031,14 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // redundant), and a worker that completed without it gets exactly one
     // result-only continuation before the node fails.
     const fileBackedNoOp = job.phase === "worker" && envelope.status === "no-op" && existsSync(workerResultPath(runDir, job.node.id));
-    if (job.phase === "worker" && envelope.status === "no-op" && !fileBackedNoOp) {
+    if (!adoptedWorkerResult && job.phase === "worker" && envelope.status === "no-op" && !fileBackedNoOp) {
       if (job.resultMaterialization) {
         transition(runDir, state, "failed", {
           phase: "worker",
           error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
         }, lease);
+      } else if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease)) {
+        continue;
       } else {
         startResultMaterialization(
           contract,
@@ -2933,7 +3054,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       }
       continue;
     }
-    if (envelope.status !== "done" && !fileBackedNoOp) {
+    if (!adoptedWorkerResult && envelope.status !== "done" && !fileBackedNoOp) {
       transition(runDir, state, job.budgetStop ? "exhausted" : envelope.status, {
         phase: job.phase,
         result: state.result,
@@ -3885,6 +4006,135 @@ function campaignCostSpent(contract, states, campaignPath) {
   return spent;
 }
 /**
+ * Settle a node whose derived budget stop is not covered by an extension:
+ * plan the predeclared continuation when progress authorized it, otherwise
+ * surface attention. Shared by the budget-termination close path and the
+ * bounded one-turn dispatch gate so every stop follows the identical durable
+ * policy.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {LeaseHandle} lease
+ * @returns {boolean} true when the node was settled into pending or attention
+ */
+function settleDerivedBudgetStop(contract, node, state, runDir, lease) {
+  if (!state.budgetDecision || !state.budgetState) return false;
+  if (state.budgetState.pendingSegment) {
+    try {
+      assertBudgetContinuationIdentity(node, state);
+      persistNodeCapsule(contract, node, state, runDir, lease, `continue predeclared budget segment ${state.budgetState.pendingSegment.segment}`);
+      transition(runDir, state, "pending", {
+        phase: "worker",
+        error: null,
+        blockedBy: [],
+        usage: state.usage,
+      }, lease);
+    } catch (error) {
+      state.budgetState.status = "attention";
+      transition(runDir, state, "blocked", {
+        phase: "budget",
+        error: { code: "budget_attention", message: excerpt(errorMessage(error)) },
+        usage: state.usage,
+      }, lease);
+    }
+    return true;
+  }
+  state.budgetState.status = "attention";
+  transition(runDir, state, "blocked", {
+    phase: "budget",
+    error: { code: "budget_attention", message: "derived node budget ended without an authorized progress-backed continuation" },
+    usage: state.usage,
+  }, lease);
+  return true;
+}
+
+/**
+ * Apply the derived per-node budget stop for one observation: grant the
+ * authorized progress-backed extension when the progress signature changed
+ * since the last grant, and when the spend still exceeds the extended cap,
+ * plan the predeclared continuation or surface attention. Mirrors the live
+ * enforcement so the settled boundary and the live boundary make the same
+ * decision.
+ *
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {LeaseHandle} lease
+ * @param {number} cumulativeSeen weighted tokens already spent
+ * @returns {boolean} true when the spend is not covered and the node must stop
+ */
+function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen) {
+  const budget = state.budgetState;
+  if (!state.budgetDecision || !budget) return false;
+  const progressSignature = state.progress?.heartbeatCount ? state.progress.progressSignature ?? null : null;
+  const progressEligible = Boolean(progressSignature && progressSignature !== budget.lastGrantedProgressSignature);
+  const extension = grantBudgetExtension(state.budgetDecision, budget, progressSignature);
+  const { grantedTokens, ...nextBudget } = extension;
+  let currentBudget = budget;
+  if (grantedTokens > 0) {
+    currentBudget = nextBudget;
+    state.budgetState = nextBudget;
+    writeNode(runDir, state, lease);
+    appendTransitionEvent(runDir, state, state.status, state.status, {
+      budgetAction: { type: "extension", grantedTokens, currentCapTokens: nextBudget.currentCapTokens, progressSignature },
+    }, lease);
+    process.stdout.write(`[node] ${node.id} derived budget extended by ${grantedTokens} · cap ${nextBudget.currentCapTokens}\n`);
+    if (cumulativeSeen <= nextBudget.currentCapTokens) return false;
+  }
+  const pending = progressEligible && cumulativeSeen < state.budgetDecision.hardCapTokens
+    ? planBudgetContinuation(state.budgetDecision, currentBudget)
+    : null;
+  if (pending) {
+    currentBudget.pendingSegment = pending;
+    currentBudget.lastGrantedProgressSignature = progressSignature;
+    currentBudget.status = "continuing";
+    state.budgetState = currentBudget;
+    writeNode(runDir, state, lease);
+    appendTransitionEvent(runDir, state, state.status, state.status, {
+      budgetAction: { type: "continuation_planned", segment: pending.segment, allocationTokens: pending.allocationTokens, id: pending.id },
+    }, lease);
+  } else {
+    currentBudget.status = "attention";
+    state.budgetState = currentBudget;
+    writeNode(runDir, state, lease);
+    appendTransitionEvent(runDir, state, state.status, state.status, {
+      budgetAction: { type: "attention", observedTokens: cumulativeSeen, currentCapTokens: currentBudget.currentCapTokens },
+    }, lease);
+  }
+  return true;
+}
+
+/**
+ * A bounded one-turn invocation (rotation handoff or result materialization)
+ * is never terminated once it runs; the budget decides whether it starts. At
+ * the dispatch point the node's settled spend is evaluated against its
+ * current derived cap: when the spend is over the cap and no extension covers
+ * it, the bounded call is not dispatched and the node settles through the
+ * budget continuation/attention path.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {LeaseHandle} lease
+ * @returns {boolean} true when the dispatch was refused and the node settled
+ */
+function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease) {
+  // A derived per-node budget (budgetProfile) applies with or without a
+  // campaign usage policy; only a missing decision or cap means there is
+  // nothing to refuse against.
+  if (!state.budgetDecision || !state.budgetState?.currentCapTokens) return false;
+  const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
+  const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
+  if (cumulativeSeen <= state.budgetState.currentCapTokens) return false;
+  if (!applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen)) return false;
+  settleDerivedBudgetStop(contract, node, state, runDir, lease);
+  return true;
+}
+
+/**
  * Live token-budget enforcement. Persisted `state.usage` lags behind reality
  * until an invocation closes, so active jobs are metered by scanning their
  * still-growing transcripts (bounded tail) every tick. Two ceilings:
@@ -3908,6 +4158,10 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
   let liveSpent = 0;
   for (const [nodeId, job] of running) {
     if (job.closed) continue;
+    // A bounded one-turn rotation handoff or result materialization settles
+    // before any budget stop is applied: the budget decides whether it starts
+    // (evaluated at the dispatch point), never whether it finishes.
+    if (job.rotationHandoff || job.resultMaterialization) continue;
     const seen = observeLiveInputTokens(job, cacheReadWeight);
     observed.set(nodeId, seen);
     liveSpent += seen;
@@ -3915,54 +4169,14 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
     const cumulativeSeen = roundBudgetTokens(persistedNode + seen);
     const budget = job.state.budgetState;
     const cap = budget?.currentCapTokens ?? job.node.maxInputTokens;
-    if (cap !== undefined && cumulativeSeen > cap && !job.budgetStop) {
+    if (job.phase === "worker" && cap !== undefined && cumulativeSeen > cap && !job.budgetStop) {
       if (job.state.budgetDecision && budget) {
-        const progressSignature = job.state.progress?.heartbeatCount
-          ? job.state.progress.progressSignature ?? null
-          : null;
-        // Progress observed since the last grant authorizes the bounded
-        // extension and, when that is still insufficient, the predeclared
-        // continuation; granting the extension does not consume the evidence.
-        const progressEligible = Boolean(
-          progressSignature
-          && progressSignature !== budget.lastGrantedProgressSignature,
-        );
-        const extension = grantBudgetExtension(job.state.budgetDecision, budget, progressSignature);
-        const { grantedTokens, ...nextBudget } = extension;
-        let currentBudget = budget;
-        if (grantedTokens > 0) {
-          currentBudget = nextBudget;
-          job.state.budgetState = nextBudget;
-          writeNode(runDir, job.state, lease);
-          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
-            budgetAction: { type: "extension", grantedTokens, currentCapTokens: nextBudget.currentCapTokens, progressSignature },
-          }, lease);
-          process.stdout.write(`[node] ${nodeId} derived budget extended by ${grantedTokens} · cap ${nextBudget.currentCapTokens}\n`);
-          if (cumulativeSeen <= nextBudget.currentCapTokens) continue;
+        const stopped = applyDerivedBudgetStop(job.node, job.state, runDir, lease, cumulativeSeen);
+        if (stopped) {
+          job.budgetStop = "node";
+          void terminateProcess(job).catch(() => {});
+          process.stdout.write(`[node] ${nodeId} derived input budget reached (${cumulativeSeen} > ${cap}) · terminating\n`);
         }
-        const pending = progressEligible && cumulativeSeen < job.state.budgetDecision.hardCapTokens
-          ? planBudgetContinuation(job.state.budgetDecision, currentBudget)
-          : null;
-        if (pending) {
-          currentBudget.pendingSegment = pending;
-          currentBudget.lastGrantedProgressSignature = progressSignature;
-          currentBudget.status = "continuing";
-          job.state.budgetState = currentBudget;
-          writeNode(runDir, job.state, lease);
-          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
-            budgetAction: { type: "continuation_planned", segment: pending.segment, allocationTokens: pending.allocationTokens, id: pending.id },
-          }, lease);
-        } else {
-          currentBudget.status = "attention";
-          job.state.budgetState = currentBudget;
-          writeNode(runDir, job.state, lease);
-          appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
-            budgetAction: { type: "attention", observedTokens: cumulativeSeen, currentCapTokens: currentBudget.currentCapTokens },
-          }, lease);
-        }
-        job.budgetStop = "node";
-        void terminateProcess(job).catch(() => {});
-        process.stdout.write(`[node] ${nodeId} derived input budget reached (${cumulativeSeen} > ${cap}) · terminating\n`);
       } else {
         job.budgetStop = "node";
         void terminateProcess(job).catch(() => {});
@@ -3980,7 +4194,7 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
   const spent = Math.round((persisted + liveSpent) * 1000) / 1000;
   if (spent < contract.maxInputTokens) return;
   for (const job of running.values()) {
-    if (!job.budgetStop && !job.closed) {
+    if (!job.budgetStop && !job.closed && !job.rotationHandoff && !job.resultMaterialization) {
       job.budgetStop = "campaign";
       void terminateProcess(job).catch(() => {});
     }

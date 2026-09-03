@@ -12,7 +12,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
-import { cancelRun, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS } from "./runner.mjs";
+import { cancelRun, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_MIN_TURNS_FOR_AVERAGE } from "./runner.mjs";
 import { invocationAlive, invocationResult, processStartToken } from "./supervisor.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
@@ -285,7 +285,11 @@ if (process.argv.includes("--version")) {
     // Fat worker session: emit turn evidence, then park until rotated.
     if (mode !== "no-continuation") console.log(JSON.stringify({ type: "thread.started", thread_id: "fat-thread" }));
     if (mode === "cache") {
+      // Two cumulative turn.completed records: the cache-read average is only
+      // trusted across at least two observed turns, so a single completed
+      // turn must never rotate a finishing invocation.
       console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 1, cached_input_tokens: 130000 } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2000, output_tokens: 1, cached_input_tokens: 260000 } }));
     } else if (mode === "no-threshold") {
       // 78 turn events plus the closing one stay strictly under 80 observed.
       for (let index = 0; index < 78; index += 1) {
@@ -2730,6 +2734,30 @@ test("budget attention D36 terminates an active worker at its derived cap", asyn
   assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "budget_attention"));
 });
 
+test("a judge invocation on a budgeted node is not killed by the worker input token cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-worker-cap-"));
+  const path = writeContract(directory, fixture({
+    id: "judge-worker-cap-run",
+    maxInputTokens: 5_000_000,
+    pollIntervalMs: 10,
+    timeoutSec: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Complete and judge" }),
+      maxInputTokens: 500,
+      budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await withFakeCodex(directory, "complete-exit-1", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "complete");
+  assert.equal(state.error, null);
+});
+
 test("budget failover boundary D37 never routes a local budget stop", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-budget-no-failover-"));
   const path = writeContract(directory, fixture({
@@ -3399,16 +3427,30 @@ test("blocks downstream nodes after a failed dependency", async () => {
 test("rotation triggers at exactly 80 turns or 120000 average cache-read tokens per turn", () => {
   assert.equal(ROTATION_MAX_TURNS, 80);
   assert.equal(ROTATION_AVG_CACHE_READ_TOKENS, 120_000);
+  assert.equal(ROTATION_MIN_TURNS_FOR_AVERAGE, 2);
+  assert.equal(ROTATION_MAX_TURNS_CLAUDE_FAMILY, 600);
   assert.equal(ROTATION_HANDOFF_MAX_BYTES, 16 * 1024);
-  assert.equal(rotationTrigger({ turns: 0, cacheReadInputTokens: 10_000_000 }), null, "no observed turn means no trusted per-turn average");
-  assert.equal(rotationTrigger({ turns: 79, cacheReadInputTokens: 79 * 119_999 }), null, "79 turns under the average stay put");
-  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2 * ROTATION_AVG_CACHE_READ_TOKENS - 1 }), null, "one token under the average is not premature");
-  assert.match(rotationTrigger({ turns: 80, cacheReadInputTokens: 0 }) ?? "", /observed turns 80 >= 80/u);
-  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS }) ?? "", /weighted cache-read input 120000/u);
+  assert.equal(rotationTrigger({ turns: 0, cacheReadInputTokens: 10_000_000, completed: false }), null, "no observed turn means no trusted per-turn average");
+  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 10_000_000, completed: false }), null, "a single observed turn never triggers the average rule");
+  assert.equal(rotationTrigger({ turns: 79, cacheReadInputTokens: 79 * 119_999, completed: false }), null, "79 turns under the average stay put");
+  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2 * ROTATION_AVG_CACHE_READ_TOKENS - 1, completed: false }), null, "one token under the average is not premature");
+  assert.match(rotationTrigger({ turns: 80, cacheReadInputTokens: 0, completed: false }) ?? "", /observed turns 80 >= 80/u);
+  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS, completed: false }) ?? "", /weighted cache-read input 120000/u);
   // The cache-read trigger weights cache reads: a bounded-preamble worker that
   // re-reads a large but cheap context each turn must not rotate every turn.
-  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 374_400 }, 0.1), null, "cheap cache reads under the weighted threshold stay put");
-  assert.match(rotationTrigger({ turns: 1, cacheReadInputTokens: 1_300_000 }, 0.1) ?? "", /weighted cache-read input 130000 >= 120000/u, "genuinely bloated weighted context still rotates");
+  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 374_400, completed: false }, 0.1), null, "cheap cache reads under the weighted threshold stay put");
+  assert.match(rotationTrigger({ turns: 2, cacheReadInputTokens: 2_600_000, completed: false }, 0.1) ?? "", /weighted cache-read input 130000 >= 120000/u, "genuinely bloated weighted context still rotates across two turns");
+  // claude-family drivers fold one record per assistant turn: the 80-turn
+  // provider ceiling would hand off a reading-heavy glm worker every few
+  // minutes, so the family gets its own much higher turn ceiling while the
+  // cache-read average rule stays identical.
+  assert.equal(rotationTrigger({ turns: 81, cacheReadInputTokens: 0, completed: false }, 1, "claude"), null, "81 claude assistant turns never rotate");
+  assert.equal(rotationTrigger({ turns: 81, cacheReadInputTokens: 0, completed: false }, 1, "glm"), null, "81 glm assistant turns never rotate");
+  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }, 1, "claude") ?? "", /observed turns 600 >= 600/u);
+  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }, 1, "glm") ?? "", /observed turns 600 >= 600/u);
+  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }) ?? "", /observed turns 600 >= 80/u, "codex keeps the provider-turn ceiling");
+  assert.equal(rotationTrigger({ turns: 80, cacheReadInputTokens: 10_000_000, completed: true }), null, "a completed invocation is never rotated, whatever the observed turns");
+  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2_600_000, completed: true }, 0.1), null, "the completed flag outranks the cache-read trigger");
 });
 
 test("automatic rotation turns a fat worker session over at 80 observed turns", async () => {
@@ -3461,7 +3503,7 @@ test("automatic rotation triggers on average cache-read input without 80 turns",
   assert.equal(state.status, "done");
   const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
   assert.equal(rotations.length, 2);
-  assert.match(rotations[0].reason ?? "", /weighted cache-read input 130000 >= 120000 tokens\/turn over 1 turns/u);
+  assert.match(rotations[0].reason ?? "", /weighted cache-read input 130000 >= 120000 tokens\/turn over 2 turns/u);
   assert.equal((state.invocations ?? []).length, 3, "the cache trigger also rotates through the handoff into a fresh session");
 });
 
@@ -3608,6 +3650,167 @@ test("resume continues a commissioned rotation handoff in a fresh session", asyn
   assert.match(freshPrompt, /- pending: resume/u, "the durable handoff content carries into the resumed fresh session");
   assert.match(freshPrompt, /Bounded git status --short/u);
   assert.match(freshPrompt, /Current closed task packet/u);
+});
+
+test("a completed worker turn with a non-zero exit code is adopted as done without rotation or continuation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-complete-exit-1-"));
+  const path = writeContract(directory, fixture({
+    id: "complete-exit-1-run",
+    pollIntervalMs: 10,
+    usagePolicy: { epoch: "complete-exit-1-epoch", maxInputTokens: 100_000_000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100_000_000, maxInvocationTokens: 100_000_000, cacheReadWeight: 0.1 },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "complete-exit-1", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal((state.invocations ?? []).length, 1, "the finished turn is adopted, never rotated or continued");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(
+    rotations.some((item) => item.decision === "trigger" || item.decision === "handoff"),
+    false,
+    "a finishing invocation is never rotation-terminated; an advise-fresh decision is allowed",
+  );
+  assert.equal(existsSync(join(result.runDir, "results", "build.json")), true, "the durable canonical result survives");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "completed despite non-zero exit");
+});
+
+test("budget stop never dispatches a rotation handoff the node cannot afford, and a dispatched handoff settles", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-budget-bounded-"));
+  const path = writeContract(directory, fixture({
+    id: "budget-bounded-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Flood tokens" }),
+      maxInputTokens: 1_000_000,
+      budgetProfile: budgetProfile({
+        estimatedWeightedInputTokens: 500,
+        contextWindowTokens: 300_000,
+        continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
+      }),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      gate: false,
+    }],
+  }));
+  // The cache-rotating session crosses its derived cap mid-flight: the live
+  // budget stop (or the rotation dispatch gate) must refuse the one-turn
+  // rotation handoff and settle the node through the budget attention path
+  // instead of dispatching a bounded call that would then be terminated.
+  const { result } = await withRotatingCodex(directory, "cache", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "budget_attention");
+  assert.equal(state.budgetState?.status, "attention");
+  assert.equal((state.invocations ?? []).length, 1, "no one-turn rotation handoff was dispatched beyond the node budget");
+  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
+  assert.equal(rotations.some((item) => item.decision === "handoff"), false, "the unaffordable bounded handoff never starts, so nothing budget-terminates it");
+});
+
+test("a dispatched rotation handoff settles under a derived budget before the node completes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-budget-handoff-settles-"));
+  const path = writeContract(directory, fixture({
+    id: "budget-handoff-settles-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Rotate within budget" }),
+      maxInputTokens: 1_000_000,
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
+      gate: false,
+    }],
+  }));
+  const { result } = await withRotatingCodex(directory, "turns", path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  const invocations = state.invocations ?? [];
+  assert.equal(invocations.length, 3, "the one-turn handoff and the fresh session both ran to settlement");
+  assert.equal(invocations[1].continuationMode, "reuse", "the handoff resumes the rotated session for one bounded turn");
+  assert.equal(invocations[1].status, "closed", "the bounded handoff invocation settled normally, never canceled by a budget stop");
+  assert.equal(state.error, null);
+});
+
+test("a continuation attempt adopts an existing canonical worker result instead of deleting it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-continuation-adopts-"));
+  const path = writeContract(directory, fixture({
+    id: "continuation-adopts-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  // Rewind to a pending continuation boundary with a valid canonical result
+  // already on disk, exactly as if the controller planned a continuation
+  // after a completed worker turn.
+  const preWritten = { status: "done", summary: "pre-written canonical result", changedFiles: [], verification: [], artifacts: [], missingContext: [] };
+  writeFileSync(join(runDir, "results", "build.json"), JSON.stringify(preWritten));
+  const nodePath = join(runDir, "nodes", "build.json");
+  const persisted = JSON.parse(readFileSync(nodePath, "utf8"));
+  writeFileSync(nodePath, JSON.stringify({
+    ...persisted,
+    status: "pending",
+    phase: "worker",
+    attempt: 1,
+    result: null,
+    gate: null,
+    error: null,
+    verification: null,
+    budgetState: null,
+    budgetDecision: null,
+  }, null, 2));
+
+  // The continuation attempt fails at the provider, yet the durable result
+  // file must survive startWorker and be adopted through the done path.
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "pre-written canonical result", "the continuation adopts the existing canonical result");
+  assert.equal(
+    JSON.parse(readFileSync(join(runDir, "results", "build.json"), "utf8")).summary,
+    "pre-written canonical result",
+    "startWorker never cleared the valid canonical file",
+  );
+});
+
+test("an advise-fresh override forces the next continuation into a fresh session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-advise-fresh-"));
+  const path = writeContract(directory, fixture({
+    id: "advise-fresh-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const nodePath = join(runDir, "nodes", "build.json");
+  const persisted = JSON.parse(readFileSync(nodePath, "utf8"));
+  const sourceInvocation = persisted.invocations?.[0];
+  writeFileSync(nodePath, JSON.stringify({
+    ...persisted,
+    status: "pending",
+    phase: "worker",
+    attempt: 1,
+    result: null,
+    gate: null,
+    error: null,
+    verification: null,
+    executionOverrides: [
+      { kind: "rotation", at: new Date().toISOString(), decision: "advise-fresh", invocationId: sourceInvocation?.id ?? "invocation", phase: "worker", reason: "completed worker turn with weighted cache-read input 130000 >= 120000 tokens/turn" },
+    ],
+  }, null, 2));
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const state = nodeState(resumed);
+  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  const fresh = state.invocations?.at(-1);
+  assert.equal(fresh?.continuationMode, "fresh", "the advise-fresh decision is consumed like a rotation: the next attempt is fresh");
+  assert.notEqual(fresh?.id, sourceInvocation?.id, "the fresh continuation starts a new invocation rather than resuming the bloated one");
+  assert.notEqual(fresh?.promptPath, undefined, "the fresh continuation carries its own prompt");
+  assert.equal(
+    (state.executionOverrides ?? []).filter((item) => item.kind === "rotation" && item.decision === "advise-fresh").length,
+    0,
+    "the advise-fresh decision was consumed exactly once",
+  );
 });
 
 test("worker invocations send no tool policy to a driver that cannot enforce it", async () => {

@@ -197,10 +197,10 @@ test("monitorInvocation reads bounded live evidence and never throws", () => {
     runtime: { driver: "codex" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
-  assert.deepEqual(monitorInvocation(job), { continuationId: "live-thread", turns: 1, cacheReadInputTokens: 80, toolCalls: 1 });
+  assert.deepEqual(monitorInvocation(job), { continuationId: "live-thread", turns: 1, cacheReadInputTokens: 80, toolCalls: 1, completed: false });
   assert.deepEqual(
     monitorInvocation({ ...job, paths: { ...job.paths, stdout: join(logs, "missing.jsonl") } }),
-    { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0 },
+    { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false },
     "a missing transcript meters as zero without throwing",
   );
 });

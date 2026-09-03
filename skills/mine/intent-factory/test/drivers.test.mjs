@@ -504,6 +504,57 @@ test("normalizes Codex, streaming Claude, and agy results", () => {
   assert.equal(normalizedAgy.usage.cacheReadInputTokens, 3);
 });
 
+test("a completed Codex turn with a final message is done regardless of the exit code", () => {
+  const finished = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "error", message: "benign under-development warning" } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "worker complete" }) } },
+    { type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1, cached_input_tokens: 3 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const done = normalizeProviderResult("codex", finished, 1, null);
+  assert.equal(done.status, "done", "the turn completed with a final message; the exit code is about the harness");
+  assert.equal(done.continuationId, "thread");
+  assert.equal(done.usage.inputTokens, 1);
+  assert.equal(done.usage.cacheReadInputTokens, 3);
+  assert.equal(done.error, null);
+  const emptyMessage = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: "" } },
+    { type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1, cached_input_tokens: 3 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const noOp = normalizeProviderResult("codex", emptyMessage, 1, null);
+  assert.equal(noOp.status, "no-op", "an empty final message on a completed turn normalizes to no-op, not provider_error");
+  assert.equal(noOp.error, null);
+
+  const failedTurn = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: "partial work" } },
+    { type: "turn.failed", error: { message: "deliberate failure" } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const failed = normalizeProviderResult("codex", failedTurn, 1, null);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error?.code, "provider_error");
+  assert.match(failed.error?.message ?? "", /deliberate failure/u);
+
+  const noTerminal = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: "still working" } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const incomplete = normalizeProviderResult("codex", noTerminal, 1, null);
+  assert.equal(incomplete.status, "failed");
+  assert.equal(incomplete.error?.code, "incomplete_stream");
+  assert.match(incomplete.error?.message ?? "", /no turn.completed/u);
+
+  const exitedWithoutMessage = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const harnessDeath = normalizeProviderResult("codex", exitedWithoutMessage, 1, null);
+  assert.equal(harnessDeath.status, "failed");
+  assert.equal(harnessDeath.error?.code, "provider_error");
+  assert.match(harnessDeath.error?.message ?? "", /Codex exited with code 1/u, "a non-zero exit without any final message still reports the harness failure");
+});
+
 test("surfaces agy result errors", () => {
   const stream = JSON.stringify({
     event: "result",
@@ -603,22 +654,31 @@ test("live metering sums per-request Claude usage and prefers the terminal total
 });
 
 test("live session metrics expose only what each driver's events prove", () => {
-  const codex = [
+  const codexEvents = [
     { type: "thread.started", thread_id: "t" },
     { type: "item.completed", item: { type: "command_execution" } },
     { type: "turn.completed", usage: { input_tokens: 500, cached_input_tokens: 300 } },
     { type: "item.completed", item: { type: "tool_call" } },
     { type: "item.completed", item: { type: "agent_message", text: "ok" } },
     { type: "turn.completed", usage: { input_tokens: 900, cached_input_tokens: 700 } },
-  ].map((event) => JSON.stringify(event)).join("\n");
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "done" }) } },
+    { type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 900 } },
+  ];
+  const codex = codexEvents.map((event) => JSON.stringify(event)).join("\n");
   assert.deepEqual(
     liveSessionMetrics("codex", codex),
-    { turns: 2, cacheReadInputTokens: 700, toolCalls: 2 },
-    "Codex turn completions, cumulative cache-read maximum, and tool item events",
+    { turns: 3, cacheReadInputTokens: 900, toolCalls: 2, completed: true },
+    "Codex turn completions, cumulative cache-read maximum, tool items, and the terminal turn that ends with the result message",
+  );
+  const midSession = codexEvents.slice(0, 6).map((event) => JSON.stringify(event)).join("\n");
+  assert.deepEqual(
+    liveSessionMetrics("codex", midSession),
+    { turns: 2, cacheReadInputTokens: 700, toolCalls: 2, completed: false },
+    "a turn.completed that does not end with the result-carrying message is not a completed invocation",
   );
   assert.deepEqual(
     liveSessionMetrics("codex", `${codex}\n{"type":"turn.compl`),
-    { turns: 2, cacheReadInputTokens: 700, toolCalls: 2 },
+    { turns: 3, cacheReadInputTokens: 900, toolCalls: 2, completed: true },
     "a partial trailing line is ignored",
   );
   const claude = [
@@ -627,24 +687,24 @@ test("live session metrics expose only what each driver's events prove", () => {
   ].map((event) => JSON.stringify(event)).join("\n");
   assert.deepEqual(
     liveSessionMetrics("claude", claude),
-    { turns: 2, cacheReadInputTokens: 60, toolCalls: 2 },
+    { turns: 2, cacheReadInputTokens: 60, toolCalls: 2, completed: false },
     "assistant turns, summed per-request cache reads, and tool_use blocks",
   );
-  assert.deepEqual(liveSessionMetrics("glm", claude), { turns: 2, cacheReadInputTokens: 60, toolCalls: 2 });
+  assert.deepEqual(liveSessionMetrics("glm", claude), { turns: 2, cacheReadInputTokens: 60, toolCalls: 2, completed: false });
   const terminal = `${claude}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 15, cache_read_input_tokens: 90 } })}`;
   assert.deepEqual(
     liveSessionMetrics("claude", terminal),
-    { turns: 2, cacheReadInputTokens: 90, toolCalls: 2 },
-    "the terminal session total wins over the mid-run sum",
+    { turns: 2, cacheReadInputTokens: 90, toolCalls: 2, completed: true },
+    "the terminal session total wins over the mid-run sum and the result record folds completion",
   );
   const execJsonl = JSON.stringify({ schemaVersion: 1, type: "run.completed", result: "ok", continuationId: null, usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 7 }, costUsd: null });
   assert.deepEqual(
     liveSessionMetrics("exec-jsonl", execJsonl),
-    { turns: 1, cacheReadInputTokens: 7, toolCalls: 0 },
+    { turns: 1, cacheReadInputTokens: 7, toolCalls: 0, completed: true },
     "the protocol carries no tool events, so only a completed run proves a turn",
   );
-  assert.deepEqual(liveSessionMetrics("codex", "not json at all"), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "malformed input meters as zero");
-  assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0 }, "unsupported drivers meter as zero");
+  assert.deepEqual(liveSessionMetrics("codex", "not json at all"), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false }, "malformed input meters as zero");
+  assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false }, "unsupported drivers meter as zero");
 });
 
 test("the codex driver bounds the harness preamble before the runtime's own config overrides", () => {

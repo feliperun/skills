@@ -290,6 +290,22 @@ if (process.argv.includes("--version")) {
       console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));
       return;
     }
+    if (mode === "complete-exit-1" && !prompt.startsWith("Review node")) {
+      // A finished worker turn whose harness then exits non-zero: the run
+      // owns a durable canonical result and a final agent message carrying
+      // the same JSON, plus the two benign error items from the incident.
+      writeFileSync("README.md", "worker output\\n");
+      const resultPath = /canonical result file: (\\S+\\.json)/.exec(prompt)?.[1];
+      const payload = { status: "done", summary: "completed despite non-zero exit", changedFiles: ["README.md"], verification: [], artifacts: [], missingContext: [] };
+      const text = JSON.stringify(payload);
+      if (resultPath) writeFileSync(resultPath, text);
+      console.log(JSON.stringify({type:"item.completed",item:{id:"item_0",type:"error",message:"Under-development features enabled: rollout_budget. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set \`suppress_unstable_features_warning = true\` in /Users/frb/.codex/config.toml."}}));
+      console.log(JSON.stringify({type:"item.completed",item:{id:"item_1",type:"error",message:"Model metadata for \`deepseek-v4-flash\` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}));
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:2000000,cached_input_tokens:1900000,output_tokens:100}}));
+      process.exitCode = 1;
+      return;
+    }
     if (mode === "silent") setTimeout(() => {}, 60_000);
     else if (mode === "token-flood") {
       // Streams cumulative turn.completed usage events while staying alive:
