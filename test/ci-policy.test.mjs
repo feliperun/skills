@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -39,6 +39,44 @@ function messageFile(message) {
   writeFileSync(file, message);
   return file;
 }
+
+const SCRIPTS_DIR = join(ROOT, "skills", "mine", "intent-factory", "scripts");
+
+/** @returns {string[]} production .mjs paths under SCRIPTS_DIR, relative with forward slashes */
+function productionScriptFiles() {
+  /** @type {string[]} */
+  const files = [];
+  /**
+   * @param {string} dir
+   */
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.isFile() && entry.name.endsWith(".mjs") && !entry.name.endsWith(".test.mjs")) {
+        files.push(relative(SCRIPTS_DIR, path));
+      }
+    }
+  };
+  walk(SCRIPTS_DIR);
+  return files;
+}
+
+// ratchet — lower the ceiling whenever the count drops; never raise it (spec rule 4)
+const EMPTY_CATCH_CEILING = 32;
+
+// ratchet — ceilings only decrease (spec section 9.1)
+/** @type {Record<string, number>} */
+const LINE_CEILINGS = {
+  "runner.mjs": 7200,
+  "contract.mjs": 1700,
+  "campaign-autonomy.mjs": 1550,
+  "campaign.mjs": 1300,
+  "heartbeat.mjs": 650,
+  "drivers/exec-jsonl.mjs": 1250,
+};
+const DEFAULT_LINE_CEILING = 900;
 
 const VALID_MESSAGE = "feat(ci): add policy gates\n\nBody line.\n";
 const INVALID_MESSAGE = "bad message\n";
@@ -108,4 +146,35 @@ test("hooks are wired, executable, and enforce Conventional Commits", () => {
   assert.equal(good.status, 0, good.stderr);
   const bad = run(COMMIT_MSG_HOOK, [messageFile(INVALID_MESSAGE)]);
   assert.notEqual(bad.status, 0);
+});
+
+test("AGENT.md, CLAUDE.md, CURSOR.md and GEMINI.md stay symlinks to AGENTS.md", () => {
+  const names = ["AGENT.md", "CLAUDE.md", "CURSOR.md", "GEMINI.md"];
+  const result = spawnSync("git", ["ls-files", "-s", ...names], { cwd: ROOT, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trim().split("\n").filter(Boolean);
+  assert.equal(lines.length, 4, `expected 4 symlink entries, got ${lines.length}`);
+  for (const line of lines) {
+    assert.match(line, /^120000 /);
+  }
+  for (const name of names) {
+    assert.equal(readlinkSync(join(ROOT, name)), "AGENTS.md");
+  }
+});
+
+test("empty catch blocks in production scripts never increase", () => {
+  let count = 0;
+  for (const rel of productionScriptFiles()) {
+    const contents = readFileSync(join(SCRIPTS_DIR, rel), "utf8");
+    count += (contents.match(/catch\s*\{\s*\}/g) ?? []).length;
+  }
+  assert.ok(count <= EMPTY_CATCH_CEILING, `${count} empty catch blocks exceed ceiling ${EMPTY_CATCH_CEILING}`);
+});
+
+test("production script line counts stay at or below their ratchet ceilings", () => {
+  for (const rel of productionScriptFiles()) {
+    const lines = readFileSync(join(SCRIPTS_DIR, rel), "utf8").split("\n").length;
+    const ceiling = LINE_CEILINGS[rel] ?? DEFAULT_LINE_CEILING;
+    assert.ok(lines <= ceiling, `${rel}: ${lines} lines exceeds ceiling ${ceiling}`);
+  }
 });
