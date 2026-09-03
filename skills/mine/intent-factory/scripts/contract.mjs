@@ -96,7 +96,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
 /** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null}} WorktreeState */
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null}} NodeSnapshot */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null}} NodeSnapshot */
 /** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
 
@@ -360,7 +360,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   assertObject(value, "node snapshot");
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "id", "type", "sourceIdentity", "packetHash", "status", "phase",
-    "attempt", "revisions", "runtime", "blockedBy", "startedAt", "updatedAt", "result", "gate", "error", "usage",
+    "attempt", "revisions", "judgeFailures", "runtime", "blockedBy", "startedAt", "updatedAt", "result", "gate", "error", "usage",
     "costUsd", "routing", "progress", "worktree", "invocations", "executionOverrides", "verification", "scope",
     "budgetDecision", "budgetState",
   ]), "node snapshot");
@@ -371,6 +371,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   if (!NODE_PHASES.has(/** @type {string} */ (value.phase))) throw new TypeError("node snapshot.phase is invalid");
   nonNegativeInteger(value.attempt, "node snapshot.attempt");
   nonNegativeInteger(value.revisions, "node snapshot.revisions");
+  if (value.judgeFailures !== undefined) nonNegativeInteger(value.judgeFailures, "node snapshot.judgeFailures");
   requirePacketHash(value.packetHash, "node snapshot.packetHash");
   validateSourceIdentity(value.sourceIdentity, "node snapshot.sourceIdentity", { kind: "node" });
   const sourceIdentity = /** @type {JsonObject} */ (value.sourceIdentity);
@@ -749,7 +750,7 @@ function validateInvocations(value, label) {
     const allowed = new Set([
       "id", "pid", "processGroupId", "processStartToken", "driver", "runtimeId", "phase",
       "promptPath", "stdoutPath", "stderrPath", "startedAt", "updatedAt", "closedAt", "deadlineAt",
-      "exitCode", "signal", "status", "executable", "usage", "costUsd", "snapshotPath", "revision",
+      "exitCode", "signal", "status", "executable", "usage", "usageEstimated", "costUsd", "snapshotPath", "revision",
       "runId", "campaignId", "planPhase", "role", "runtimeFingerprint", "model", "reasoning", "sandbox", "continuationId", "continuationMode",
     ]);
     rejectUnknown(invocation, allowed, `${label}[${index}]`);
@@ -782,6 +783,9 @@ function validateInvocations(value, label) {
     if (invocation.signal !== null) requireString(invocation.signal, `${label}[${index}].signal`);
     if (! ["active", "closed", "terminated"].includes(/** @type {string} */ (invocation.status))) throw new TypeError(`${label}[${index}].status is invalid`);
     if (invocation.usage !== undefined) validateInvocationUsage(invocation.usage, `${label}[${index}].usage`);
+    if (invocation.usageEstimated !== undefined && typeof invocation.usageEstimated !== "boolean") {
+      throw new TypeError(`${label}[${index}].usageEstimated must be a boolean`);
+    }
     if (invocation.costUsd !== undefined && invocation.costUsd !== null) nonNegativeNumber(invocation.costUsd, `${label}[${index}].costUsd`);
   }
 }

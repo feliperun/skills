@@ -203,6 +203,41 @@ test("Codex rollout-budget exhaustion is a provider exhaustion event", () => {
   assert.equal(result.continuationId, "bounded-thread");
 });
 
+test("quota exhaustion routes through the declared failover edge (normalizer)", () => {
+  // N05: after ten claude CLI retries the Z.ai stream ends with an assistant
+  // rate_limit record and a terminal api_error result; the envelope must be
+  // exhausted so the declared failover edge fires.
+  const glmIncident = [
+    { type: "assistant", error: "rate_limit", is_api_error_message: true, content: "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-04 21:44:15][Request was not sent]" },
+    { type: "result", result: "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-04 21:44:15]", is_error: true, terminal_reason: "api_error", session_id: "quota-session", usage: { input_tokens: 5, output_tokens: 1 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const glm = normalizeProviderResult("glm", glmIncident, 1, null);
+  assert.equal(glm.status, "exhausted");
+  assert.equal(glm.error?.code, "quota_exhausted");
+  assert.match(glm.error?.message ?? "", /2026-09-04 21:44:15/u);
+  assert.equal(glm.continuationId, "quota-session");
+  assert.deepEqual(glm.usage, { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: null });
+
+  // N05's codex equivalent: a turn.failed carrying the usage-limit text.
+  const codexQuota = normalizeProviderResult("codex", [
+    { type: "thread.started", thread_id: "quota-thread" },
+    { type: "turn.failed", error: { message: "You've hit your usage limit. Please try again at 12:58 PM" } },
+  ].map((event) => JSON.stringify(event)).join("\n"), 1, null);
+  assert.equal(codexQuota.status, "exhausted");
+  assert.equal(codexQuota.error?.code, "quota_exhausted");
+  assert.match(codexQuota.error?.message ?? "", /usage limit/u);
+  assert.equal(codexQuota.continuationId, "quota-thread");
+
+  // Unrelated provider failures stay ordinary provider errors.
+  const unrelated = normalizeProviderResult("codex", [
+    { type: "thread.started", thread_id: "unrelated-thread" },
+    { type: "turn.failed", error: { message: "connection reset by peer" } },
+  ].map((event) => JSON.stringify(event)).join("\n"), 1, null);
+  assert.equal(unrelated.status, "failed");
+  assert.equal(unrelated.error?.code, "provider_error");
+  assert.equal(unrelated.continuationId, "unrelated-thread");
+});
+
 test("codex normalizer tolerates a bounded tail starting inside an event line", () => {
   const partial = `rted","command":"/bin/zsh -lc 'cat file'"}`;
   const events = [
@@ -553,6 +588,40 @@ test("a completed Codex turn with a final message is done regardless of the exit
   assert.equal(harnessDeath.status, "failed");
   assert.equal(harnessDeath.error?.code, "provider_error");
   assert.match(harnessDeath.error?.message ?? "", /Codex exited with code 1/u, "a non-zero exit without any final message still reports the harness failure");
+});
+
+test("codex tool host failure is a provider failure, never a result", () => {
+  const stream = [
+    { type: "thread.started", thread_id: "tool-host-thread" },
+    { type: "item.completed", item: { id: "item_tool_host", type: "error", message: "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`." } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "fabricated", findings: [] }) } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ verdict: "fail", maxSeverity: "major", summary: "could not be inspected", findings: [] }) } },
+    { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 3 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const envelope = normalizeProviderResult("codex", stream, 0, null, { preferStructured: true });
+  assert.equal(envelope.status, "failed", "a disabled code-mode host fails closed even when the turn completed");
+  assert.equal(envelope.result, null);
+  assert.equal(envelope.error?.code, "tool_host_unavailable");
+  assert.match(envelope.error?.message ?? "", /code-mode host is disabled/u);
+  assert.equal(envelope.continuationId, "tool-host-thread");
+  assert.deepEqual(envelope.usage, { inputTokens: 7, outputTokens: 2, cacheReadInputTokens: 3 });
+
+  const benign = [
+    { type: "thread.started", thread_id: "benign-thread" },
+    { type: "item.completed", item: { type: "error", message: "Under-development features enabled: rollout_budget" } },
+    { type: "item.completed", item: { type: "error", message: "Model metadata for `deepseek-v4-flash` not found" } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "worker complete" }) } },
+    { type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const untouched = normalizeProviderResult("codex", benign, 0, null);
+  assert.equal(untouched.status, "done", "rollout_budget and model-metadata error items stay ignored");
+});
+
+test("codex preamble diet keeps the code-mode host enabled", () => {
+  assert.ok(!CODEX_PREAMBLE_OVERRIDES.some((override) => override.includes("code_mode_host")), "the code-mode host override was removed");
+  for (const override of ["features.browser_use=false", "features.multi_agent=false", "mcp_servers={}", "plugins={}"]) {
+    assert.ok(CODEX_PREAMBLE_OVERRIDES.includes(override), `${override} is still part of the diet`);
+  }
 });
 
 test("surfaces agy result errors", () => {

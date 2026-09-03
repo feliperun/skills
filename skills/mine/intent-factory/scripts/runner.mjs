@@ -275,6 +275,7 @@ export async function runContract(contractPath) {
         scope: emptyScope(/** @type {import("./verification.mjs").WorkspaceScopeBoundary} */ (scopeBoundaries.get(node.id))),
         gate: null,
         error: null,
+        judgeFailures: 0,
         routing: { history: [], currentOverride: null },
         progress: null,
         budgetDecision: null,
@@ -885,12 +886,16 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         await Promise.all(jobs.map((job) => terminateProcess(job)));
         const envelopes = new Map();
         for (const job of jobs) envelopes.set(job.invocation.id, recordInvocationUsage(job, { accumulate: false }));
+        // A controller kill can land before the provider reported usage; charge
+        // the conservative estimate so the canceled work is never free.
+        for (const job of jobs) applyUsageEstimate(contract, job.state, job.invocation.id);
         for (const job of jobs) {
+          const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
           const scopeOk = job.phase !== "worker" || checkWorkerScope(contract, runDir, job, lease);
-          settleInvocation(runDir, job.invocation, {
+          settleInvocation(runDir, invocation, {
             status: scopeOk ? "canceled" : "failed",
-            usage: job.invocation.usage ?? null,
-            costUsd: typeof job.invocation.costUsd === "number" ? job.invocation.costUsd : null,
+            usage: invocation.usage ?? null,
+            costUsd: typeof invocation.costUsd === "number" ? invocation.costUsd : null,
             receipts: providerReceipts(envelopes.get(job.invocation.id)),
             error: scopeOk ? null : job.state.error ?? { code: "scope_check_failed", message: "worker scope check failed" },
             nextState: operationNextState(job.state),
@@ -905,26 +910,30 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
 
       await finalizeClosedJobs(contract, runDir, states, running, lease, campaign.path);
       await detectStalls(contract, running, async (job, status, error) => {
-        const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id);
         const envelope = recordInvocationUsage(job);
+        // A stall, wall-clock deadline, or cancellation can kill an invocation
+        // before the provider reported usage (codex meters only at turn end);
+        // charge the remaining derived cap and flag the estimate.
+        applyUsageEstimate(contract, job.state, job.invocation.id);
         job.state.usage = invocationUsage(job.state);
         job.state.costUsd = invocationCost(job.state);
+        const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
         await recordCampaignUsage(campaign.path, contract.usagePolicy, invocation);
         if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) {
-          settleInvocation(runDir, invocation ?? job.invocation, {
+          settleInvocation(runDir, invocation, {
             status: "failed",
-            usage: invocation?.usage ?? null,
-            costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : null,
+            usage: invocation.usage ?? null,
+            costUsd: typeof invocation.costUsd === "number" ? invocation.costUsd : null,
             receipts: providerReceipts(envelope),
             error: job.state.error ?? { code: "scope_check_failed", message: "worker scope check failed" },
             nextState: operationNextState(job.state),
           });
           return;
         }
-        settleInvocation(runDir, invocation ?? job.invocation, {
+        settleInvocation(runDir, invocation, {
           status,
-          usage: invocation?.usage ?? null,
-          costUsd: typeof invocation?.costUsd === "number" ? invocation.costUsd : null,
+          usage: invocation.usage ?? null,
+          costUsd: typeof invocation.costUsd === "number" ? invocation.costUsd : null,
           receipts: providerReceipts(envelope),
           error,
           nextState: operationNextState(job.state),
@@ -1522,22 +1531,66 @@ function workerToolPolicy(runtime) {
  * @param {NodeSnapshot} state
  * @param {RuntimeSnapshot} runtime
  * @param {{prompt: string, continuationId: string|null, mode: "fresh"|"reuse"|"rotate"}} phasePlan
+ * @param {string} runDir
+ * @param {LeaseHandle} lease
  * @param {import("./drivers/index.mjs").CommandOptions} [extra]
  * @returns {import("./drivers/index.mjs").CommandOptions}
  */
-function invocationCommandOptions(contract, node, state, runtime, phasePlan, extra = {}) {
+function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, extra = {}) {
   const options = {
     ...extra,
     continuationId: runtime.capabilities.continuation === true ? phasePlan.continuationId : null,
   };
-  if (runtime.capabilities.tokenBudget === true && contract.usagePolicy !== false) {
-    options.maxInvocationTokens = contract.usagePolicy.maxInvocationTokens;
+  if (runtime.capabilities.tokenBudget === true) {
+    const derived = invocationBudgetLimit(contract, state);
+    if (derived) {
+      const limitTokens = contract.usagePolicy === false
+        ? derived.limitTokens
+        : Math.min(contract.usagePolicy.maxInvocationTokens, derived.limitTokens);
+      options.maxInvocationTokens = limitTokens;
+      appendTransitionEvent(runDir, state, state.status, state.status, {
+        budgetAction: {
+          type: "invocation_limit",
+          remainingWeighted: derived.remainingWeighted,
+          cacheReadWeight: derived.cacheReadWeight,
+          limitTokens,
+        },
+      }, lease);
+    } else if (contract.usagePolicy !== false) {
+      options.maxInvocationTokens = contract.usagePolicy.maxInvocationTokens;
+    }
   }
   if (runtime.capabilities.costBudget === true) {
     const allowance = remainingMonetaryAllowance(contract, node, state);
     if (allowance !== null) options.maxCostUsd = allowance;
   }
   return options;
+}
+
+/**
+ * Native invocation token bound derived from the node's current weighted cap.
+ * A driver that reports usage only at turn end (codex) cannot be budgeted
+ * live by the controller, so the native rollout budget bounds the invocation
+ * instead. The conversion is cache-dominated: for a flash worker whose input
+ * is overwhelmingly prompt cache reads, raw tokens are approximately the
+ * weighted tokens divided by the campaign cache-read weight.
+ *
+ * @param {ValidatedContract} contract
+ * @param {NodeSnapshot} state
+ * @returns {{limitTokens: number, remainingWeighted: number, cacheReadWeight: number}|null}
+ */
+function invocationBudgetLimit(contract, state) {
+  const decision = state.budgetDecision;
+  const budget = state.budgetState;
+  if (!decision || !budget) return null;
+  const cacheReadWeight = cacheReadWeightOf(contract);
+  if (cacheReadWeight <= 0) return null;
+  const remainingWeighted = Math.max(0, budget.currentCapTokens - roundBudgetTokens(weightedInput(state.usage, cacheReadWeight)));
+  const limitTokens = Math.max(
+    Math.floor(decision.minimumSegmentTokens / cacheReadWeight),
+    Math.floor(remainingWeighted / cacheReadWeight),
+  );
+  return { limitTokens, remainingWeighted, cacheReadWeight };
 }
 
 /**
@@ -1604,7 +1657,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease) {
   try {
     const job = startProcess({
       contract, node, state, runtime, prompt: effectivePrompt, paths, phase: "worker",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, {
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, {
         toolPolicy: workerToolPolicy(runtime),
       }),
       onInvocation: (invocation, currentJob) => {
@@ -1693,7 +1746,7 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
         prompt,
         continuationId,
         mode: "reuse",
-      }, {
+      }, runDir, lease, {
         toolPolicy: workerToolPolicy(materializationRuntime),
       }),
       onInvocation: (invocation, currentJob) => {
@@ -1783,7 +1836,7 @@ function startRotationHandoff(contract, runDir, running, job, state, lease, enve
         prompt,
         continuationId,
         mode: "reuse",
-      }, {
+      }, runDir, lease, {
         toolPolicy: workerToolPolicy(runtime),
       }),
       onInvocation: (invocation, currentJob) => {
@@ -1882,7 +1935,7 @@ function startJudge(contract, node, state, runDir, running, workerResult, lease)
       contract, node, state, runtime,
       prompt: phasePlan.prompt,
       paths, phase: "judge",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, {
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, {
         schema: JUDGE_SCHEMA,
         schemaPath: join(runDir, "judge.schema.json"),
       }),
@@ -2941,8 +2994,25 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         continue;
       }
     }
+    // A controller kill (wall-clock, budget, or cancellation) can land before
+    // the provider reported usage; charge the remaining derived cap and flag
+    // the estimate so the ledger never records zero for work that ran.
+    let usageEstimated = false;
+    if ((job.budgetStop || job.signal) && !hasMeasuredUsage(envelope.usage)) {
+      const estimate = conservativeUsageEstimate(contract, state);
+      if (estimate) {
+        envelope = { ...envelope, usage: estimate };
+        usageEstimated = true;
+      }
+    }
     state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === job.invocation.id
-      ? { ...invocation, continuationId: envelope.continuationId ?? invocation.continuationId ?? null, usage: envelope.usage, costUsd: envelope.costUsd }
+      ? {
+        ...invocation,
+        continuationId: envelope.continuationId ?? invocation.continuationId ?? null,
+        usage: envelope.usage,
+        costUsd: envelope.costUsd,
+        ...(usageEstimated ? { usageEstimated: true } : {}),
+      }
       : invocation);
     settleInvocation(runDir, job.invocation, {
       status: envelope.status,
@@ -3023,7 +3093,46 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       continue;
     }
     if (!adoptedWorkerResult && envelope.status === "exhausted") {
-        handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease);
+      // A native rollout-budget stop on a budgeted node is a budget event
+      // (ADR-0022), never an implicit provider switch: settle it through the
+      // derived budget policy exactly like the live stop path.
+      if (state.budgetDecision && state.budgetState && rolloutBudgetExhausted(envelope.error?.message)) {
+        const cacheReadWeight = cacheReadWeightOf(contract);
+        const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
+        if (applyDerivedBudgetStop(job.node, state, runDir, lease, cumulativeSeen)) {
+          settleDerivedBudgetStop(contract, job.node, state, runDir, lease);
+        }
+        continue;
+      }
+      handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease);
+      continue;
+    }
+    // A failed judge envelope (status failed, any code) is a provider failure,
+    // never a verdict: the gate cannot adopt a result the judge could not
+    // ground in inspection. Re-dispatch the judge once on the same routing,
+    // then block the node as judge_unavailable and raise attention so a judge
+    // failure is surfaced, never silently settled.
+    if (!job.budgetStop && job.phase === "judge" && envelope.status === "failed") {
+      state.judgeFailures = (state.judgeFailures ?? 0) + 1;
+      if (state.judgeFailures < JUDGE_MAX_FAILURES) {
+        writeNode(runDir, state, lease);
+        startJudge(contract, job.node, state, runDir, running, state.result, lease);
+        continue;
+      }
+      const providerMessage = envelope.error?.message ?? "judge provider failed";
+      transition(runDir, state, "blocked", {
+        phase: "judge",
+        result: state.result,
+        usage: state.usage,
+        error: { code: "judge_unavailable", message: excerpt(providerMessage) ?? "judge unavailable" },
+      }, lease);
+      await notifyCampaign(
+        campaignPath,
+        "run.attention",
+        `${basename(runDir)}:${state.id}:judge_unavailable`,
+        `${state.id} judge unavailable: ${excerpt(providerMessage) ?? "judge provider failed"}`,
+        { runId: basename(runDir), nodeId: state.id, code: "judge_unavailable" },
+      );
       continue;
     }
     // An empty final message is a missing worker result, not a no-op worker:
@@ -3123,13 +3232,20 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           phase: "budget",
           error: { code: "cost_budget_exceeded", message: "monetary budget reached before scheduling the judge" },
         }, lease);
-      } else if (job.node.gate.enabled && contract.usagePolicy !== false
-        && campaignUsage(campaignPath, contract.usagePolicy).budgetInputTokens >= contract.usagePolicy.maxInputTokens) {
-        transition(runDir, state, "blocked", {
-          phase: "budget",
-          error: { code: "budget_exceeded", message: `campaign input tokens reached the ${contract.usagePolicy.maxInputTokens} hard maximum before the judge` },
-        }, lease);
-      } else if (job.node.gate.enabled) startJudge(contract, job.node, state, runDir, running, workerResult, lease);
+      } else if (job.node.gate.enabled) {
+        const policy = contract.usagePolicy;
+        if (policy !== false && campaignUsage(campaignPath, policy).budgetInputTokens >= policy.maxInputTokens) {
+          appendTransitionEvent(runDir, state, state.status, state.status, {
+            budgetAction: {
+              type: "judge_reserve_override",
+              campaignBudgetInputTokens: campaignUsage(campaignPath, policy).budgetInputTokens,
+              judgeReserveInputTokens: policy.judgeReserveInputTokens,
+              reason: "worker completed; consume the judge reserve before ending the run",
+            },
+          }, lease);
+        }
+        startJudge(contract, job.node, state, runDir, running, workerResult, lease);
+      }
       else transition(runDir, state, "done", { phase: "complete", result: workerResult }, lease);
       continue;
     }
@@ -3152,6 +3268,17 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
  */
 function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lease) {
   const error = envelope.error ?? { code: "provider_exhausted", message: "provider exhausted" };
+  // A native rollout-budget stop on a budgeted node settles through the
+  // derived budget policy (extension, predeclared continuation, or
+  // budget_attention), never through a provider failover edge (ADR-0022).
+  if (state.budgetDecision && state.budgetState && rolloutBudgetExhausted(error.message)) {
+    const cacheReadWeight = cacheReadWeightOf(contract);
+    const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
+    if (applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen)) {
+      settleDerivedBudgetStop(contract, node, state, runDir, lease);
+    }
+    return;
+  }
   if (NON_FAILOVER_CODES.has(error.code)) {
     transition(runDir, state, "exhausted", {
       phase: role,
@@ -3313,6 +3440,13 @@ function budgetStopError(scope, state) {
 }
 
 /**
+ * A judge provider that returns a failed envelope is allowed one bounded
+ * re-dispatch; a second consecutive failure blocks the node as
+ * judge_unavailable instead of ever adopting an ungrounded verdict.
+ */
+const JUDGE_MAX_FAILURES = 2;
+
+/**
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
@@ -3331,6 +3465,7 @@ function applyJudgeResult(contract, node, state, result, runDir, lease, running 
     return;
   }
   state.gate = verdict;
+  state.judgeFailures = 0;
   const shouldFail = verdict.verdict === "fail" && verdict.maxSeverity !== "none"
     && (node.gate.failOn ?? ["critical"]).includes(verdict.maxSeverity);
   if (!shouldFail) {
@@ -3620,6 +3755,54 @@ function hasMeasuredUsage(usage) {
 }
 
 /**
+ * @param {string|null|undefined} message
+ * @returns {boolean}
+ */
+function rolloutBudgetExhausted(message) {
+  return /shared rollout token budget exhausted/iu.test(String(message ?? ""));
+}
+
+/**
+ * Conservative usage estimate for an invocation killed before the provider
+ * reported any usage: charge the node's remaining derived cap as uncached
+ * input so the ledger never records zero for work that ran and the budget
+ * keeps acting live after the kill.
+ *
+ * @param {ValidatedContract} contract
+ * @param {NodeSnapshot} state
+ * @returns {Usage|null}
+ */
+function conservativeUsageEstimate(contract, state) {
+  const cap = state.budgetState?.currentCapTokens;
+  if (typeof cap !== "number" || !Number.isFinite(cap)) return null;
+  const cacheReadWeight = cacheReadWeightOf(contract);
+  const spent = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
+  const remaining = Math.max(0, cap - spent);
+  return { inputTokens: Math.round(remaining), outputTokens: null, cacheReadInputTokens: null };
+}
+
+/**
+ * Charge the conservative estimate on the matching invocation record when the
+ * provider reported no usage, and flag it so the ledger can distinguish an
+ * estimate from a measured value.
+ *
+ * @param {ValidatedContract} contract
+ * @param {NodeSnapshot} state
+ * @param {string} invocationId
+ * @returns {boolean} true when an estimate was applied
+ */
+function applyUsageEstimate(contract, state, invocationId) {
+  const invocation = (state.invocations ?? []).find((item) => item.id === invocationId);
+  if (!invocation || hasMeasuredUsage(invocation.usage)) return false;
+  const estimate = conservativeUsageEstimate(contract, state);
+  if (!estimate) return false;
+  state.invocations = (state.invocations ?? []).map((item) => item.id === invocationId
+    ? { ...item, usage: estimate, usageEstimated: true }
+    : item);
+  return true;
+}
+
+/**
  * Codex can omit terminal usage when its native rollout budget stops a turn.
  * Charge the declared ceiling so missing telemetry cannot create a free retry.
  *
@@ -3629,7 +3812,7 @@ function hasMeasuredUsage(usage) {
  * @returns {Usage|undefined}
  */
 function usageWithBudgetFallback(usage, message, policy) {
-  if (hasMeasuredUsage(usage) || policy === false || !/shared rollout token budget exhausted/iu.test(String(message ?? ""))) return usage;
+  if (hasMeasuredUsage(usage) || policy === false || !rolloutBudgetExhausted(message)) return usage;
   return { inputTokens: policy.maxInvocationTokens, outputTokens: null, cacheReadInputTokens: null };
 }
 
@@ -4154,8 +4337,10 @@ function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease) {
  */
 function enforceTokenBudget(contract, runDir, states, running, lease) {
   const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
+  const workerCap = campaignWorkerCap(contract);
   const observed = new Map();
   let liveSpent = 0;
+  let liveWorkerSpent = 0;
   for (const [nodeId, job] of running) {
     if (job.closed) continue;
     // A bounded one-turn rotation handoff or result materialization settles
@@ -4165,6 +4350,7 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
     const seen = observeLiveInputTokens(job, cacheReadWeight);
     observed.set(nodeId, seen);
     liveSpent += seen;
+    if (job.phase === "worker") liveWorkerSpent += seen;
     const persistedNode = weightedInput(job.state.usage, cacheReadWeight);
     const cumulativeSeen = roundBudgetTokens(persistedNode + seen);
     const budget = job.state.budgetState;
@@ -4192,17 +4378,61 @@ function enforceTokenBudget(contract, runDir, states, running, lease) {
     return total + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
   }, 0);
   const spent = Math.round((persisted + liveSpent) * 1000) / 1000;
+  const persistedWorker = [...states.values()].reduce((total, state) => total + (state.invocations ?? [])
+    .filter((invocation) => invocation.role === "worker")
+    .reduce((subtotal, invocation) => subtotal + weightedInput(invocation.usage, cacheReadWeight), 0), 0);
+  const workerSpent = Math.round((persistedWorker + liveWorkerSpent) * 1000) / 1000;
+  if (workerSpent >= workerCap) {
+    for (const job of running.values()) {
+      if (job.phase !== "worker" || job.budgetStop || job.closed || job.rotationHandoff || job.resultMaterialization) continue;
+      job.budgetStop = "campaign";
+      void terminateProcess(job).catch(() => {});
+    }
+  }
   if (spent < contract.maxInputTokens) return;
+  let judgeRunning = false;
   for (const job of running.values()) {
+    if (job.phase === "judge" && !job.closed) {
+      judgeRunning = true;
+      if (!job.judgeBudgetOverride) {
+        job.judgeBudgetOverride = true;
+        appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
+          budgetAction: {
+            type: "judge_reserve_override",
+            campaignBudgetInputTokens: spent,
+            judgeReserveInputTokens: contract.usagePolicy === false ? null : contract.usagePolicy.judgeReserveInputTokens,
+            reason: "an active judge is protected from the run worker cap",
+          },
+        }, lease);
+      }
+      continue;
+    }
     if (!job.budgetStop && !job.closed && !job.rotationHandoff && !job.resultMaterialization) {
       job.budgetStop = "campaign";
       void terminateProcess(job).catch(() => {});
     }
   }
   for (const state of states.values()) {
-    if (state.status === "pending") transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `total input tokens (${spent}) reached the ${contract.maxInputTokens} budget` } }, lease);
+    if (state.status === "pending" && !judgeRunning) transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `total input tokens (${spent}) reached the ${contract.maxInputTokens} budget` } }, lease);
   }
   return spent;
+}
+
+/**
+ * Keep the run's explicit judge reserve available while workers are live. A
+ * gated run has one judge slot at a time, so reserving the smaller of the
+ * campaign judge reserve and the run cap is sufficient; an active judge is
+ * handled separately and may consume that reserve after the worker cap.
+ *
+ * @param {ValidatedContract} contract
+ * @returns {number}
+ */
+function campaignWorkerCap(contract) {
+  if (contract.usagePolicy === false
+    || contract.nodes.some((node) => node.budgetProfile)
+    || !contract.nodes.some((node) => node.gate.enabled)) return contract.maxInputTokens;
+  const reserve = Math.min(contract.maxInputTokens, contract.usagePolicy.judgeReserveInputTokens);
+  return Math.max(0, contract.maxInputTokens - reserve);
 }
 
 /**

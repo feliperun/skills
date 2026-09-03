@@ -320,6 +320,11 @@ if (process.argv.includes("--version")) {
       let timer = setTimeout(step, 5);
       return;
     }
+    else if (mode === "worker-reserve-flood") {
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 600, output_tokens: 1 } }));
+      setTimeout(() => {}, 60_000);
+      return;
+    }
     else if (mode === "token-flood-timeout") {
       // One cumulative turn.completed usage event, then silence while alive:
       // the wall-clock kill lands before 80 turns can trigger rotation.
@@ -332,8 +337,22 @@ if (process.argv.includes("--version")) {
     else if (mode === "heartbeat") setInterval(() => console.error("working"), 10);
     else if (mode === "rollout-budget") {
       console.log(JSON.stringify({type:"turn.failed",error:{message:"shared rollout token budget exhausted"}}));
+    } else if (mode === "quota-429") {
+      console.log(JSON.stringify({type:"turn.failed",error:{message:"You've hit your usage limit. Please try again at 12:58 PM"}}));
+      process.exitCode = 1;
+    } else if (mode === "judge-reserve-overrun") {
+      const text = judge
+        ? JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "judge completed from reserve", findings: [] })
+        : JSON.stringify({ status: "done", summary: "worker completed", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:80,output_tokens:1,cached_input_tokens:0}}));
+      setTimeout(() => process.exit(0), 200);
     } else if (mode === "exhausted") {
       console.log(JSON.stringify({type:"turn.failed",error:{code:"budget_exceeded",message:"budget_exceeded"}}));
+    } else if (mode === "judge-tool-host-disabled" && prompt.startsWith("Review node")) {
+      console.log(JSON.stringify({type:"item.completed",item:{id:"item_tool_host",type:"error",message:"Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable \`features.code_mode_host\` and install \`codex-code-mode-host\`."}}));
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({verdict:"pass",maxSeverity:"none",summary:"fabricated",findings:[]})}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
     } else if (prompt.includes("FAIL_WORKER") || (mode === "worker-fail" && !prompt.startsWith("Review node")) || (mode === "judge-fail" && prompt.startsWith("Review node")) || mode === "failure-with-usage") {
       console.log(JSON.stringify({type:"turn.failed",error:{message:"deliberate failure",usage: mode === "failure-with-usage" ? {input_tokens:7,output_tokens:3,cached_input_tokens:2} : undefined}}));
     } else {

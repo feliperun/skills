@@ -163,6 +163,18 @@ export function normalizeClaudeResult(stdout, exitCode, signal) {
   const resultEvent = events.findLast((event) => event.type === "result");
   if (!resultEvent) return failed("incomplete_stream", "Claude emitted no result event");
   const result = typeof resultEvent.result === "string" ? resultEvent.result : null;
+  // A provider-reported quota stop is exhaustion: the declared failover edge
+  // must fire instead of settling the node as an ordinary provider failure.
+  const quotaText = claudeQuotaText(resultEvent, events);
+  if (quotaText) {
+    return failed(
+      "quota_exhausted",
+      boundedMessage(quotaText, 512),
+      "exhausted",
+      typeof resultEvent.session_id === "string" ? resultEvent.session_id : null,
+      canonicalUsage(resultEvent.usage),
+    );
+  }
   if (resultEvent.is_error || exitCode !== 0) {
     return failed("provider_error", result ?? `Claude exited with code ${exitCode}`);
   }
@@ -215,6 +227,68 @@ function eventItem(event) {
   return item && typeof item === "object" && !Array.isArray(item) ? /** @type {Record<string, unknown>} */ (item) : null;
 }
 
+/** Provider-reported quota and rate-limit text: exhaustion, never an ordinary provider failure. */
+const QUOTA_TEXT_PATTERN = /429|rate.?limit|usage limit|limit exhausted|quota|too many requests/iu;
+
+/**
+ * @param {string|null|undefined} text
+ * @returns {boolean}
+ */
+function isQuotaText(text) {
+  return QUOTA_TEXT_PATTERN.test(String(text ?? ""));
+}
+
+/**
+ * Quota evidence inside one claude-family assistant error record. The record
+ * shape differs across providers: the Z.ai stream carries `content` text at
+ * the top level, while the Anthropic stream nests content blocks under
+ * `message`.
+ *
+ * @param {Record<string, unknown>} record
+ * @returns {string|null}
+ */
+function assistantQuotaText(record) {
+  const message = record.message && typeof record.message === "object" ? /** @type {Record<string, unknown>} */ (record.message) : null;
+  const content = record.content ?? message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((block) => {
+      if (block === null || typeof block !== "object") return "";
+      const value = /** @type {Record<string, unknown>} */ (block).text ?? /** @type {Record<string, unknown>} */ (block).content;
+      return typeof value === "string" ? value : "";
+    }).join("\n");
+  }
+  return null;
+}
+
+/**
+ * Provider-reported quota text in a claude-family stream: an assistant error
+ * record (`rate_limit` or an API error message) or a terminal `api_error`
+ * result whose text carries quota evidence.
+ *
+ * @param {Record<string, unknown>|undefined} resultEvent
+ * @param {Record<string, unknown>[]} events
+ * @returns {string|null}
+ */
+function claudeQuotaText(resultEvent, events) {
+  for (const event of events) {
+    if (event?.type !== "assistant") continue;
+    const record = /** @type {Record<string, unknown>} */ (event);
+    if (record.error !== "rate_limit" && record.is_api_error_message !== true) continue;
+    const text = assistantQuotaText(record);
+    if (text !== null && isQuotaText(text)) return text;
+  }
+  if (resultEvent?.terminal_reason === "api_error" || resultEvent?.is_error === true) {
+    const terminal = typeof resultEvent.result === "string"
+      ? resultEvent.result
+      : resultEvent.error && typeof resultEvent.error === "object"
+        ? /** @type {Record<string, unknown>} */ (resultEvent.error).message
+        : null;
+    if (typeof terminal === "string" && isQuotaText(terminal)) return terminal;
+  }
+  return null;
+}
+
 /**
  * @param {string} stdout
  * @param {number|null} exitCode
@@ -228,6 +302,29 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   const continuationId = typeof thread?.thread_id === "string" ? thread.thread_id : null;
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled", continuationId);
   const completed = events.findLast((event) => event.type === "turn.completed");
+  // A disabled code-mode host means the model could not run any command or
+  // inspect anything: whatever agent_message it streamed afterwards is a
+  // fabricated result, never evidence. The tool-host failure wins over the
+  // completed turn so a judge verdict grounded in no inspection is rejected.
+  // Other item-level error records (rollout_budget warnings, missing model
+  // metadata, ...) are diagnostics and stay ignored.
+  const toolHostError = events.find((event) => {
+    if (event.type !== "item.completed") return false;
+    const item = eventItem(event);
+    return item?.type === "error" && typeof item.message === "string"
+      && (item.message.includes("code-mode host is disabled") || item.message.includes("Code Mode is unavailable"));
+  });
+  if (toolHostError) {
+    const item = eventItem(toolHostError);
+    const message = typeof item?.message === "string" ? item.message : "code-mode host is disabled";
+    return failed(
+      "tool_host_unavailable",
+      boundedMessage(message, 512),
+      undefined,
+      continuationId,
+      canonicalUsage(completed?.usage, { inputIncludesCache: true }),
+    );
+  }
   const messages = events.filter((event) => event.type === "item.completed" && eventItem(event)?.type === "agent_message");
   const message = options.preferStructured
     ? messages.findLast((event) => extractJson(eventItem(event)?.text) !== null) ?? messages.at(-1)
@@ -235,14 +332,19 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   const failure = events.findLast((event) => event.type === "turn.failed" || event.type === "error");
   if (failure) {
     const errorRecord = /** @type {Record<string, unknown>|undefined} */ (failure?.error);
+    const failureMessage = typeof errorRecord?.message === "string" ? errorRecord.message
+      : typeof failure?.message === "string" ? failure.message
+      : "Codex failed";
+    const usage = canonicalUsage(errorRecord?.usage ?? failure?.usage, { inputIncludesCache: true });
+    if (isQuotaText(failureMessage)) {
+      return failed("quota_exhausted", boundedMessage(failureMessage, 512), "exhausted", continuationId, usage);
+    }
     return failed(
       "provider_error",
-      typeof errorRecord?.message === "string" ? errorRecord.message
-        : typeof failure?.message === "string" ? failure.message
-        : "Codex failed",
+      failureMessage,
       undefined,
       continuationId,
-      canonicalUsage(errorRecord?.usage ?? failure?.usage, { inputIncludesCache: true }),
+      usage,
     );
   }
   if (!completed) return failed("incomplete_stream", "Codex emitted no turn.completed event", undefined, continuationId);
@@ -457,6 +559,22 @@ export function extractJson(value) {
 }
 
 /**
+ * Truncate a diagnostic message to at most `maxBytes` UTF-8 bytes without
+ * splitting a multi-byte sequence.
+ *
+ * @param {string} value
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+function boundedMessage(value, maxBytes) {
+  const bytes = Buffer.from(String(value), "utf8");
+  if (bytes.length <= maxBytes) return bytes.toString("utf8");
+  let end = maxBytes;
+  while (end > 0 && (bytes[end - 1] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+/**
  * @param {string} code
  * @param {string} message
  * @param {"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} status
@@ -483,7 +601,7 @@ function classifyFailure(message) {
   const text = String(message);
   if (/cancel(?:ed|led)|aborted/iu.test(text)) return "canceled";
   if (/permission|approval|sandbox/iu.test(text)) return "blocked";
-  if (/budget|token.*limit|context.*limit|max.*turn/iu.test(text)) return "exhausted";
+  if (isQuotaText(text) || /budget|token.*limit|context.*limit|max.*turn/iu.test(text)) return "exhausted";
   return "failed";
 }
 

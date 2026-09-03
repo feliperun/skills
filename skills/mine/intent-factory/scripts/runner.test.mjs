@@ -17,6 +17,7 @@ import { invocationAlive, invocationResult, processStartToken } from "./supervis
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
+import { deriveBudgetDecision } from "./budget.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./campaign-autonomy.mjs";
 import {
   closeResult,
@@ -383,7 +384,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
     campaignId: "doctor-campaign",
     goal: "doctor",
     cwd: ".",
-    maxInputTokens: 1_000_000,
+    maxInputTokens: 1_000,
     usagePolicy: false,
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
     runtimes: { wrapped: { driver: "exec-jsonl", model: "m", executable: "./my-worker.mjs" } },
@@ -1101,18 +1102,33 @@ test("preserves the worker report when the judge provider fails", async () => {
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
   }));
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "judge-fail");
-  try {
-    const result = await runContract(path);
-    const state = nodeState(result);
-    assert.equal(state.status, "failed");
-    assert.equal(state.phase, "judge");
-    assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
+  const result = await withFakeCodex(directory, "judge-fail", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_unavailable");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "one bounded judge retry before blocking");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
+});
+
+test("a judge whose tool host is disabled never yields a verdict and blocks as judge_unavailable after one retry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-tool-host-"));
+  const path = writeContract(directory, fixture({
+    id: "judge-tool-host-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+  }));
+  const result = await withFakeCodex(directory, "judge-tool-host-disabled", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_unavailable");
+  assert.match(state.error?.message ?? "", /code-mode host is disabled/u);
+  assert.equal(state.gate, null, "no fabricated verdict is ever adopted");
+  const judgeInvocations = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.equal(judgeInvocations.length, 2, "exactly one bounded judge retry after the first tool-host failure");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
 });
 
 test("enforces the wall-clock cap even while output changes", async () => {
@@ -2758,6 +2774,47 @@ test("a judge invocation on a budgeted node is not killed by the worker input to
   assert.equal(state.error, null);
 });
 
+test("an active judge consumes its reserved budget after the run cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-reserve-"));
+  const path = writeContract(directory, fixture({
+    id: "judge-reserve-overrun-run",
+    maxInputTokens: 100,
+    pollIntervalMs: 10,
+    timeoutSec: 10,
+    usagePolicy: { epoch: "judge-reserve-overrun", maxInputTokens: 1_000, judgeReserveInputTokens: 500, maxPhaseInputTokens: 1_000, maxInvocationTokens: 200, cacheReadWeight: 0.1 },
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Complete and use the judge reserve" }),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await withFakeCodex(directory, "judge-reserve-overrun", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.gate?.verdict, "pass");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 1);
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(events.filter((event) => event.budgetAction?.type === "judge_reserve_override").length, 1);
+});
+
+test("an active worker stops before consuming the judge reserve", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-worker-reserve-"));
+  const path = writeContract(directory, fixture({
+    id: "worker-reserve-run",
+    maxInputTokens: 1_000,
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    usagePolicy: { epoch: "worker-reserve", maxInputTokens: 1_000, judgeReserveInputTokens: 500, maxPhaseInputTokens: 1_000, maxInvocationTokens: 200, cacheReadWeight: 0.1 },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood the worker allowance" }), gate: { failOn: ["critical"] } }],
+  }));
+  const result = await withFakeCodex(directory, "worker-reserve-flood", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.error?.code, "budget_exceeded");
+  assert.equal(state.usage?.inputTokens, 600);
+});
+
 test("budget failover boundary D37 never routes a local budget stop", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-budget-no-failover-"));
   const path = writeContract(directory, fixture({
@@ -2787,6 +2844,160 @@ test("budget failover boundary D37 never routes a local budget stop", async () =
   assert.equal(state.error?.code, "budget_attention");
   assert.deepEqual(state.invocations?.map(invocation => invocation.runtimeId), ["primary"]);
   assert.equal(state.routing?.history.length, 0);
+});
+
+test("quota exhaustion routes through the declared failover edge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-quota-failover-"));
+  const primary = fakeCodex(directory, "quota-429");
+  const backup = fakeCodex(directory, "pass");
+  const path = writeContract(directory, fixture({
+    id: "quota-failover-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: {
+      primary: { driver: "codex", model: "primary", executable: primary },
+      backup: { driver: "codex", model: "backup", executable: backup },
+    },
+    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "quota_exhausted", currentRuntime: "primary" }, runtime: "backup" }],
+    nodes: [{ id: "build", type: "backend", runtime: "primary", taskPacket: packet(), gate: false }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["primary", "backup"]);
+  assert.equal(state.routing?.history?.length ?? 0, 1);
+  assert.equal(state.routing?.history?.[0]?.nextRuntime, "backup");
+  assert.equal(state.routing?.history?.[0]?.errorCode, "quota_exhausted");
+  const first = state.invocations?.[0];
+  assert.ok(first, "first invocation exists");
+  const settlement = JSON.parse(readFileSync(join(result.runDir, "operations", `${first.id}.settlement.json`), "utf8"));
+  assert.equal(settlement.error?.code, "quota_exhausted");
+});
+
+test("codex invocation limit derives from the current derived cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-invocation-limit-"));
+  const executable = join(directory, "argv-recording-codex.mjs");
+  const argvLog = join(directory, ".runs", "codex-argv.jsonl");
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+if (process.argv.includes("--version")) console.log("argv-codex 1.0.0");
+else {
+  appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "limit-thread" }));
+  const text = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+}
+`);
+  chmodSync(executable, 0o755);
+  const cacheReadWeight = 0.2;
+  const maxInvocationTokens = 1000;
+  const profile = budgetProfile({ estimatedWeightedInputTokens: 120 });
+  const decision = deriveBudgetDecision(profile, {
+    packetHash: "a".repeat(64),
+    scopeHash: "b".repeat(64),
+    verificationHash: "c".repeat(64),
+    runtimeId: "primary",
+    packetBytes: 100,
+    phaseRemainingTokens: 10_000,
+    campaignRemainingTokens: 10_000,
+    judgeReserveTokens: 0,
+    pendingReserveTokens: 0,
+    explicitHardCeilingTokens: null,
+  });
+  assert.equal(decision.status, "allocated", decision.rejectReason ?? "");
+  const expectedLimit = Math.min(maxInvocationTokens, Math.floor(decision.initialAllocationTokens / cacheReadWeight));
+  const path = writeContract(directory, fixture({
+    id: "invocation-limit-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    usagePolicy: { epoch: "invocation-limit", maxInputTokens: 10_000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 10_000, maxInvocationTokens, cacheReadWeight },
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: { primary: { driver: "codex", model: "primary", executable } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      runtime: "primary",
+      taskPacket: packet(),
+      budgetProfile: profile,
+      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
+      gate: false,
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.budgetDecision?.initialAllocationTokens, decision.initialAllocationTokens);
+  const args = /** @type {string[]} */ (JSON.parse(readFileSync(argvLog, "utf8").trim().split("\n")[0]));
+  const rollout = args.find((arg) => arg.startsWith("features.rollout_budget="));
+  assert.ok(rollout, "codex receives the native rollout budget");
+  assert.match(rollout, new RegExp(`limit_tokens=${expectedLimit}(?:[^0-9]|$)`));
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const limitEvents = events.filter((event) => event.budgetAction?.type === "invocation_limit");
+  assert.equal(limitEvents.length, 1);
+  assert.equal(limitEvents[0].budgetAction.limitTokens, expectedLimit);
+  assert.equal(limitEvents[0].budgetAction.remainingWeighted, decision.initialAllocationTokens);
+  assert.equal(limitEvents[0].budgetAction.cacheReadWeight, cacheReadWeight);
+});
+
+test("rollout budget exhaustion settles as a derived budget stop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-rollout-budget-stop-"));
+  const path = writeContract(directory, fixture({
+    id: "rollout-budget-stop-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    maxInputTokens: 2000,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Run against the native rollout budget" }),
+      budgetProfile: budgetProfile({
+        estimatedWeightedInputTokens: 500,
+        continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 500 },
+      }),
+      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "rollout-budget", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "budget_attention");
+  assert.equal(state.routing?.history?.length ?? 0, 0);
+  assert.equal(state.budgetState?.status, "attention");
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["luna"]);
+});
+
+test("wall-clock kill without usage charges the remaining derived cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-wallclock-estimate-"));
+  const path = writeContract(directory, fixture({
+    id: "wallclock-estimate-run",
+    pollIntervalMs: 10,
+    timeoutSec: 1,
+    usagePolicy: { epoch: "wallclock-estimate", maxInputTokens: 2000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 2000, maxInvocationTokens: 1000, cacheReadWeight: 0.1 },
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ objective: "Run silently past the wall clock" }),
+      budgetProfile: budgetProfile(),
+      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "silent", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.error?.code, "wall_clock_timeout");
+  const invocation = state.invocations?.[0];
+  assert.equal(invocation?.usageEstimated, true, "killed invocation usage is flagged as estimated");
+  assert.equal(invocation?.usage?.inputTokens, state.budgetState?.currentCapTokens, "estimate charges the remaining derived cap");
+  assert.equal(state.usage?.inputTokens, state.budgetState?.currentCapTokens);
+  const ledger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
+  const entries = Object.values(ledger.epochs["wallclock-estimate"].invocations);
+  assert.equal(entries.length, 1, "the estimated charge reaches the campaign ledger once");
+  assert.equal(entries[0].usage.inputTokens, state.budgetState?.currentCapTokens);
 });
 
 test("budget continuation D35 checkpoints and activates one predeclared segment", async () => {

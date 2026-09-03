@@ -2,18 +2,20 @@ import { normalizeCodexResult, parseVersion, toml } from "./exec-jsonl.mjs";
 
 /**
  * Bound the Codex harness preamble: a closed-packet worker or a read-only judge
- * needs the shell and patch tools, not browser, computer-use, app, code-mode
- * host or sub-agent tooling, MCP servers, or plugins. Measured on 2026-09-01
- * with deepseek-v4-flash: 63,914 input tokens per trivial call with the
- * ambient configuration, 12,653 with these overrides. They are emitted before
- * the runtime's own `config` entries, so a contract can re-enable any of them.
+ * needs the shell and patch tools, not browser, computer-use, app or sub-agent
+ * tooling, MCP servers, or plugins. `features.code_mode_host` stays enabled:
+ * codex-cli 0.152.1 only surfaces commands to OpenAI models through the
+ * code-mode host, and without it they make zero tool calls and fabricate
+ * answers. Keeping the host costs about 70 input tokens per trivial call
+ * (35,130 vs 35,199 on a gpt-5.6-sol read; 25,795 vs 25,783 on
+ * deepseek-v4-flash). These overrides are emitted before the runtime's own
+ * `config` entries, so a contract can re-enable any of them.
  */
 export const CODEX_PREAMBLE_OVERRIDES = Object.freeze([
   "features.browser_use=false",
   "features.browser_use_external=false",
   "features.computer_use=false",
   "features.apps=false",
-  "features.code_mode_host=false",
   "features.multi_agent=false",
   "mcp_servers={}",
   "plugins={}",
