@@ -2831,12 +2831,54 @@ test("a judge invocation on a budgeted node is not killed by the worker input to
 
 test("an active judge consumes its reserved budget after the run cap", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-reserve-"));
+  const release = join(directory, "judge-reserve-release");
+  const executable = join(directory, "judge-reserve-codex.mjs");
+  writeFileSync(executable, `#!${process.execPath}
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+const release = ${JSON.stringify(release)};
+const pause = () => new Promise((resolve) => setTimeout(resolve, 5));
+const waitForRelease = async () => { while (!existsSync(release)) await pause(); };
+if (process.argv.includes("--version")) {
+  console.log("judge-reserve-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", async () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const judge = prompt.startsWith("Review node");
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "judge-reserve-thread" }));
+    if (judge) {
+      // The judge reports cumulative spend while staying alive so the run cap
+      // crossing is observed by the controller, not raced against exit.
+      for (let turn = 1; turn <= 8; turn += 1) {
+        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turn * 100, output_tokens: 1 } }));
+      }
+      await waitForRelease();
+      const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 801, output_tokens: 1 } }));
+      return;
+    }
+    const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+    const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (resultPath) {
+      const parent = resultPath.slice(0, resultPath.lastIndexOf("/"));
+      if (parent) mkdirSync(parent, { recursive: true });
+      writeFileSync(resultPath, result);
+    }
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 500, output_tokens: 1 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
   const path = writeContract(directory, fixture({
     id: "judge-reserve-overrun-run",
-    maxInputTokens: 100,
+    maxInputTokens: 1_000,
     pollIntervalMs: 10,
-    timeoutSec: 10,
-    usagePolicy: { epoch: "judge-reserve-overrun", maxInputTokens: 1_000, judgeReserveInputTokens: 500, maxPhaseInputTokens: 1_000, maxInvocationTokens: 200, cacheReadWeight: 0.1 },
+    timeoutSec: 30,
+    usagePolicy: { epoch: "judge-reserve-overrun", maxInputTokens: 1_200, judgeReserveInputTokens: 400, maxPhaseInputTokens: 2_000, maxInvocationTokens: 2_000, cacheReadWeight: 0.1 },
     nodes: [{
       id: "build",
       type: "backend",
@@ -2844,13 +2886,48 @@ test("an active judge consumes its reserved budget after the run cap", async () 
       gate: { failOn: ["critical"] },
     }],
   }));
-  const result = await withFakeCodex(directory, "judge-reserve-overrun", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "done", state.error?.message);
-  assert.equal(state.gate?.verdict, "pass");
-  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 1);
-  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(events.filter((event) => event.budgetAction?.type === "judge_reserve_override").length, 1);
+  const runDir = join(directory, ".runs", "judge-reserve-overrun-run");
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = executable;
+  try {
+    const runPromise = runContract(path);
+    try {
+      // Await the durable override event instead of racing provider output:
+      // the judge parks until the cap crossing is observed and recorded.
+      const override = await waitForValue(() => {
+        try {
+          const events = readFileSync(join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+          return events.find((event) => event.budgetAction?.type === "judge_reserve_override") ?? null;
+        } catch {
+          return null;
+        }
+      }, 20_000);
+      assert.ok(override, "the run cap is reached while the judge is active and the durable override is recorded");
+    } finally {
+      writeFileSync(release, "release");
+    }
+    const result = await runPromise;
+    const state = nodeState(result);
+    assert.equal(state.status, "done", state.error?.message);
+    assert.equal(state.gate?.verdict, "pass");
+    const judgeInvocations = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+    assert.equal(judgeInvocations.length, 1, "the active judge is never killed and completes exactly once");
+    assert.ok((judgeInvocations[0]?.usage?.inputTokens ?? 0) >= 500, "the judge completes from the judge reserve and reports its spend");
+    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const overrides = events.filter((event) => event.budgetAction?.type === "judge_reserve_override");
+    assert.equal(overrides.length, 1);
+    assert.equal(overrides[0].budgetAction.reason, "an active judge is protected from the run worker cap");
+    assert.equal(overrides[0].budgetAction.judgeReserveInputTokens, 400);
+    const epoch = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8")).epochs["judge-reserve-overrun"];
+    const invocations = Object.values(epoch.invocations);
+    const spent = invocations.reduce((total, invocation) => total + (invocation.usage?.inputTokens ?? 0), 0);
+    assert.ok(spent >= epoch.policy.maxInputTokens, `worker plus judge spend (${spent}) reaches the campaign cap (${epoch.policy.maxInputTokens})`);
+    assert.ok(invocations.some((invocation) => invocation.role === "judge" && (invocation.usage?.inputTokens ?? 0) >= 500), "the judge spend is recorded against the campaign ledger");
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+    try { writeFileSync(release, "release"); } catch {}
+  }
 });
 
 test("an active worker stops before consuming the judge reserve", async () => {
