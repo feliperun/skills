@@ -6724,7 +6724,7 @@ const COMMAND_OPTIONS = {
   resume: { detach: { type: "boolean" } },
   supervise: { detach: { type: "boolean" }, interval: { type: "string" } },
   cancel: {},
-  preflight: { static: { type: "boolean" } },
+  preflight: { static: { type: "boolean" }, json: { type: "boolean" } },
   validate: {},
   status: { json: { type: "boolean" } },
   report: { json: { type: "boolean" } },
@@ -6830,7 +6830,30 @@ async function main(argv) {
   if (command === "cancel") { await cancelRun(target); return; }
   if (command === "preflight") {
     const checks = await preflightContract(target, { static: values.static === true });
-    for (const check of checks) process.stdout.write(`[${check.ok ? "ok" : "fail"}] ${check.id} · ${check.detail}\n`);
+    if (values.json === true) {
+      const absolute = resolve(target);
+      const contract = validateContract(JSON.parse(readFileSync(absolute, "utf8")), absolute);
+      process.stdout.write(`${JSON.stringify({
+        schemaVersion: 1,
+        contractId: contract.id,
+        ok: checks.every((check) => check.ok),
+        checks: checks.map((check) => ({
+          id: check.id,
+          driver: check.driver,
+          executable: check.executable,
+          model: check.model,
+          version: check.version,
+          ok: check.ok,
+          live: check.live === true,
+          liveStatus: check.liveStatus ?? null,
+          usage: check.usage ?? null,
+          costUsd: check.costUsd ?? null,
+          detail: check.detail,
+        })),
+      })}\n`);
+    } else {
+      for (const check of checks) process.stdout.write(`[${check.ok ? "ok" : "fail"}] ${check.id} · ${check.detail}\n`);
+    }
     if (checks.some((check) => !check.ok)) process.exitCode = 1;
     return;
   }
