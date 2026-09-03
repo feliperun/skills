@@ -300,12 +300,12 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   const events = parseJsonLines(stdout, "codex");
   const thread = events.findLast((event) => event.type === "thread.started");
   const continuationId = typeof thread?.thread_id === "string" ? thread.thread_id : null;
-  if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled", continuationId);
-  const completed = events.findLast((event) => event.type === "turn.completed");
   // A disabled code-mode host means the model could not run any command or
   // inspect anything: whatever agent_message it streamed afterwards is a
-  // fabricated result, never evidence. The tool-host failure wins over the
-  // completed turn so a judge verdict grounded in no inspection is rejected.
+  // fabricated result, never evidence. The tool-host failure is classified
+  // first so it wins over a later termination signal, a completed turn, or an
+  // agent_message verdict: a judge grounded in no inspection is rejected, and
+  // a harness that dies after the host error is not a plain cancellation.
   // Other item-level error records (rollout_budget warnings, missing model
   // metadata, ...) are diagnostics and stay ignored.
   const toolHostError = events.find((event) => {
@@ -317,6 +317,7 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   if (toolHostError) {
     const item = eventItem(toolHostError);
     const message = typeof item?.message === "string" ? item.message : "code-mode host is disabled";
+    const completed = events.findLast((event) => event.type === "turn.completed");
     return failed(
       "tool_host_unavailable",
       boundedMessage(message, 512),
@@ -325,6 +326,8 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
       canonicalUsage(completed?.usage, { inputIncludesCache: true }),
     );
   }
+  if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled", continuationId);
+  const completed = events.findLast((event) => event.type === "turn.completed");
   const messages = events.filter((event) => event.type === "item.completed" && eventItem(event)?.type === "agent_message");
   const message = options.preferStructured
     ? messages.findLast((event) => extractJson(eventItem(event)?.text) !== null) ?? messages.at(-1)
@@ -569,8 +572,11 @@ export function extractJson(value) {
 function boundedMessage(value, maxBytes) {
   const bytes = Buffer.from(String(value), "utf8");
   if (bytes.length <= maxBytes) return bytes.toString("utf8");
+  // Cut before the character that starts at or after the limit. Backing up to
+  // a lead byte without dropping it would leave a dangling sequence that
+  // re-encodes as U+FFFD and can exceed the byte ceiling.
   let end = maxBytes;
-  while (end > 0 && (bytes[end - 1] & 0xc0) === 0x80) end -= 1;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
 }
 

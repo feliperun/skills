@@ -617,10 +617,75 @@ test("codex tool host failure is a provider failure, never a result", () => {
   assert.equal(untouched.status, "done", "rollout_budget and model-metadata error items stay ignored");
 });
 
+test("codex tool host failure is classified before a termination signal, never as canceled", () => {
+  const stream = [
+    { type: "thread.started", thread_id: "tool-host-thread" },
+    { type: "item.completed", item: { id: "item_tool_host", type: "error", message: "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`." } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "fabricated", findings: [] }) } },
+    { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 3 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const envelope = normalizeProviderResult("codex", stream, null, "SIGTERM", { preferStructured: true });
+  assert.equal(envelope.status, "failed", "the tool-host failure wins over the termination signal and stays a provider failure");
+  assert.equal(envelope.result, null);
+  assert.equal(envelope.error?.code, "tool_host_unavailable");
+  assert.equal(envelope.continuationId, "tool-host-thread");
+  assert.deepEqual(envelope.usage, { inputTokens: 7, outputTokens: 2, cacheReadInputTokens: 3 });
+
+  const plainKill = normalizeProviderResult("codex", JSON.stringify({ type: "thread.started", thread_id: "canceled-thread" }), null, "SIGTERM");
+  assert.equal(plainKill.status, "canceled", "a signal without a tool-host error still cancels");
+  assert.equal(plainKill.error?.code, "canceled");
+});
+
+test("bounded codex diagnostics never exceed 512 UTF-8 bytes", () => {
+  const filler = "診".repeat(400);
+  const hostDisabled = [
+    { type: "thread.started", thread_id: "utf8-tool-host-thread" },
+    { type: "item.completed", item: { type: "error", message: `${filler} Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed.` } },
+    { type: "item.completed", item: { type: "agent_message", text: "fabricated" } },
+    { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const toolHost = normalizeProviderResult("codex", hostDisabled, 0, null);
+  assert.equal(toolHost.error?.code, "tool_host_unavailable");
+  assert.ok(Buffer.byteLength(toolHost.error?.message ?? "", "utf8") <= 512, `tool-host message is ${Buffer.byteLength(toolHost.error?.message ?? "", "utf8")} UTF-8 bytes`);
+  assert.ok(!/[\uFFFD]/u.test(toolHost.error?.message ?? ""), "the truncation never leaves a dangling multibyte sequence");
+
+  const quota = [
+    { type: "thread.started", thread_id: "utf8-quota-thread" },
+    { type: "turn.failed", error: { message: `${filler} quota exceeded for this billing cycle` } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const quotaEnvelope = normalizeProviderResult("codex", quota, 1, null);
+  assert.equal(quotaEnvelope.error?.code, "quota_exhausted");
+  assert.ok(Buffer.byteLength(quotaEnvelope.error?.message ?? "", "utf8") <= 512, `quota message is ${Buffer.byteLength(quotaEnvelope.error?.message ?? "", "utf8")} UTF-8 bytes`);
+  assert.ok(!/[\uFFFD]/u.test(quotaEnvelope.error?.message ?? ""), "the truncation never leaves a dangling multibyte sequence");
+});
+
 test("codex preamble diet keeps the code-mode host enabled", () => {
   assert.ok(!CODEX_PREAMBLE_OVERRIDES.some((override) => override.includes("code_mode_host")), "the code-mode host override was removed");
   for (const override of ["features.browser_use=false", "features.multi_agent=false", "mcp_servers={}", "plugins={}"]) {
     assert.ok(CODEX_PREAMBLE_OVERRIDES.includes(override), `${override} is still part of the diet`);
+  }
+});
+
+test("codex preamble measurement comment pins the four code-mode-host outcomes", () => {
+  const source = readFileSync(new URL("../scripts/drivers/codex.mjs", import.meta.url), "utf8");
+  const declaration = "export const CODEX_PREAMBLE_OVERRIDES";
+  const symbolIndex = source.indexOf(declaration);
+  assert.ok(symbolIndex !== -1, "codex.mjs must keep exporting CODEX_PREAMBLE_OVERRIDES");
+  const head = source.slice(0, symbolIndex);
+  const blockStart = head.lastIndexOf("/**") + 3;
+  const blockEnd = head.indexOf("*/", blockStart);
+  const comment = head
+    .slice(blockStart, blockEnd)
+    .split("\n")
+    .map((line) => line.replace(/^\s*\* ?/u, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  for (const outcome of [
+    "gpt-5.6-sol with the host disabled used 35,130 input tokens and fabricated its verdict",
+    "versus 35,199 with the host enabled and a correct tool-backed verdict",
+    "deepseek-v4-flash used 25,795 with the host disabled and 25,783 with the host enabled, both correct",
+  ]) {
+    assert.ok(comment.includes(outcome), `the CODEX_PREAMBLE_OVERRIDES measurement comment must record: ${outcome}`);
   }
 });
 

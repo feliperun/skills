@@ -6,10 +6,12 @@ import { normalizeCodexResult, parseVersion, toml } from "./exec-jsonl.mjs";
  * tooling, MCP servers, or plugins. `features.code_mode_host` stays enabled:
  * codex-cli 0.152.1 only surfaces commands to OpenAI models through the
  * code-mode host, and without it they make zero tool calls and fabricate
- * answers. Keeping the host costs about 70 input tokens per trivial call
- * (35,130 vs 35,199 on a gpt-5.6-sol read; 25,795 vs 25,783 on
- * deepseek-v4-flash). These overrides are emitted before the runtime's own
- * `config` entries, so a contract can re-enable any of them.
+ * answers. Measured on the Sol gate: gpt-5.6-sol with the host disabled used
+ * 35,130 input tokens and fabricated its verdict, versus 35,199 with the host
+ * enabled and a correct tool-backed verdict; deepseek-v4-flash used 25,795
+ * with the host disabled and 25,783 with the host enabled, both correct.
+ * These overrides are emitted before the runtime's own `config` entries, so a
+ * contract can re-enable any of them.
  */
 export const CODEX_PREAMBLE_OVERRIDES = Object.freeze([
   "features.browser_use=false",
