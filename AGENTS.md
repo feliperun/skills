@@ -71,5 +71,4 @@ When this file governs anything in production:
 Before starting new work here, check `.runs/`: if a campaign is active or a run is not terminal, continue it instead of starting over — read its `HANDOFF.md`/`STATUS.md`, attach to the campaign, and `resume` or `supervise` the run. Active runs are supervised by a deterministic detached process: do not poll `status` in a loop — on resume, check status once and act only on terminal states.
 
 - intent-factory campaign `intent-factory-efficiency-20260901`: active — read `.runs/campaigns/intent-factory-efficiency-20260901/HANDOFF.md`
-- intent-factory run `intent-factory-efficiency-p05-judge-gate-budget-fix-20260903`: active (0/1 nodes done) — read `.runs/intent-factory-efficiency-p05-judge-gate-budget-fix-20260903/STATUS.md`; `resume` or `supervise` it
 <!-- intent-factory-active:end -->
