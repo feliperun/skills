@@ -112,6 +112,9 @@ strip the notification executable from their environment. Progress never
 wakes the control session. Ambient status and system/Ford notifications are
 for the human; the session is involved only by `requiresUser: true`, and
 `campaign sync` is always user initiated.
+Human-facing feedback — the ambient status line, system/Ford notifications,
+and the generic notify transport — is documented with its channels and
+boundary in [references/feedback.md](references/feedback.md).
 
 Per-node token budgets are cumulative weighted input budgets, not context-window
 limits. New contracts require a versioned, reproducible budget profile and
