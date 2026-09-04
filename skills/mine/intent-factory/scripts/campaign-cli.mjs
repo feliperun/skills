@@ -7,6 +7,7 @@ import {
   closeCampaign,
   discoverCampaigns,
   initializeCampaign,
+  readJournal,
   renderHandoff,
   resolveCampaign,
 } from "./campaign.mjs";
@@ -14,12 +15,14 @@ import {
   campaignStatus,
   configureCampaign,
   detachSelf,
-  drainNotifications,
   startCampaign,
   superviseCampaign,
-  watchCampaign,
 } from "./campaign-autonomy.mjs";
+import { acknowledgeCampaignEvent, drainNotifications, watchCampaign } from "./outbox.mjs";
+import { readHeartbeat } from "./heartbeat.mjs";
 import { syncAgentSignal } from "./signal.mjs";
+
+const SYNC_OUTPUT_MAX_BYTES = 8000;
 
 const NOTE_KINDS = new Set([
   "intent",
@@ -87,6 +90,8 @@ const OPERATION_OPTIONS = {
   },
   close: { cwd: { type: "string" }, "event-id": { type: "string" } },
   show: { cwd: { type: "string" } },
+  sync: { cwd: { type: "string" }, "session-id": { type: "string" } },
+  ack: { cwd: { type: "string" }, "session-id": { type: "string" }, "event-id": { type: "string" } },
 };
 
 /** @typedef {{cwd?: string, goal?: string, tool?: string, sessionId?: string, transcript?: string, format?: string, cursor?: string, since?: string, kind?: string, text?: string, runId?: string, supersedes?: string, decisionId?: string, questionId?: string, eventId?: string, noTranscript?: boolean, plan?: string, contract?: string, snapshotVersion?: string, sourceRoot?: string, detach?: boolean, interval?: string, once?: boolean}} CliValues */
@@ -118,6 +123,8 @@ export async function campaignCli(args) {
   if (operation === "resolve") return resolveQuestion(campaignId, values);
   if (operation === "close") return close(campaignId, values);
   if (operation === "show") return show(campaignId, values);
+  if (operation === "sync") return sync(campaignId, values);
+  if (operation === "ack") return ack(campaignId, values);
   return usage();
 }
 
@@ -298,6 +305,138 @@ function show(campaignId, values) {
 }
 
 /**
+ * User-pull campaign sync (TECH-SPEC 3.4, Addendum 01 section 7): attach the
+ * session once per day when it is not attached yet (including after the
+ * campaign completed), then print the campaign status header, one heartbeat
+ * liveness line, and the unseen outbox events after the session cursor. sync
+ * never writes the cursor: only `ack` does.
+ *
+ * @param {string} campaignId
+ * @param {CliValues} values
+ */
+function sync(campaignId, values) {
+  const { path, runsDir } = selectCampaign(campaignId, values);
+  const sessionId = required(values.sessionId, "--session-id");
+  const cursorId = sessionCursorId(sessionId);
+  attachSessionOnceDaily(path, runsDir, sessionId);
+  const status = campaignStatus(path);
+  const heartbeat = readHeartbeat(path);
+  const seen = watchCampaign(path, { cursor: cursorId, readOnly: true });
+  const header = `campaign ${status.campaignId} · status ${status.status} · attention ${attentionText(status.attention)}`;
+  const lines = [header, livenessLine(heartbeat)];
+  let output = "";
+  for (const line of lines) output += `${line}\n`;
+  let index = 0;
+  for (; index < seen.events.length; index += 1) {
+    const event = seen.events[index];
+    const line = `${event.at} ${event.type} ${event.summary}\n`;
+    if (Buffer.byteLength(output + line, "utf8") <= SYNC_OUTPUT_MAX_BYTES - 64) output += line;
+    else break;
+  }
+  if (index < seen.events.length) output += `sync truncated: ${seen.events.length - index} more events\n`;
+  process.stdout.write(output);
+}
+
+/**
+ * @param {string} campaignId
+ * @param {CliValues} values
+ */
+function ack(campaignId, values) {
+  const { path } = selectCampaign(campaignId, values);
+  const sessionId = required(values.sessionId, "--session-id");
+  const eventId = required(values.eventId, "--event-id");
+  const cursorId = sessionCursorId(sessionId);
+  const position = acknowledgeCampaignEvent(path, cursorId, eventId);
+  process.stdout.write(`[campaign] session ${sessionId} acknowledged up to ${position.eventId}\n`);
+}
+
+/**
+ * Append one session.attached journal entry per day when the session has no
+ * attach for today yet. The entry reuses the attach journal shape with
+ * --no-transcript semantics: no transcript path is known here, so the record
+ * is transcriptUnavailable with null transcript and format. The tool is
+ * inherited from the session's newest recorded attach (fallback "sync") so
+ * the session lineage stays truthful.
+ *
+ * @param {string} campaignPath
+ * @param {string} runsDir
+ * @param {string} sessionId
+ */
+function attachSessionOnceDaily(campaignPath, runsDir, sessionId) {
+  const attaches = readJournal(campaignPath).filter(
+    (entry) => entry.type === "session.attached" && entry.sessionId === sessionId,
+  );
+  const newest = attaches.at(-1);
+  if (newest !== undefined && localDay(newest.at) === localDay(new Date().toISOString())) return;
+  const tool = typeof newest?.tool === "string" && newest.tool.trim() ? newest.tool : "sync";
+  appendJournal(campaignPath, {
+    type: "session.attached",
+    eventId: randomUUID(),
+    at: new Date().toISOString(),
+    sessionId,
+    tool,
+    transcript: null,
+    transcriptUnavailable: true,
+    format: null,
+    cursor: null,
+  });
+  renderHandoff(campaignPath, runsDir);
+}
+
+/** @param {string} iso @returns {string} */
+function localDay(iso) {
+  const date = new Date(iso);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/** @param {import("./heartbeat.mjs").Heartbeat|null} heartbeat @returns {string} */
+function livenessLine(heartbeat) {
+  if (heartbeat === null) return "liveness: no heartbeat yet";
+  const checkpoints = heartbeat.checkpoints && typeof heartbeat.checkpoints === "object"
+    ? heartbeat.checkpoints
+    : { done: 0, total: 0 };
+  const activeNode = typeof heartbeat.activeNode === "string" && heartbeat.activeNode.trim()
+    ? heartbeat.activeNode
+    : null;
+  const lastProgressKnown = typeof heartbeat.lastProgressAt === "number";
+  const progressPart = lastProgressKnown
+    ? `last progress ${new Date(heartbeat.lastProgressAt * 1000).toISOString()} · ${Math.max(0, Math.floor((Date.now() / 1000 - heartbeat.lastProgressAt) / 60))} min since last progress`
+    : "last progress unknown";
+  const attention = heartbeat.attention === null ? "none" : String(heartbeat.attention);
+  return `liveness: ${heartbeat.state} · checkpoints ${checkpoints.done}/${checkpoints.total} · active node ${activeNode ?? "none"} · ${progressPart} · attention ${attention}`;
+}
+
+/**
+ * @param {unknown} attention
+ * @returns {string}
+ */
+function attentionText(attention) {
+  if (attention === null || attention === undefined) return "none";
+  const record = attention && typeof attention === "object" && !Array.isArray(attention)
+    ? /** @type {Record<string, unknown>} */ (attention)
+    : {};
+  const code = typeof record.code === "string" ? record.code : "attention";
+  const message = typeof record.message === "string" ? boundedLine(record.message, 120) : "";
+  return message ? `${code}: ${message}` : code;
+}
+
+/** @param {string} value @param {number} maxChars @returns {string} */
+function boundedLine(value, maxChars) {
+  const chars = Array.from(value);
+  return chars.length <= maxChars ? value : `${chars.slice(0, maxChars - 1).join("")}…`;
+}
+
+/** @param {string} sessionId @returns {string} */
+function sessionCursorId(sessionId) {
+  if (!/^[A-Za-z0-9._-]{1,120}$/u.test(sessionId)) {
+    throw new TypeError("--session-id must be letters, digits, dots, underscores or dashes");
+  }
+  return `session-${sessionId}`;
+}
+
+/**
  * @param {CliValues} values
  */
 function listCampaigns(values) {
@@ -395,7 +534,7 @@ function positiveIntervalMs(value) {
 
 function usage() {
   process.stderr.write(
-    "usage: runner.mjs campaign <init|configure|start|supervise|status|drain|watch|attach|note|resolve|close|show|list> <campaign-id> [--cwd <dir>] ...\n",
+    "usage: runner.mjs campaign <init|configure|start|supervise|status|drain|watch|attach|note|resolve|close|show|list|sync|ack> <campaign-id> [--cwd <dir>] ...\n",
   );
   process.exitCode = 2;
 }

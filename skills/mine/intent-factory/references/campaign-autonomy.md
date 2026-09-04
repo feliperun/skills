@@ -58,7 +58,11 @@ creating a second repair.
 ## Transition table
 
 The supervisor classifies each observed run without provider or model input.
-The first matching row wins.
+The first matching row wins. A runtime may declare several outgoing failover
+routes: the supervisor walks all of them in configuration order, resumes on
+the first one that has not been attempted yet, and reports exhaustion — with
+the remaining-edge count the walk produced — only once every one of them has
+been used.
 
 | Evidence | Action | Bound |
 | --- | --- | --- |
@@ -66,7 +70,7 @@ The first matching row wins.
 | Controller is dead and the run is nonterminal | resume | Consume one retry; stop at `retryLimit` |
 | Timeout or stall | resume | Consume one retry; then `attention` |
 | Provider exhaustion with an unused declared route | resume | Use one declared failover edge; no gate revision is consumed |
-| Provider exhaustion without a route or after a cycle | attention | No implicit provider or account change |
+| Provider exhaustion after every declared route was used | attention | No implicit provider or account change |
 | Budget, scope, authority, permission, cancellation, or invalid state | attention | Human decision required |
 | Verification/gate/context failure with a failed node | repair | Create one deterministic repair contract; stop at `repairLimit` |
 | Live nonterminal controller | wait | The detached controller remains the owner |
@@ -115,18 +119,47 @@ provider, invents a subnode or waits without liveness evidence.
 
 ## Notifications and progress
 
+The durable outbox, its delivery transports and the pull cursors live in
+`scripts/outbox.mjs`; `scripts/campaign-autonomy.mjs` is the controller that
+produces the events and never owns their delivery.
+
 Material node transitions are appended as `campaign.progress`; terminal
 campaign events keep their existing event types. Every event in
-`notification-outbox.json` carries a stable event ID, bounded summary/data,
-attempt count, delivery timestamp, and last error. Duplicate event keys are
-ignored. Pending progress for the same run/node is replaced by its newest
-material state, with a new state-specific event ID; delivered progress and
-terminal events are never coalesced. Delivered entries are evicted first when
-the bounded outbox is full; a new terminal event may then evict the oldest
+`notification-outbox.json` is a projected record
+(`scripts/events.mjs`, schema version 1) carrying a stable event ID, the
+envelope `schemaVersion`/`type`/`campaignId`/`at`, a deterministic
+`summary`, a fixed `next` phrase, an explicit boolean `requiresUser`, a
+bounded `data` object, attempt count, delivery timestamp, and last error.
+`summary` and `next` are rendered from fixed per-type templates using
+counters (`done`/`total`, `attempt`, `revisions`) and identifiers (node id,
+runtime id, error code) only — never model text (rule 6). `data` is bounded
+to 512 bytes and the canonical JSON of the whole record to 1 KiB
+(`summary` truncates first, then `data`). The persisted record — the
+projected event plus its delivery envelope (`deliveredAt`, `attempts`,
+`lastError`, `coalesceKey`) — is held to that same 1 KiB by
+`boundEventRecord` on every enqueue, delivery mutation and retention write:
+the envelope shrinks first (`lastError`, then the coalesce key) and the
+summary last, so no event is dropped for carrying delivery metadata and no
+mutation can grow a stored record past the ceiling. Duplicate event keys are
+ignored.
+Pending progress for the same run/node is replaced by its newest material
+state, with a new state-specific event ID; delivered progress and terminal
+events are never coalesced. Delivered entries are evicted first when the
+bounded outbox is full; a new terminal event may then evict the oldest
 pending progress event. Heartbeats and unchanged controller passes emit no
-progress. The outbox retains at most 100 events. If all 100 remain undelivered
-terminal events, new events are rejected with a warning; `watch` reads do not
-acknowledge transport delivery or free capacity.
+progress. The outbox retains at most 100 events. If all 100 remain
+undelivered terminal events, new events are rejected with a warning;
+`watch` reads do not acknowledge transport delivery or free capacity.
+
+Every record carries `requiresUser: true` only for the three actionable
+classes: a blocking question (`blocked_context`/`open-question`/the persisted
+`context_missing` error code), provider exhaustion that settles with no
+unused failover edge (for example `provider_exhausted`,
+`provider_exhausted_without_declared_failover`, `quota_exhausted`,
+`payment_required`), or `campaign.completed`. All progress, healthy terminal
+and budget/attention records are `requiresUser: false`, so a healthy run
+produces no wake until its own completion marker; nothing in a healthy run
+ever requires the user.
 
 These progress records are human-channel feedback only. Outbox coalescing and
 retention do not authorize a control-session wake: the factory never wakes the
@@ -192,16 +225,31 @@ decimals.
 | `budgetAttentionLatencyP95` | 95th percentile of outbox `budget_attention` latency over the corresponding `budgetAction` attention event, null when none |
 | `silentStallRate` | fraction of consecutive liveness facts of a nonterminal run whose gap exceeded the stale threshold with no `stale_liveness` or `budget_attention` event between them; hard target zero |
 
-`campaign watch --cursor <consumer-id>` reads ordered unseen events and
-atomically advances a durable cursor before writing its JSON response; the same
-call then returns none until a new event arrives. It does not provide a
+`campaign sync <id> --session-id <s>` is the user-pull read: it attaches the
+session once per day when it is not attached yet, prints one status header
+line (campaign id, status, attention), one heartbeat liveness line (or
+`liveness: no heartbeat yet`), then the unseen outbox events after the
+session's `session-<session-id>` cursor as `<at> <type> <summary>`, oldest
+first, truncated so the whole output stays under 8,000 bytes with a final
+`sync truncated: N more events` line when needed. Sync never writes the
+cursor and is never invoked by the factory for progress. `campaign ack <id>
+--session-id <s> --event-id <id>` is the only cursor writer: it atomically
+advances the `session-<session-id>` cursor to a retained event (or a
+previously acknowledged id, where repeating the same ack is a no-op) and
+prints one confirmation line; acking an id that is neither retained nor
+previously acknowledged is rejected. Cursor movement never regresses, and
+acknowledging an older retained event leaves the cursor where it was.
+
+`campaign watch --cursor <consumer-id>` also reads ordered unseen events and
+atomically advances a durable cursor before writing its JSON response; the
+same call then returns none until a new event arrives. It does not provide a
 per-consumer acknowledgement/replay handshake. `campaign watch --since
 <event-id>` is the stateless form and returns events after an ID that is still
 retained in the bounded outbox; coalesced or evicted IDs are rejected. Exactly
 one flag is required. An attached orchestrator session should consume its
-`session-<session-id>` cursor once per reinvocation and summarize unseen
-material events in commentary. This is durable incremental pull; unsolicited
-same-chat push is impossible without a runtime bridge.
+`session-<session-id>` cursor through `campaign sync` and acknowledge with
+`campaign ack`. This is durable incremental pull; unsolicited same-chat push
+is impossible without a runtime bridge.
 
 ## Operational commands
 
@@ -216,6 +264,8 @@ node <skill-dir>/scripts/runner.mjs campaign status <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign drain <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign watch <id> --cwd <repo> --cursor <consumer-id>
 node <skill-dir>/scripts/runner.mjs campaign watch <id> --cwd <repo> --since <event-id>
+node <skill-dir>/scripts/runner.mjs campaign sync <id> --cwd <repo> --session-id <session>
+node <skill-dir>/scripts/runner.mjs campaign ack <id> --cwd <repo> --session-id <session> --event-id <event-id>
 node <skill-dir>/scripts/runner.mjs campaign show <id> --cwd <repo>
 node <skill-dir>/scripts/runner.mjs campaign close <id> --cwd <repo>
 ```

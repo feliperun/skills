@@ -18,7 +18,7 @@ import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import { deriveBudgetDecision } from "./budget.mjs";
-import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./campaign-autonomy.mjs";
+import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
   delay,
@@ -2155,13 +2155,16 @@ test("runner emits campaign.progress only for material node changes and keeps te
     "progress-emission-run:build",
     "progress-emission-run:build",
   ]);
-  assert.equal(progress[0].summary, "build running · phase worker · attempt 1 · luna");
-  assert.equal(progress[1].summary, "build done · phase complete · attempt 1 · luna — worker complete");
+  // The projector summary carries counters and identifiers only, never the
+  // status/phase text or a model note, so both material states of the node
+  // render the same deterministic line; the data field keeps them distinct.
+  assert.equal(progress[0].summary, "node build progress · attempt 1 · revisions 0 · runtime luna");
+  assert.equal(progress[1].summary, "node build progress · attempt 1 · revisions 0 · runtime luna");
   const terminal = outbox.filter((event) => event.type === "node.terminal");
   assert.equal(terminal.length, 1);
   assert.equal(terminal[0].coalesceKey, undefined, "terminal events are never coalesced");
   assert.deepEqual(terminal[0].data, { runId: "progress-emission-run", nodeId: "build", status: "done" });
-  assert.equal(terminal[0].summary, "build done: worker complete");
+  assert.equal(terminal[0].summary, "node build terminal · attempt 1 · revisions 0");
   assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
 });
 

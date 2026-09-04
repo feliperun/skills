@@ -71,7 +71,7 @@ const EMPTY_CATCH_CEILING = 32;
 const LINE_CEILINGS = {
   "runner.mjs": 7200,
   "contract.mjs": 1700,
-  "campaign-autonomy.mjs": 1550,
+  "campaign-autonomy.mjs": 1320,
   "campaign.mjs": 1300,
   "heartbeat.mjs": 650,
   "drivers/exec-jsonl.mjs": 1250,

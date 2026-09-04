@@ -271,6 +271,13 @@ the public contract must not depend on them.
     node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <repo> --cursor session-<session-id>
     ```
 
+    `campaign sync <campaign-id> --cwd <repo> --session-id <session-id>` is the
+    user-pull read: it attaches once per day when needed and prints the status
+    header, a heartbeat liveness line, and unseen events under an 8,000-byte
+    ceiling without ever moving the cursor. `campaign ack <campaign-id> --cwd
+    <repo> --session-id <session-id> --event-id <event-id>` is the only cursor
+    writer and advances the session cursor to the retained event id.
+
     This is incremental pull triggered by reinvocation, not unsolicited push
     into an idle chat. True proactive delivery requires a separately configured
     `INTENT_FACTORY_NOTIFY_BIN` or another runtime bridge.

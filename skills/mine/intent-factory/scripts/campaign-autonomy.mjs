@@ -22,7 +22,6 @@ import {
   readLease,
   writeJsonAtomic,
 } from "./store.mjs";
-import { loadNotifyAdapters, PUSH_EVENT_TYPES, pushNotification } from "./notify/index.mjs";
 import {
   campaignDir,
   closeCampaign,
@@ -31,15 +30,14 @@ import {
   registerRun,
 } from "./campaign.mjs";
 import { readHeartbeat, recordLiveness } from "./heartbeat.mjs";
+import { projectEvent } from "./events.mjs";
+import { drainNotifications, enqueueNotification, readNotificationOutbox } from "./outbox.mjs";
 
 export { campaignDir, initializeCampaign, registerRun } from "./campaign.mjs";
 export { acquireLease, writeJsonAtomic } from "./store.mjs";
 
 export const CAMPAIGN_PLAN_FILE = "plan.json";
 export const CAMPAIGN_STATE_FILE = "control-state.json";
-export const CAMPAIGN_OUTBOX_FILE = "notification-outbox.json";
-export const CAMPAIGN_PROGRESS_TYPE = "campaign.progress";
-export const CAMPAIGN_WATCH_CURSOR_DIR = "watch-cursors";
 export const CAMPAIGN_LEASE_FILE = "campaign-controller-lease.json";
 export const CAMPAIGN_SNAPSHOT_DIR = "controller-snapshots";
 export const CAMPAIGN_BOOTSTRAP_FILE = "controller-bootstrap.json";
@@ -51,10 +49,6 @@ export const LIVENESS_STALE_SEC = (() => {
   const value = Number(raw);
   return Number.isInteger(value) && value > 0 ? value : 2400;
 })();
-const MAX_OUTBOX_EVENTS = 100;
-const MAX_COALESCE_KEY_BYTES = 256;
-const MAX_EVENT_BYTES = 8 * 1024;
-const MAX_LAST_ERROR_CHARS = 200;
 const MAX_EVIDENCE_BYTES = 8 * 1024;
 const DEFAULT_INTERVAL_MS = 1_000;
 const TERMINAL_CAMPAIGN_STATES = new Set(["attention", "completed"]);
@@ -69,7 +63,7 @@ const USAGE_LEDGER_NAME = "usage-ledger.json";
 /** @typedef {{id: string, kind: "initial"|"repair", contractPath: string, status: "planned"|"running"|"done"|"attention"}} CampaignRun */
 /** @typedef {{id: string, kind: string, status: "pending"|"dispatched"|"failed", runId?: string, error?: string}} CampaignAction */
 /** @typedef {{schemaVersion: 1, campaignId: string, status: "configured"|"running"|"attention"|"completed", initialRunId: string, runs: CampaignRun[], retries: Record<string, number>, repairs: Record<string, string>, actions: Record<string, CampaignAction>, attention: {code: string, message: string}|null, updatedAt: string}} CampaignControlState */
-/** @typedef {{eventId: string, type: string, campaignId: string, at: string, summary: string, data?: JsonObject, coalesceKey?: string, deliveredAt?: string|null, attempts: number, lastError?: string|null}} NotificationEvent */
+/** @typedef {{schemaVersion?: number, eventId: string, type: string, campaignId: string, runId?: string|null, nodeId?: string|null, at: string, summary: string, next?: string, requiresUser?: boolean, data?: JsonObject, coalesceKey?: string, deliveredAt?: string|null, attempts: number, lastError?: string|null}} NotificationEvent */
 
 /**
  * Validate the durable campaign plan. The plan is intentionally independent
@@ -277,7 +271,7 @@ export async function startCampaign(campaignPath, options = {}) {
  * access occurs here; callers can replay the same input after a crash.
  *
  * @param {JsonObject} input
- * @returns {{action: "wait"|"resume"|"repair"|"attention"|"complete", reason: string, retryable?: boolean, failoverTo?: string|null}}
+ * @returns {{action: "wait"|"resume"|"repair"|"attention"|"complete", reason: string, retryable?: boolean, failoverTo?: string|null, remainingEdges?: number}}
  */
 export function classifyTransition(input) {
   const plan = input.plan && typeof input.plan === "object" ? /** @type {CampaignPlan} */ (input.plan) : null;
@@ -305,10 +299,17 @@ export function classifyTransition(input) {
   }
   if (isProviderExhaustion(status, code)) {
     const currentRuntime = String(run.currentRuntime ?? input.currentRuntime ?? "");
-    const next = (authority?.runtimeFailover?.routes ?? []).find((route) => route.from === currentRuntime)?.to ?? null;
-    const used = Array.isArray(run.failoverHistory) && run.failoverHistory.includes(next);
-    if (next && !used) return { action: "resume", reason: "declared_provider_failover", retryable: true, failoverTo: next };
-    return { action: "attention", reason: "provider_exhausted_without_declared_failover", failoverTo: null };
+    const history = Array.isArray(run.failoverHistory) ? run.failoverHistory : [];
+    // Every configured route out of the current runtime is walked, in order:
+    // a runtime may declare several outgoing edges, and exhaustion is true
+    // only once each of them has already been attempted.
+    const unused = (authority?.runtimeFailover?.routes ?? [])
+      .filter((route) => route.from === currentRuntime && !history.includes(route.to))
+      .map((route) => route.to);
+    if (unused.length > 0) {
+      return { action: "resume", reason: "declared_provider_failover", retryable: true, failoverTo: unused[0], remainingEdges: unused.length };
+    }
+    return { action: "attention", reason: "provider_exhausted_without_declared_failover", failoverTo: null, remainingEdges: 0 };
   }
   if (isBudget(code, status)) return { action: "attention", reason: "budget_exhausted", failoverTo: null };
   if (isForbiddenAuthority(code, status)) return { action: "attention", reason: "forbidden_authority_or_irreversible_action", failoverTo: null };
@@ -354,7 +355,9 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
     if (transition.action === "wait") continue;
     if (transition.action === "attention") {
       record.status = "attention";
-      setAttention(campaignPath, state, transition.reason, `${record.id}: ${transition.reason}`);
+      // The remaining-edge fact comes from the route walk, never from the
+      // reason: requiresUser stays false while any configured edge is unused.
+      setAttention(campaignPath, state, transition.reason, `${record.id}: ${transition.reason}`, transition.remainingEdges);
       break;
     }
     if (transition.action === "resume") {
@@ -410,7 +413,12 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
     state.updatedAt = now;
     // Evidence is durable before the derived status becomes visible:
     // the outbox event exists before readers can observe "completed".
-    enqueueNotification(campaignPath, "campaign.completed", "campaign", "campaign completed", { runCount: state.runs.length });
+    enqueueNotification(campaignPath, projectEvent({
+      type: "campaign.completed",
+      campaignId: plan.campaignId,
+      data: { runCount: state.runs.length },
+      key: "campaign",
+    }), "campaign");
     persistState(campaignPath, state);
     try {
       if (readCampaign(campaignPath).status === "active") closeCampaign(campaignPath, { at: now, eventId: stableId(`${plan.campaignId}:campaign.completed`) });
@@ -601,167 +609,6 @@ export function campaignStatus(campaignPath) {
   return { schemaVersion: CAMPAIGN_SCHEMA_VERSION, campaignId: plan.campaignId, status: state.status, attention: state.attention, controller: plan.controller, runs, outbox: readNotificationOutbox(campaignPath).map((event) => ({ eventId: event.eventId, type: event.type, deliveredAt: event.deliveredAt ?? null, attempts: event.attempts })) };
 }
 
-/**
- * Deliver pending notification events. Delivery is at-least-once: an event
- * stays pending until the configured executable exits successfully.
- * INTENT_FACTORY_NOTIFY_BIN stays the primary transport; when it is unset,
- * undelivered push events are handed to the platform notify adapters.
- * Each delivery attempt is merged into a fresh durable read under the outbox
- * mutation lock, so a concurrent enqueue can never be clobbered by a stale
- * drainer snapshot, and the lock is never held across adapter I/O.
- *
- * @param {string} campaignPath
- * @param {{adapters?: ReturnType<typeof loadNotifyAdapters>}} [options]
- * @returns {Promise<{delivered: number, pending: number}>}
- */
-export async function drainNotifications(campaignPath, options = {}) {
-  const executable = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  const snapshot = (() => {
-    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-    try {
-      return readNotificationOutbox(campaignPath);
-    } finally {
-      lock.release();
-    }
-  })();
-  let delivered = 0;
-  if (!executable) {
-    const adapters = options.adapters ?? loadNotifyAdapters();
-    for (const event of selectPushableEvents(snapshot)) {
-      const result = await pushNotification(event, adapters);
-      const failed = result.delivered.length === 0;
-      const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-      try {
-        const fresh = readNotificationOutbox(campaignPath);
-        const record = fresh.find((candidate) => candidate.eventId === event.eventId);
-        if (record) {
-          if (result.delivered.length > 0) {
-            record.deliveredAt = new Date().toISOString();
-            record.lastError = null;
-            writeOutbox(campaignPath, fresh);
-          } else if (result.failed.length > 0) {
-            record.attempts = (record.attempts ?? 0) + 1;
-            record.lastError = boundedChars(result.failed[0].error, MAX_LAST_ERROR_CHARS);
-            writeOutbox(campaignPath, fresh);
-          }
-        }
-      } finally {
-        lock.release();
-      }
-      if (!failed) delivered += 1;
-    }
-    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-    try {
-      const fresh = readNotificationOutbox(campaignPath);
-      return { delivered, pending: fresh.filter((event) => !event.deliveredAt).length };
-    } finally {
-      lock.release();
-    }
-  }
-  for (const event of snapshot) {
-    if (event.deliveredAt) continue;
-    const attemptEvent = /** @type {NotificationEvent} */ ({ ...event, attempts: event.attempts + 1 });
-    const result = await deliverNotification(executable, attemptEvent);
-    const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-    try {
-      const fresh = readNotificationOutbox(campaignPath);
-      const record = fresh.find((candidate) => candidate.eventId === event.eventId);
-      if (record) {
-        record.attempts = attemptEvent.attempts;
-        if (result.ok) {
-          record.deliveredAt = new Date().toISOString();
-          record.lastError = null;
-        } else {
-          record.lastError = result.error;
-        }
-        writeOutbox(campaignPath, fresh);
-      }
-      if (result.ok) delivered += 1;
-    } finally {
-      lock.release();
-    }
-  }
-  const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-  try {
-    const fresh = readNotificationOutbox(campaignPath);
-    return { delivered, pending: fresh.filter((event) => !event.deliveredAt).length };
-  } finally {
-    lock.release();
-  }
-}
-
-/**
- * Pure selection of the outbox events an adapter push may deliver: every
- * undelivered event whose type is in PUSH_EVENT_TYPES. campaign.progress
- * events are never pushable and stay pending for pull consumers.
- *
- * @param {NotificationEvent[]} outbox
- * @returns {NotificationEvent[]}
- */
-export function selectPushableEvents(outbox) {
-  return outbox.filter((event) => !event.deliveredAt && PUSH_EVENT_TYPES.has(event.type));
-}
-
-/**
- * Watch campaign events incrementally. Exactly one of `since` or `cursor` is
- * accepted: `since` is a stateless event ID, while
- * `cursor` names a durable per-watcher position that is advanced atomically
- * after the unseen event list is built, so a repeated invocation returns no
- * events.
- *
- * @param {string} campaignPath
- * @param {{since?: string, cursor?: string}} [options]
- * @returns {{campaignId: string, cursor: {cursorId: string, at: string, eventId: string}|null, events: NotificationEvent[]}}
- */
-export function watchCampaign(campaignPath, options = {}) {
-  if ((options.since !== undefined) === (options.cursor !== undefined)) throw new TypeError("watch requires exactly one of --since or --cursor");
-  const outbox = readNotificationOutbox(campaignPath).sort(compareEvents);
-  let cursorId = null;
-  /** @type {{at: string, eventId: string}} */
-  let position;
-  if (options.since !== undefined) {
-    const since = String(options.since);
-    const event = outbox.find((candidate) => candidate.eventId === since);
-    if (!event) throw new TypeError("--since event ID is not retained in the notification outbox");
-    position = { at: event.at, eventId: event.eventId };
-  } else {
-    cursorId = String(options.cursor);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(cursorId)) throw new TypeError("--cursor must be a safe identifier");
-    position = readWatchCursor(campaignPath, cursorId);
-  }
-  const events = outbox
-    .filter((event) => event.at > position.at || (event.at === position.at && event.eventId > position.eventId));
-  if (cursorId !== null && events.length > 0) {
-    const last = events[events.length - 1];
-    position = { at: last.at, eventId: last.eventId };
-    writeWatchCursor(campaignPath, { cursorId, ...position });
-  }
-  const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
-  return { campaignId, cursor: cursorId === null ? null : { cursorId, ...position }, events };
-}
-
-/** @param {NotificationEvent} left @param {NotificationEvent} right @returns {number} */
-function compareEvents(left, right) {
-  if (left.at !== right.at) return left.at < right.at ? -1 : 1;
-  return left.eventId < right.eventId ? -1 : left.eventId > right.eventId ? 1 : 0;
-}
-
-/** @param {string} campaignPath @param {string} cursorId @returns {{at: string, eventId: string}} */
-function readWatchCursor(campaignPath, cursorId) {
-  const path = join(campaignPath, CAMPAIGN_WATCH_CURSOR_DIR, `${cursorId}.json`);
-  if (!existsSync(path)) return { at: "", eventId: "" };
-  const record = objectValue(readJson(path), "campaign watch cursor");
-  requireText(record.at, "campaign watch cursor.at");
-  if (typeof record.eventId !== "string") throw new TypeError("campaign watch cursor.eventId must be a string");
-  return { at: String(record.at), eventId: record.eventId };
-}
-
-/** @param {string} campaignPath @param {{cursorId: string, at: string, eventId: string}} position */
-function writeWatchCursor(campaignPath, position) {
-  const path = join(campaignPath, CAMPAIGN_WATCH_CURSOR_DIR, `${position.cursorId}.json`);
-  mkdirSync(dirname(path), { recursive: true });
-  writeJsonAtomic(path, { schemaVersion: CAMPAIGN_SCHEMA_VERSION, ...position, updatedAt: new Date().toISOString() });
-}
 
 /**
  * The detached child re-enters the public CLI, whose interval unit is seconds.
@@ -1033,81 +880,32 @@ function runAllowsFailover(contract, current, next) {
   });
 }
 
-/** @param {string} campaignPath @param {CampaignControlState} state @param {string} code @param {string} message */
-function setAttention(campaignPath, state, code, message) {
+/**
+ * Record a campaign-level attention state and its outbox event. The optional
+ * remainingEdges is the remaining-failover-edge fact the supervisor holds
+ * after it evaluated the configured runtime rules; provider exhaustion is
+ * actionable only when the fact is 0.
+ *
+ * @param {string} campaignPath
+ * @param {CampaignControlState} state
+ * @param {string} code
+ * @param {string} message
+ * @param {number|null|undefined} [remainingEdges]
+ */
+function setAttention(campaignPath, state, code, message, remainingEdges) {
   state.status = "attention";
   state.attention = { code, message: boundedText(message, 2 * 1024) };
   persistState(campaignPath, state);
-  enqueueNotification(campaignPath, "campaign.attention", `${code}:${message}`, message, { code });
+  enqueueNotification(campaignPath, projectEvent({
+    type: "campaign.attention",
+    campaignId: campaignIdOf(campaignPath),
+    identifiers: { errorCode: code },
+    data: { code },
+    key: `${code}:${message}`,
+    remainingEdges,
+  }), `${code}:${message}`);
 }
 
-/**
- * Append one notification event. Undelivered campaign.progress events are
- * coalesced by a bounded key: a newer enqueue rewrites the older pending event
- * in place instead of growing the outbox. Terminal events and delivered
- * history are never rewritten. The read-modify-write is serialized under the
- * outbox mutation lock so concurrent enqueuers cannot lose each other's
- * durable events.
- *
- * @param {string} campaignPath @param {string} type @param {string} key @param {string} summary @param {JsonObject} [data] @param {string} [progressCoalesceKey]
- */
-export function enqueueNotification(campaignPath, type, key, summary, data = {}, progressCoalesceKey = key) {
-  const lock = acquireFileMutationLock(campaignPath, CAMPAIGN_OUTBOX_FILE);
-  try {
-    const outbox = readNotificationOutbox(campaignPath);
-    const eventId = stableId(`${campaignPath}:${type}:${key}`);
-    if (outbox.some((event) => event.eventId === eventId)) return;
-    const coalesceKey = type === CAMPAIGN_PROGRESS_TYPE ? boundedText(progressCoalesceKey, MAX_COALESCE_KEY_BYTES) : null;
-    const campaignId = (() => { try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); } })();
-    const event = /** @type {NotificationEvent} */ ({
-      eventId,
-      type,
-      campaignId,
-      at: new Date().toISOString(),
-      summary: boundedText(summary, 2 * 1024),
-      data: boundedJson(data, 2 * 1024),
-      deliveredAt: null,
-      attempts: 0,
-      lastError: null,
-    });
-    if (coalesceKey !== null) event.coalesceKey = coalesceKey;
-    const coalescedIndex = coalesceKey === null ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === type && candidate.coalesceKey === coalesceKey);
-    if (coalescedIndex >= 0) {
-      outbox[coalescedIndex] = event;
-      writeOutbox(campaignPath, outbox);
-      return;
-    }
-    while (outbox.length >= MAX_OUTBOX_EVENTS) {
-      const deliveredIndex = outbox.findIndex((candidate) => Boolean(candidate.deliveredAt));
-      const progressIndex = type === CAMPAIGN_PROGRESS_TYPE ? -1 : outbox.findIndex((candidate) => !candidate.deliveredAt && candidate.type === CAMPAIGN_PROGRESS_TYPE);
-      const evictableIndex = deliveredIndex >= 0 ? deliveredIndex : progressIndex;
-      if (evictableIndex < 0) {
-        process.stderr.write("[warn] notification outbox is full of undelivered events; new event was not retained\n");
-        return;
-      }
-      outbox.splice(evictableIndex, 1);
-    }
-    outbox.push(event);
-    writeOutbox(campaignPath, outbox);
-  } finally {
-    lock.release();
-  }
-}
-
-/** @param {string} campaignPath @returns {NotificationEvent[]} */
-export function readNotificationOutbox(campaignPath) {
-  const path = join(campaignPath, CAMPAIGN_OUTBOX_FILE);
-  if (!existsSync(path)) return [];
-  const value = JSON.parse(readFileSync(path, "utf8"));
-  if (!Array.isArray(value)) throw new TypeError("notification outbox must be an array");
-  return /** @type {NotificationEvent[]} */ (value);
-}
-
-/** @param {string} campaignPath @param {NotificationEvent[]} outbox */
-function writeOutbox(campaignPath, outbox) {
-  const bounded = outbox.slice(-MAX_OUTBOX_EVENTS).filter((event) => Buffer.byteLength(JSON.stringify(event), "utf8") <= MAX_EVENT_BYTES);
-  writeJsonAtomic(join(campaignPath, CAMPAIGN_OUTBOX_FILE), bounded);
-}
 
 /**
  * Run-level liveness watchdog (Addendum 02 B4.6 d2/d4, D38). A nonterminal
@@ -1142,12 +940,19 @@ export async function checkRunLiveness(campaignPath, runDir, { now = Date.now(),
   const minutes = Math.max(0, Math.floor((now - lastObservedMs) / 60_000));
   const lastObservedIso = new Date(lastObservedMs).toISOString();
   const eventKey = `${runId}:stale_liveness:${lastObservedIso}`;
-  enqueueNotification(campaignPath, "run.attention", eventKey, `${runId} shows no progress for ${minutes} min`, {
+  enqueueNotification(campaignPath, projectEvent({
+    type: "run.attention",
+    campaignId: campaignIdOf(campaignPath),
     runId,
-    code: "stale_liveness",
-    staleSec,
-    lastObservedAt: lastObservedIso,
-  });
+    identifiers: { errorCode: "stale_liveness" },
+    data: {
+      runId,
+      code: "stale_liveness",
+      staleSec,
+      lastObservedAt: lastObservedIso,
+    },
+    key: eventKey,
+  }), eventKey);
   try {
     const ledger = readLedgerTotals(campaignPath);
     const active = watchdogActiveNode(snapshots);
@@ -1279,35 +1084,6 @@ function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? /** @type {JsonObject} */ (value) : null;
 }
 
-/** @param {string} executable @param {NotificationEvent} event @returns {Promise<{ok: boolean, error?: string}>} */
-function deliverNotification(executable, event) {
-  return new Promise((resolveDelivery) => {
-    let child;
-    try {
-      child = spawn(executable, [], { stdio: ["pipe", "ignore", "pipe"], env: process.env });
-    } catch (error) {
-      resolveDelivery({ ok: false, error: errorMessage(error) });
-      return;
-    }
-    let settled = false;
-    /** @param {{ok: boolean, error?: string}} result */
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolveDelivery(result);
-    };
-    let stderr = "";
-    child.stderr?.on("data", (chunk) => { stderr = boundedText(`${stderr}${chunk}`, 1024); });
-    child.once("error", (error) => finish({ ok: false, error: errorMessage(error) }));
-    child.once("close", (code) => finish(code === 0 ? { ok: true } : { ok: false, error: stderr || `notification exited ${code}` }));
-    const timeout = setTimeout(() => {
-      try { child.kill("SIGTERM"); } catch {}
-      finish({ ok: false, error: "notification timed out after 5s" });
-    }, 5_000);
-    child.stdin.end(`${JSON.stringify(event)}\n`);
-  });
-}
 
 /** @param {string} campaignPath @param {string} nonce @param {number} pid */
 async function waitForBootstrap(campaignPath, nonce, pid) {
@@ -1498,19 +1274,6 @@ function nonNegativeNumber(value, label) { if (typeof value !== "number" || !Num
 function boundedJson(value, max) { const text = JSON.stringify(value); if (Buffer.byteLength(text, "utf8") <= max) return value; return { truncated: true, summary: boundedText(text, max - 32) }; }
 /** @param {unknown} value @param {number} max @returns {string} */
 function boundedText(value, max) { const text = String(value ?? "").replace(/[\u0000-\u001f\u007f]+/gu, " "); return Buffer.byteLength(text, "utf8") <= max ? text : `${Buffer.from(text, "utf8").subarray(0, max - 1).toString("utf8")}…`; }
-/**
- * Bound a persisted delivery error by characters with an ellipsis marker so
- * writeOutbox never silently drops a pending event because its retry history
- * grew past the serialized event budget.
- *
- * @param {unknown} value
- * @param {number} maxChars
- * @returns {string}
- */
-function boundedChars(value, maxChars) {
-  const text = String(value ?? "");
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
-}
 /** @param {unknown} value @returns {string} */
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`; if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(/** @type {JsonObject} */ (value)[key])}`).join(",")}}`; return JSON.stringify(value); }
 /** @param {string} value @returns {string} */
@@ -1521,6 +1284,11 @@ function removeUndefined(value) { if (!value || typeof value !== "object") retur
 function evidenceFor(run, node, observed) { const scope = node.scope && typeof node.scope === "object" ? /** @type {JsonObject} */ (node.scope) : {}; return /** @type {JsonObject} */ ({ runId: run.id, nodeId: node.id ?? null, status: node.status ?? null, attempt: node.attempt ?? 0, error: node.error ?? null, gate: node.gate ?? null, verification: node.verification ?? null, result: node.result ?? null, unexpectedPaths: scope.unexpectedPaths ?? [], currentRuntime: observed.currentRuntime ?? null }); }
 /** @param {string} value @returns {string} */
 function basenameSafe(value) { return value.split(/[\\/]+/u).filter(Boolean).at(-1) ?? "campaign"; }
+
+/** @param {string} campaignPath @returns {string} */
+export function campaignIdOf(campaignPath) {
+  try { return readCampaign(campaignPath).id; } catch { return basenameSafe(campaignPath); }
+}
 /** @param {unknown} value @returns {boolean} */
 function pidAlive(value) { const pid = Number(value); if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (error) { return /** @type {NodeJS.ErrnoException} */ (error).code === "EPERM"; } }
 /** @param {unknown} node @returns {boolean} */

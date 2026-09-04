@@ -90,14 +90,15 @@ import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
 import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
+import { LIVENESS_STALE_SEC, campaignIdOf, checkRunLiveness } from "./campaign-autonomy.mjs";
 import {
   CAMPAIGN_PROGRESS_TYPE,
-  LIVENESS_STALE_SEC,
-  checkRunLiveness,
-  drainNotifications,
-  enqueueNotification,
+  drainNotificationsSafely,
+  notifyCampaign,
   readNotificationOutbox,
-} from "./campaign-autonomy.mjs";
+  terminalErrorCode,
+} from "./outbox.mjs";
+import { projectEvent } from "./events.mjs";
 import { deriveGovernanceMetrics, LIVENESS_JOURNAL_TYPE, recordLiveness, writeGovernanceMetrics } from "./heartbeat.mjs";
 import {
   canonicalBudgetHash,
@@ -166,33 +167,6 @@ function assertRunMutable(runDir) {
   const error = /** @type {Error & {code: string}} */ (new Error("incident_frozen: run is frozen as immutable incident evidence"));
   error.code = "incident_frozen";
   throw error;
-}
-
-/** @param {string} campaignPath */
-async function drainNotificationsSafely(campaignPath) {
-  try {
-    await drainNotifications(campaignPath);
-  } catch (error) {
-    process.stderr.write(`[warn] notification delivery failed: ${errorMessage(error)}\n`);
-  }
-}
-
-/**
- * @param {string} campaignPath
- * @param {string} type
- * @param {string} key
- * @param {string} summary
- * @param {Record<string, unknown>} [data]
- * @param {string} [progressCoalesceKey]
- */
-async function notifyCampaign(campaignPath, type, key, summary, data = {}, progressCoalesceKey = key) {
-  try {
-    enqueueNotification(campaignPath, type, key, summary, data, progressCoalesceKey);
-  } catch (error) {
-    process.stderr.write(`[warn] notification enqueue failed: ${errorMessage(error)}\n`);
-    return;
-  }
-  await drainNotificationsSafely(campaignPath);
 }
 
 /**
@@ -1030,23 +1004,38 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       const attempt = state.attempt ?? 0;
       const revisions = state.revisions ?? 0;
       const runtime = state.runtime?.id ?? null;
-      const note = state.gate?.summary ?? resultSummary(state.result) ?? state.error?.message ?? null;
+      const runId = basename(runDir);
+      const progressKey = `${runId}:${state.id}:${state.status}:${state.phase}:${attempt}:${revisions}:${runtime ?? ""}`;
       await notifyCampaign(
         campaign.path,
-        CAMPAIGN_PROGRESS_TYPE,
-        `${basename(runDir)}:${state.id}:${state.status}:${state.phase}:${attempt}:${revisions}:${runtime ?? ""}`,
-        progressSummary(state, note),
-        { runId: basename(runDir), nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
-        `${basename(runDir)}:${state.id}`,
+        projectEvent({
+          type: CAMPAIGN_PROGRESS_TYPE,
+          campaignId: campaign.campaign.id,
+          runId,
+          nodeId: state.id,
+          counters: { attempt, revisions },
+          identifiers: { runtimeId: runtime },
+          data: { runId, nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
+          key: progressKey,
+        }),
+        progressKey,
+        `${runId}:${state.id}`,
       );
       recordRunLiveness(campaign, runDir, contract, states);
       if (state.phase === "budget" && state.error?.code === "budget_attention") {
+        const attentionKey = `${runId}:${state.id}:budget_attention`;
         await notifyCampaign(
           campaign.path,
-          "run.attention",
-          `${basename(runDir)}:${state.id}:budget_attention`,
-          `${state.id} needs budget attention: ${excerpt(state.error.message)}`,
-          { runId: basename(runDir), nodeId: state.id, code: "budget_attention" },
+          projectEvent({
+            type: "run.attention",
+            campaignId: campaign.campaign.id,
+            runId,
+            nodeId: state.id,
+            identifiers: { errorCode: "budget_attention" },
+            data: { runId, nodeId: state.id, code: "budget_attention" },
+            key: attentionKey,
+          }),
+          attentionKey,
         );
       }
     }
@@ -1055,13 +1044,24 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
     notificationFingerprint = fingerprint;
     for (const state of states.values()) {
       if (!TERMINAL.has(state.status)) continue;
-      const note = state.gate?.summary ?? resultSummary(state.result) ?? state.error?.message ?? state.status;
+      const runId = basename(runDir);
+      const terminalKey = `${runId}:${state.id}:${state.status}:${state.attempt}:${state.revisions}`;
+      // This projection happens before the campaign supervisor evaluates its
+      // configured failover routes, so no remaining-edge fact is asserted:
+      // raw provider-class codes never carry requiresUser here.
       await notifyCampaign(
         campaign.path,
-        "node.terminal",
-        `${basename(runDir)}:${state.id}:${state.status}:${state.attempt}:${state.revisions}`,
-        `${state.id} ${state.status}: ${excerpt(note) ?? state.status}`,
-        { runId: basename(runDir), nodeId: state.id, status: state.status },
+        projectEvent({
+          type: "node.terminal",
+          campaignId: campaign.campaign.id,
+          runId,
+          nodeId: state.id,
+          counters: { attempt: state.attempt ?? 0, revisions: state.revisions ?? 0 },
+          identifiers: { errorCode: terminalErrorCode(state) },
+          data: { runId, nodeId: state.id, status: state.status },
+          key: terminalKey,
+        }),
+        terminalKey,
       );
     }
   };
@@ -1205,10 +1205,15 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   clearRunLivenessMemory(runDir);
   await notifyCampaign(
     campaign.path,
-    "run.terminal",
+    projectEvent({
+      type: "run.terminal",
+      campaignId: campaign.campaign.id,
+      runId: basename(runDir),
+      counters: { done: states.size - failed.length, total: states.size },
+      data: { runId: basename(runDir), done: states.size - failed.length, total: states.size, needsAttention: failed.length },
+      key: `${basename(runDir)}:${failed.length ? "attention" : "done"}`,
+    }),
     `${basename(runDir)}:${failed.length ? "attention" : "done"}`,
-    `${basename(runDir)} ${failed.length ? `needs attention (${failed.length}/${states.size} non-done)` : `completed (${states.size}/${states.size} done)`}`,
-    { runId: basename(runDir), done: states.size - failed.length, total: states.size, needsAttention: failed.length },
   );
   process.stdout.write(`[run] ${contract.id} ${failed.length ? `failed · ${runDir} · findings.json` : `done · ${runDir}`}\n`);
   if ([...states.values()].some((state) => state.usage)) {
@@ -3329,10 +3334,16 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       }, lease);
       await notifyCampaign(
         campaignPath,
-        "run.attention",
+        projectEvent({
+          type: "run.attention",
+          campaignId: campaignIdOf(campaignPath),
+          runId: basename(runDir),
+          nodeId: state.id,
+          identifiers: { errorCode: "judge_unavailable" },
+          data: { runId: basename(runDir), nodeId: state.id, code: "judge_unavailable" },
+          key: `${basename(runDir)}:${state.id}:judge_unavailable`,
+        }),
         `${basename(runDir)}:${state.id}:judge_unavailable`,
-        `${state.id} judge unavailable: ${excerpt(providerMessage) ?? "judge provider failed"}`,
-        { runId: basename(runDir), nodeId: state.id, code: "judge_unavailable" },
       );
       continue;
     }
@@ -5698,21 +5709,6 @@ function nodeMaterialFingerprint(state) {
 }
 
 /**
- * @param {NodeSnapshot} state
- * @param {string|null} note
- * @returns {string}
- */
-function progressSummary(state, note) {
-  const parts = [`${state.id} ${state.status}`];
-  if (state.phase && state.phase !== "waiting") parts.push(`phase ${state.phase}`);
-  if ((state.attempt ?? 0) > 0) parts.push(`attempt ${state.attempt}`);
-  if ((state.revisions ?? 0) > 0) parts.push(`rev ${state.revisions}`);
-  if (state.runtime?.id) parts.push(state.runtime.id);
-  const summary = parts.join(" · ");
-  return note && note !== state.status ? `${summary} — ${excerpt(note)}` : summary;
-}
-
-/**
  * @param {ValidatedContract} contract
  * @returns {ValidatedContract}
  */
@@ -6339,12 +6335,18 @@ export async function superviseRun(runDir, intervalSec) {
       writeGovernanceMetricsSafely(runDir, campaign.path);
       if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
         const failed = nodes.filter((node) => node.status !== "done");
+        const runTerminalKey = `${basename(runDir)}:${failed.length ? "attention" : "done"}`;
         await notifyCampaign(
           campaign.path,
-          "run.terminal",
-          `${basename(runDir)}:${failed.length ? "attention" : "done"}`,
-          `${basename(runDir)} ${failed.length ? `needs attention (${failed.length}/${nodes.length} non-done)` : `completed (${nodes.length}/${nodes.length} done)`}`,
-          { runId: basename(runDir), done: nodes.length - failed.length, total: nodes.length, needsAttention: failed.length },
+          projectEvent({
+            type: "run.terminal",
+            campaignId: campaign.campaign.id,
+            runId: basename(runDir),
+            counters: { done: nodes.length - failed.length, total: nodes.length },
+            data: { runId: basename(runDir), done: nodes.length - failed.length, total: nodes.length, needsAttention: failed.length },
+            key: runTerminalKey,
+          }),
+          runTerminalKey,
         );
         process.stdout.write(`[supervise] ${basename(runDir)} finished · ${nodes.filter((node) => node.status === "done").length}/${nodes.length} done\n`);
         return;
@@ -6386,12 +6388,18 @@ export async function superviseRun(runDir, intervalSec) {
             code,
             message,
           });
+          const attentionKey = `${basename(runDir)}:${code}:${message}`;
           await notifyCampaign(
             campaign.path,
-            "run.attention",
-            `${basename(runDir)}:${code}:${message}`,
-            `${basename(runDir)} needs attention: ${message}`,
-            { runId: basename(runDir), code },
+            projectEvent({
+              type: "run.attention",
+              campaignId: campaign.campaign.id,
+              runId: basename(runDir),
+              identifiers: { errorCode: code },
+              data: { runId: basename(runDir), code },
+              key: attentionKey,
+            }),
+            attentionKey,
           );
           process.stderr.write(`[supervise] ${basename(runDir)} needs attention: ${message}\n`);
           return;
