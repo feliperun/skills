@@ -8,7 +8,7 @@ current releases. TypeScript is a development-only dependency for
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "contractVersion": "0.1.0",
   "id": "feature-42",
   "campaignId": "feature-42",
@@ -83,9 +83,21 @@ current releases. TypeScript is a development-only dependency for
       "dependsOn": [],
       "timeoutSec": 2400,
       "definitionOfDone": [
-        "The requested behavior is implemented",
-        "Relevant automated tests pass",
-        "No unrelated files changed"
+        {
+          "id": "behavior-implemented",
+          "text": "The requested behavior is implemented",
+          "proof": { "kind": "command", "ref": "npm test" }
+        },
+        {
+          "id": "diff-scoped",
+          "text": "No unrelated files changed",
+          "proof": { "kind": "path", "ref": "src/feature-42.ts" }
+        },
+        {
+          "id": "design-honored",
+          "text": "The change honors the stated design decisions",
+          "judgment": true
+        }
       ],
       "gate": {
         "failOn": ["critical"],
@@ -95,6 +107,11 @@ current releases. TypeScript is a development-only dependency for
   ]
 }
 ```
+
+Every `definitionOfDone` item is an object declaring `id`, `text`, and how it
+is proven: either `proof` with `kind` `command` or `path` plus a `ref`, or
+`judgment: true` for a judge-assessed criterion. A schema-1 string item is
+rejected.
 
 ## Continuity capsule
 
@@ -501,10 +518,14 @@ A node that exhausts its wall-clock budget is restarted by `resume` with the
 same bounded invocation timeout. A timeout override is used only when a human
 explicitly supplies one; resume never doubles the timeout automatically.
 
-`usagePolicy.maxInputTokens` is mandatory on every contract. A per-node
-`maxInputTokens` is legacy: on a node authored today it is only an explicit
-hard ceiling above the derived allocation and requires `budgetProfile` (see
-below). The controller meters active invocations live from their transcript
+`usagePolicy.maxInputTokens` is mandatory when `usagePolicy` is an object.
+The contract-level `maxInputTokens` is mandatory on every contract, authored
+or persisted: schema 2 removed the default that used to fill a missing
+persisted-contract budget, so a contract without an explicit ceiling is an
+error. A per-node `maxInputTokens` is legacy: on a node authored today it is
+only an explicit hard ceiling above the derived allocation and requires
+`budgetProfile` (see below). The controller meters active invocations live
+from their transcript
 tails each poll tick: a node whose observed input tokens pass its own cap is
 terminated immediately and labeled `exhausted` with `token_budget_exceeded`;
 once cumulative spend (persisted plus live-observed) reaches the contract

@@ -7,7 +7,7 @@ import { execJsonlDriver } from "./exec-jsonl.mjs";
 import { replayDriver } from "./replay.mjs";
 
 /** Current wire-contract version for runner protocol artifacts. */
-export const PROTOCOL_SCHEMA_VERSION = 1;
+export const PROTOCOL_SCHEMA_VERSION = 2;
 
 /** Version of the runner protocol implementation. */
 export const INTENT_FACTORY_VERSION = "0.1.0";

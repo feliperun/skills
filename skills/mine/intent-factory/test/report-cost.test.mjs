@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { validateContract } from "../scripts/contract.mjs";
+import { PROTOCOL_SCHEMA_VERSION, validateContract } from "../scripts/contract.mjs";
 import { renderReport, renderReportJson } from "../scripts/render.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
 
@@ -83,7 +83,7 @@ function makeRun(nodes) {
   mkdirSync(join(runDir, "nodes"), { recursive: true });
   writeFileSync(join(runDir, "contract.json"), readFileSync(contractPath));
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
     contractVersion: "0.1.0",
     pid: process.pid,
     processStartToken: null,
@@ -93,7 +93,7 @@ function makeRun(nodes) {
   for (const node of nodes) {
     const planNode = /** @type {import("../scripts/contract.mjs").ValidatedNode} */ (contract.nodes.find((candidate) => candidate.id === node.id));
     writeFileSync(join(runDir, "nodes", `${node.id}.json`), `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: PROTOCOL_SCHEMA_VERSION,
       contractVersion: "0.1.0",
       type: planNode.type,
       sourceIdentity: planNode.sourceIdentity,

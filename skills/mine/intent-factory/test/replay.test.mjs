@@ -360,7 +360,7 @@ test("runContract drives a two-node dependsOn chain through replay worker and ju
     },
     runtimeRules: [],
     nodes: [
-      { id: "build", type: "backend", taskPacket: packet(), definitionOfDone: ["It works"], gate: { failOn: ["critical"] } },
+      { id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
       { id: "ship", type: "backend", dependsOn: ["build"], taskPacket: packet(), gate: false },
     ],
   }));

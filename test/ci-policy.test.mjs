@@ -70,7 +70,7 @@ const EMPTY_CATCH_CEILING = 32;
 /** @type {Record<string, number>} */
 const LINE_CEILINGS = {
   "runner.mjs": 7200,
-  "contract.mjs": 1700,
+  "contract.mjs": 1675,
   "campaign-autonomy.mjs": 1320,
   "campaign.mjs": 1300,
   "heartbeat.mjs": 650,

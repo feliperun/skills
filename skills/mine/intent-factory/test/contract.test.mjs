@@ -5,7 +5,6 @@ import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
-  DEFAULT_MAX_INPUT_TOKENS,
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   captureSourceIdentity,
@@ -125,11 +124,10 @@ test("validation requires an explicit usage policy and node phase", () => {
   assert.throws(() => validateContract(JSON.parse(readFileSync(phasePath, "utf8")), phasePath), /nodes\[0\]\.phase/u);
 });
 
-test("persisted loading defaults a missing budget so older runs stay readable", () => {
+test("persisted loading rejects a missing budget instead of defaulting it", () => {
   const path = helpers.writeContract(mkdtempSync(join(tmpdir(), "runner-persisted-default-")), helpers.fixture());
   const { maxInputTokens: _omitted, ...raw } = helpers.fixture();
-  const loaded = validateContract(raw, path, { persisted: true });
-  assert.equal(loaded.maxInputTokens, DEFAULT_MAX_INPUT_TOKENS);
+  assert.throws(() => validateContract(raw, path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
   // An invalid explicit value still fails under persisted loading.
   assert.throws(() => validateContract(helpers.fixture({ maxInputTokens: 0 }), path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
   // A frozen run authored before budget profiles keeps its literal node cap readable.
@@ -137,6 +135,23 @@ test("persisted loading defaults a missing budget so older runs stay readable", 
   const legacy = helpers.fixture({ nodes: [legacyNode] });
   assert.equal(validateContract(legacy, path, { persisted: true }).nodes[0].maxInputTokens, 500_000);
   assert.throws(() => validateContract(legacy, path), /requires budgetProfile provenance/u);
+});
+
+test("schema 2 rejects a schema-1 string Definition of Done item and an item without proof", () => {
+  const stringItem = writeFixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: ["It works"], gate: false }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(stringItem.path, "utf8")), stringItem.path),
+    /must be an object, not a schema-1 string item/u,
+  );
+  const unproven = writeFixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works" }], gate: false }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(unproven.path, "utf8")), unproven.path),
+    /must declare proof or judgment: true/u,
+  );
 });
 
 test("same-phase nodes must have a dependency order", () => {
@@ -191,7 +206,7 @@ test("validation rejects unknown fields at every protocol layer", () => {
 
 test("validation rejects unsupported protocol versions and stale packet hashes", () => {
   const versioned = writeFixture({ schemaVersion: 99 });
-  assert.throws(() => validateContract(JSON.parse(readFileSync(versioned.path, "utf8")), versioned.path), /schemaVersion must be 1/u);
+  assert.throws(() => validateContract(JSON.parse(readFileSync(versioned.path, "utf8")), versioned.path), new RegExp(`schemaVersion must be ${PROTOCOL_SCHEMA_VERSION}`, "u"));
   const stale = writeFixture({ nodes: [{ id: "build", type: "backend", taskPacket: packet(), packetHash: "0".repeat(64), gate: false }] });
   assert.throws(() => validateContract(JSON.parse(readFileSync(stale.path, "utf8")), stale.path), /packetHash does not match/u);
 });
@@ -321,7 +336,7 @@ test("validate warns when a task packet verification command is absent from the 
   /** @type {Array<Record<string, unknown>>} */
   const nodes = /** @type {Array<Record<string, unknown>>} */ (value.nodes);
   nodes[0].taskPacket = helpers.packet({ verification: [{ argv: ["pnpm", "exec", "vitest", "run", "tests/fixtures/x.test.ts"] }] });
-  nodes[0].definitionOfDone = ["It works"];
+  nodes[0].definitionOfDone = [{ id: "works", text: "It works", judgment: true }];
   const path = helpers.writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
   assert.ok(contract.warnings.some((warning) => warning.includes("tests/fixtures/x.test.ts")));
@@ -329,7 +344,7 @@ test("validate warns when a task packet verification command is absent from the 
   /** @type {Array<Record<string, unknown>>} */
   const cleanNodes = /** @type {Array<Record<string, unknown>>} */ (clean.nodes);
   cleanNodes[0].taskPacket = helpers.packet({ verification: [{ argv: ["pnpm", "exec", "vitest", "run", "tests/fixtures/y.test.ts"] }] });
-  cleanNodes[0].definitionOfDone = ["tests/fixtures/y.test.ts passes"];
+  cleanNodes[0].definitionOfDone = [{ id: "y-test", text: "tests/fixtures/y.test.ts passes", proof: { kind: "command", ref: "pnpm exec vitest run tests/fixtures/y.test.ts" } }];
   const cleanPath = helpers.writeContract(directory, clean);
   const cleanWarnings = validateContract(JSON.parse(readFileSync(cleanPath, "utf8")), cleanPath).warnings;
   assert.equal(cleanWarnings.length, 1, "only the single-node warning remains; no command-target warning");
@@ -617,14 +632,15 @@ test("validate rejects a symlink followed by dotdot escaping cwd", () => {
 });
 
 test("judge prompt exposes only the write-file evidence boundary", () => {
-  const node = {
+  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
     id: "build",
     type: "backend",
     taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
-    definitionOfDone: ["It works"],
-  };
+    definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+  });
   const prompt = judgePrompt(node, "worker complete");
   assert.match(prompt, /Write files:\n- README\.md/u);
+  assert.match(prompt, /\[works\] It works/u);
   assert.doesNotMatch(prompt, /Read files/u);
   assert.doesNotMatch(prompt, /contract\.json/u);
 });

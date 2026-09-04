@@ -6,7 +6,7 @@ export { runProcessAlive } from "./supervisor.mjs";
 export { validateContract, routeRuntime, normalizeProviderResult, providerCommand };
 export { renderStatus, renderReport, renderFindings } from "./render.mjs";
 
-/** @typedef {{id: string, definitionOfDone: string[], taskPacket: {mode?: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], writeFiles?: string[], writeRoots?: string[], verification: {argv: string[]}[]}}} JudgeNode */
+/** @typedef {{id: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], taskPacket: {mode?: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], writeFiles?: string[], writeRoots?: string[], verification: {argv: string[]}[]}}} JudgeNode */
 /** @typedef {{verdict: "pass"|"fail", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: {severity: "minor"|"major"|"critical", description: string, evidence: string}[]}} JudgeVerdict */
 
 export const TERMINAL = new Set([
@@ -104,7 +104,10 @@ export function parseJudge(result) {
  */
 export function judgePrompt(node, workerResult, context = {}) {
   const criteria = node.definitionOfDone.length
-    ? node.definitionOfDone.map((item) => `- ${item}`).join("\n")
+    ? node.definitionOfDone.map((item) => {
+        const evidence = item.proof === undefined ? "(judgment)" : `(proof: ${item.proof.kind} ${item.proof.ref})`;
+        return `- [${item.id}] ${item.text} ${evidence}`;
+      }).join("\n")
     : "- The requested work is complete, correct, tested, and limited to scope.";
   const taskInstructions = node.taskPacket.instructions.length
     ? node.taskPacket.instructions.map((item, index) => `${index + 1}. ${item}`).join("\n")
@@ -135,7 +138,8 @@ export function judgePrompt(node, workerResult, context = {}) {
     "Return only the JSON object required by the output schema. Evidence must be concrete. " +
     "Use verdict pass only when findings is empty and maxSeverity is none. " +
     "Use verdict fail whenever findings is non-empty, including advisory findings below failOn. " +
-    "Use pass only when every Definition of Done item is satisfied.";
+    "Use pass only when every Definition of Done item is satisfied. " +
+    "Assess every Definition of Done item by its id and cite the id you are addressing in each finding.";
 }
 
 /**

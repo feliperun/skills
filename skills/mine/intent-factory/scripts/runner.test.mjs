@@ -388,7 +388,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
   chmodSync(worker, 0o755);
   const contract = join(directory, "contract.json");
   writeFileSync(contract, `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     contractVersion: "0.1.0",
     id: "doctor-run",
     campaignId: "doctor-campaign",
@@ -541,7 +541,7 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
       id: "build",
       type: "backend",
       taskPacket: packet(),
-      definitionOfDone: ["It works"],
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   });
@@ -935,7 +935,7 @@ test("oversized judge prompt fails before judge spawn or persistence", async () 
   const path = writeContract(directory, fixture({
     id: "judge-prompt-cap-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", definitionOfDone: ["x".repeat(2 * 1024)].concat(Array.from({ length: 40 }, () => "y".repeat(2 * 1024))), taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", definitionOfDone: [{ id: "huge-0", text: "x".repeat(2 * 1024), proof: { kind: "command", ref: "true" } }].concat(Array.from({ length: 40 }, (_, index) => ({ id: `huge-${index + 1}`, text: "y".repeat(2 * 1024), proof: { kind: "command", ref: "true" } }))), taskPacket: packet(), gate: {} }],
   }));
   const result = await withFakeCodex(directory, "pass", () => runContract(path));
   const state = nodeState(result);
@@ -2012,7 +2012,7 @@ test("gate revisions are not consumed by attempts burned in restarts", async () 
       id: "build",
       type: "backend",
       taskPacket: packet(),
-      definitionOfDone: ["It works"],
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 1 },
     }],
   }));
@@ -2035,7 +2035,7 @@ test("status separates a live running node from an orphaned one", async () => {
   assert.match(renderStatus(runDir), /build still claims to be running/u);
 
   writeFileSync(join(runDir, "run.json"), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     contractVersion: "0.1.0",
     pid: 2_147_483_647,
     startedAt: "2026-01-01T00:00:00.000Z",

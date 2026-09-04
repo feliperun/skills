@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
+import { PROTOCOL_SCHEMA_VERSION } from "../scripts/contract.mjs";
 
 /**
  * @param {number} milliseconds
@@ -88,7 +89,7 @@ export async function withFakeAgy(directory, body) {
  */
 export function fixture(overrides = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
     contractVersion: "0.1.0",
     id: "test-run",
     campaignId: "test-campaign",

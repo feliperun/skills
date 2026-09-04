@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateContract } from "../scripts/contract.mjs";
+import { PROTOCOL_SCHEMA_VERSION, validateContract } from "../scripts/contract.mjs";
 import { parseJudge, retryPrompt } from "../scripts/lib.mjs";
 import { captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands } from "../scripts/verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../scripts/worker-result.mjs";
@@ -63,7 +63,7 @@ test("verification rejects legacy shell strings", () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-contract-"));
   writeFileSync(join(cwd, "README.md"), "read\n");
   const contract = {
-    schemaVersion: 1, contractVersion: "0.1.0", id: "strict-verification", campaignId: "strict",
+    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: "0.1.0", id: "strict-verification", campaignId: "strict",
     goal: "verify", cwd: ".", usagePolicy: false, runtimeDefaults: { worker: "luna", judge: "luna" },
     runtimes: { luna: { driver: "codex", model: "test" } },
     nodes: [{ id: "build", type: "backend", phase: "verification", taskPacket: {
@@ -80,7 +80,7 @@ test("discovery and verification aggregate prompt limits fail before spawn", () 
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-oversized-"));
   writeFileSync(join(cwd, "README.md"), "read\n");
   const base = {
-    schemaVersion: 1, contractVersion: "0.1.0", id: "oversized", campaignId: "oversized-campaign", goal: "test", cwd: ".",
+    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: "0.1.0", id: "oversized", campaignId: "oversized-campaign", goal: "test", cwd: ".",
     usagePolicy: false, runtimeDefaults: { worker: "worker", judge: "worker" }, runtimes: { worker: { driver: "codex", model: "test" } }, runtimeRules: [],
   };
   assert.throws(() => validateContract({

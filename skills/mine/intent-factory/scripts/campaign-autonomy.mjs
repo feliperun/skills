@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { validateContract } from "./contract.mjs";
+import { PROTOCOL_SCHEMA_VERSION, validateContract } from "./contract.mjs";
 import { TERMINAL } from "./lib.mjs";
 import {
   acquireFileMutationLock,
@@ -553,8 +553,9 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
     nonGoals: ["authority expansion", "destructive or irreversible actions", "merge or deployment"],
     verification: plan.authority.allowedVerification.map((command) => ({ argv: [...command.argv] })),
   };
+  const repairProof = plan.authority.allowedVerification.map((command) => command.argv.join(" ")).join(" && ");
   const raw = /** @type {JsonObject} */ ({
-    schemaVersion: 1,
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
     contractVersion: source.contractVersion,
     id: repairId,
     campaignId: plan.campaignId,
@@ -577,7 +578,10 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
       runtime: workerRuntime,
       dependsOn: [],
       taskPacket,
-      definitionOfDone: ["The recorded failure is repaired", "Only the preauthorized verification passes"],
+      definitionOfDone: [
+        { id: "failure-repaired", text: "The recorded failure is repaired", proof: { kind: "command", ref: repairProof } },
+        { id: "verification-passes", text: "Only the preauthorized verification passes", proof: { kind: "command", ref: repairProof } },
+      ],
       gate: { enabled: false },
       maxInputTokens: repairInputTokens,
       budgetProfile: sourceNode.budgetProfile,

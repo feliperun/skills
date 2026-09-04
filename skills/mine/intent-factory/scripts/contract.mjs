@@ -8,6 +8,7 @@ import { loadTaskPacket, renderWorkerPrompt } from "./task-packet.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 import { validateBudgetDecision, validateBudgetProfile, validateBudgetState } from "./budget.mjs";
+import { validateDefinitionOfDone } from "./definition-of-done.mjs";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
@@ -72,7 +73,7 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{graceSec: number, intervalSec: number, maxDryHeartbeats: number}} ProgressPolicy */
 /** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
-/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: string[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
+/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
 
 /** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, warnings: string[]}} ValidatedContract */
 
@@ -100,19 +101,15 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
 
-/** Ceiling applied when loading a persisted contract that predates mandatory
- * budgets: older runs stay inspectable and resumable, still under a hard cap. */
-export const DEFAULT_MAX_INPUT_TOKENS = 1_000_000;
-
 /**
  * Validate and canonicalize the versioned contract. Runtime JSON remains
  * authoritative; JSDoc types document the validated shape only.
  *
- * Authoring entry points (validate, run, preflight, doctor) use the default
- * strict mode: `maxInputTokens` is required. Commands that load a contract
- * persisted inside a run directory pass `{persisted: true}` so runs written
- * before a schema tightening remain readable; a missing budget then defaults
- * to DEFAULT_MAX_INPUT_TOKENS instead of refusing to inspect finished work.
+ * `maxInputTokens` is mandatory on authored and persisted contracts alike:
+ * schema 2 removed the legacy default, so a persisted contract without an
+ * explicit budget is an error instead of a fallback. The `persisted` flag
+ * only keeps node-level `budgetProfile` provenance optional for runs
+ * written before that field existed.
  *
  * @param {JsonObject} raw
  * @param {string} contractPath
@@ -192,10 +189,10 @@ export function validateContract(raw, contractPath, options = {}) {
       `nodes[${index}].sourceIdentity`,
       { kind: "node", contractId: raw.id, nodeId: node.id },
     );
-    const definitionOfDone = node.definitionOfDone ?? [];
-    if (!Array.isArray(definitionOfDone) || definitionOfDone.some((item) => typeof item !== "string")) {
-      throw new TypeError(`nodes[${index}].definitionOfDone must be an array of strings`);
-    }
+    const definitionOfDone = validateDefinitionOfDone(
+      node.definitionOfDone ?? [],
+      `nodes[${index}].definitionOfDone`,
+    );
     const requiredCapabilities = validateCapabilityRequirements(
       /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (node.requiredCapabilities),
       `nodes[${index}].requiredCapabilities`,
@@ -271,12 +268,10 @@ export function validateContract(raw, contractPath, options = {}) {
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
     timeoutSec: positiveNumber(raw.timeoutSec ?? 2_400, "contract.timeoutSec"),
-    // Mandatory at authoring time: a contract without a hard token budget is
-    // exactly how the 2026-08 usage incident happened (workers burned 1.2M+
-    // input tokens unbounded). Authors must state the ceiling explicitly.
-    maxInputTokens: raw.maxInputTokens === undefined && persisted
-      ? DEFAULT_MAX_INPUT_TOKENS
-      : positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
+    // Mandatory on every contract, persisted or not: a contract without a
+    // hard token budget is exactly how the 2026-08 usage incident happened
+    // (workers burned 1.2M+ input tokens unbounded).
+    maxInputTokens: positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
     usagePolicy,
     maxCostUsd: raw.maxCostUsd === undefined
       ? undefined
@@ -1488,7 +1483,7 @@ function errorCode(error) {
  */
 function commandCoverageWarnings(node, index) {
   if (!Array.isArray(node.definitionOfDone) || node.definitionOfDone.length === 0) return [];
-  const dodText = node.definitionOfDone.join("\n");
+  const dodText = node.definitionOfDone.map((item) => item.text).join("\n");
   const warnings = [];
   const lines = node.taskPacket.verification.map((command) => command.argv.join(" "));
   for (const line of lines) {
