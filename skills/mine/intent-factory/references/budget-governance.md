@@ -77,6 +77,52 @@ initialAllocationTokens - continuationReserveTokens)`: headroom exists only
 after pending and continuation reserves, and the hard cap never includes the
 continuation reserve.
 
+## Authoring a contract that passes budget-v1
+
+The two guards above reject before any provider runs, so a contract that
+trips one wastes a launch, not tokens. Three campaign runs were lost to this;
+check each invariant while authoring, not after the rejection.
+
+**Satisfy the guards by construction.** For every node, with `R` the
+continuation reserve (`segmentReserveTokens` when `continuation.enabled`,
+else 0):
+
+```text
+node.maxInputTokens        >= estimatedWeightedInputTokens + R
+estimatedWeightedInputTokens + R <= maxPhaseInputTokens
+estimatedWeightedInputTokens >= minimumSegmentTokens
+```
+
+The second line is the one that surprises: `availableTokens` is bounded by
+the remaining *phase* allowance, so a per-node estimate the epoch could
+afford still fails when `maxPhaseInputTokens` cannot hold it together with
+the reserve. Nodes that share a `phase` label share that allowance; a node
+that needs its own budget needs its own phase label.
+
+**Size from measurement, never from intuition.** A flash worker re-reads its
+whole conversation every turn, so cache reads run 40 to 60 times the uncached
+input. At `cacheReadWeight` 0.1 the real weighted cost lands near five times
+the input tokens. Measured on this repository with deepseek-v4-flash through
+codex: a two-file fix over a 154 KB read set cost 2.07 M weighted (476 k in,
+18.2 M cache read); a three-file fix over a smaller set cost 522 k weighted.
+An estimate of 200 k to 400 k for a node that edits production code and its
+tests is not a plan, it is a guaranteed block.
+
+**The read set is the cost.** Cache read scales with what the packet tells the
+worker to read, so dropping one 300 KB file from `readFiles` is worth more
+than any other tuning. A node whose read set cannot be cut below a few
+hundred kilobytes should be split into chained nodes instead.
+
+**`preambleBytes` is a measurement.** Record the harness preamble that
+`preflight --json` reports for that runtime (256 k for deepseek through
+codex on 2026-09-01), not a nominal number; it feeds `requestHeadroomTokens`
+directly.
+
+**An epoch policy is immutable once recorded.** The ledger enforces one
+policy per epoch, so a recalibration — a larger phase allowance, a different
+judge reserve — requires a new epoch id, and the spent totals of the old
+epoch stay in the campaign record as waste.
+
 ## budgetDecision schema
 
 Persisted before dispatch and replayed byte-identically
