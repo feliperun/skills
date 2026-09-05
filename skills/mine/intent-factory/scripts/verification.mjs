@@ -352,9 +352,12 @@ function captureIgnoreSources(root) {
       // install or an agent worktree under `.claude/worktrees/` adds and
       // removes `.gitignore` files mid-node — which used to fail the node
       // with `snapshot_ignore_changed`.
-      if (entry.name === "node_modules") continue;
+      // A virtual environment is the same class as node_modules: it and its
+      // packages carry .gitignore files that would move the fingerprint.
+      if (entry.name === "node_modules" || entry.name === ".venv" || entry.name === "venv") continue;
       if (directory === root && (entry.name === ".claude" || entry.name === ".codex")) continue;
       const child = resolve(directory, entry.name);
+      if (entry.isDirectory() && isVirtualEnv(child)) continue;
       if (entry.isDirectory()) {
         walk(child);
       } else if (entry.name === ".gitignore") {
@@ -891,3 +894,6 @@ function tailText(value, maxBytes) {
   while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
   return bytes.subarray(start).toString("utf8");
 }
+
+/** A virtual environment under any name, identified by its marker file. @param {string} directory @returns {boolean} */
+function isVirtualEnv(directory) { try { return statSync(resolve(directory, "pyvenv.cfg")).isFile(); } catch { return false; } }

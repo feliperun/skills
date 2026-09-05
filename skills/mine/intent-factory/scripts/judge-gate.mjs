@@ -27,7 +27,22 @@ const MAX_PROOF_OUTPUT_BYTES = 4 * 1024;
 function boundedText(value, maxBytes = MAX_PROOF_OUTPUT_BYTES) {
   const text = String(value ?? "");
   const bytes = Buffer.from(text, "utf8");
-  return bytes.length <= maxBytes ? text : `${bytes.subarray(0, maxBytes - 1).toString("utf8")}…`;
+  if (bytes.length <= maxBytes) return text;
+  // The marker costs 3 bytes in UTF-8 and a byte-aligned cut can land inside a
+  // multibyte character, whose replacement costs 3 more. Reserve the marker and
+  // then shrink until the encoded result actually fits: a finding that exceeds
+  // the validator's evidence ceiling is not truncated downstream, it throws, and
+  // the throw kills the controller mid-gate.
+  const marker = "…";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  if (maxBytes <= markerBytes) return "";
+  let room = maxBytes - markerBytes;
+  let out = `${bytes.subarray(0, room).toString("utf8")}${marker}`;
+  while (room > 0 && Buffer.byteLength(out, "utf8") > maxBytes) {
+    room -= 1;
+    out = `${bytes.subarray(0, room).toString("utf8")}${marker}`;
+  }
+  return out;
 }
 
 /** @param {{definitionOfDone?: DefinitionOfDoneItem[]}} node @returns {DefinitionOfDoneItem[]} */

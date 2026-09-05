@@ -650,6 +650,34 @@ a fail-closed repository check. Do not run descendants after the artifact is
 accepted; preserve the runner terminal state separately from the product
 verdict.
 
+## What a gate costs, and what it will not see
+
+Three properties of the gate are load-bearing and each one has cost a campaign
+a node in the field.
+
+**A command proof is executed, not declared.** `proof: {kind: "command"}` runs
+the command again at gate time, under a ceiling of the node's `timeoutSec`
+capped at 120 seconds. Declaring `npm test` or a full workspace build as a
+proof therefore runs it a second time and will exceed that ceiling on a cold
+tree. Point a command proof at the narrow check that proves the item, and let
+the contract-level `finalVerification` carry the expensive suite — it runs
+from the controller, outside the worker sandbox and outside that cap.
+
+**`failOn: ["critical"]` is close to no gate at all.** A judge working at
+`major` — which is what the ones used here do — will fail a node repeatedly
+without ever reaching `critical`, so with `failOn: ["critical"]` every one of
+those findings is advisory and the node reaches `done`. Two independent
+campaigns hit this: one approved nine majors in a single phase, the other
+shipped a fail-closed regression that had been described in a major. Use
+`failOn: ["major"]` unless there is a stated reason not to.
+
+**A worker reads only inside the worktree.** The `claude` driver passes no
+`--add-dir`, and no contract field grants one, so an instruction naming an
+absolute path outside `cwd` silently produces nothing — the worker scans, the
+read fails, and the node proceeds on whatever it inferred. Embed the text the
+node must read in the packet itself rather than pointing at a path outside the
+repository.
+
 ## Run artifacts
 
 The CLI writes under `<cwd>/.runs/<id>/`:

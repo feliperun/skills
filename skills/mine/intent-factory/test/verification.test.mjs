@@ -4,8 +4,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_SCHEMA_VERSION, validateContract } from "../scripts/contract.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
 import { parseJudge, retryPrompt } from "../scripts/lib.mjs";
+import { mechanicalVerdict } from "../scripts/judge-gate.mjs";
 import { captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands } from "../scripts/verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../scripts/worker-result.mjs";
 
@@ -481,3 +482,66 @@ async function waitForDeath(pid) {
   try { process.kill(pid, "SIGKILL"); } catch {}
   assert.fail(`process ${pid} survived process-group termination`);
 }
+
+test("a failing command proof with oversized output stays inside the evidence ceiling", () => {
+  // Field report, campaign beliva-pades-phase6 run r2: a failing command proof
+  // whose output exceeded 4 KiB produced a finding the contract validator
+  // rejects, and that rejection killed the controller mid-gate. The trigger
+  // needs both halves — the proof must FAIL, because mechanicalVerdict builds
+  // findings only from failed results, and its output must exceed the ceiling.
+  const verdict = mechanicalVerdict([
+    { id: "build", kind: "command", ref: "cargo build --workspace", pass: false, detail: "x".repeat(9000) },
+    { id: "test", kind: "command", ref: "cargo test", pass: false, detail: "é".repeat(5000) },
+    { id: "clean", kind: "command", ref: "git status", pass: true, detail: "y".repeat(9000) },
+  ]);
+  assert.equal(verdict.verdict, "fail");
+  assert.equal(verdict.findings.length, 2, "only failed proofs become findings");
+  for (const finding of verdict.findings) {
+    assert.ok(
+      Buffer.byteLength(finding.evidence, "utf8") <= 4 * 1024,
+      `evidence is ${Buffer.byteLength(finding.evidence, "utf8")} bytes`,
+    );
+    assert.ok(Buffer.byteLength(finding.description, "utf8") <= 2 * 1024);
+  }
+  // validateNodeSnapshot is the thing that used to throw and take the
+  // controller with it: prove it accepts a snapshot carrying this verdict.
+  assert.doesNotThrow(() => validateNodeSnapshot({
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
+    id: "build",
+    type: "backend",
+    sourceIdentity: { kind: "node", contractId: "contract-test", nodeId: "build" },
+    packetHash: "a".repeat(64),
+    status: "exhausted",
+    phase: "worker",
+    attempt: 1,
+    revisions: 0,
+    runtime: null,
+    blockedBy: [],
+    startedAt: null,
+    updatedAt: "2026-09-05T00:00:00.000Z",
+    result: null,
+    gate: verdict,
+    error: null,
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 },
+  }));
+});
+
+test("a virtual environment never changes the ignore-source fingerprint", () => {
+  // Same class as node_modules: `uv venv` writes a .gitignore inside the
+  // environment and installed packages carry their own, so the sources change
+  // mid-node and kill a worker that did nothing wrong.
+  const directory = mkdtempSync(join(tmpdir(), "verification-venv-"));
+  writeFileSync(join(directory, ".gitignore"), ".venv/\n");
+  initializeGit(directory);
+  const before = captureWorkspaceSnapshot(directory);
+  for (const name of [".venv", "env"]) {
+    const root = join(directory, name);
+    mkdirSync(join(root, "lib", "site-packages", "tests"), { recursive: true });
+    writeFileSync(join(root, "pyvenv.cfg"), "home = /usr/bin\n");
+    writeFileSync(join(root, ".gitignore"), "*\n");
+    writeFileSync(join(root, "lib", "site-packages", "tests", ".gitignore"), "outputs/\n");
+  }
+  const after = captureWorkspaceSnapshot(directory);
+  assert.deepEqual(after.ignoreSources, before.ignoreSources, "a venv adds no ignore source");
+});
