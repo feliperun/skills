@@ -38,6 +38,18 @@ cross-model quality gates, bounded revisions, campaign journaling with
 controller until the run is terminal — from any host scheduler (launchd, cron,
 CI, or another agent), with no dependency on the orchestrator's runtime.
 
+Release 1 makes a long campaign cheap to watch and cheap to finish. Liveness is
+rendered ambiently from a bounded heartbeat at zero token cost, and the control
+session pulls campaign events on its own cursor instead of being woken by
+progress. Every Definition of Done item now declares how it is proven, so a
+mechanically provable node spends no judge at all, while contract-level
+`finalVerification` keeps a phase from closing on partial proof. An interrupted
+run is continued by pruning it into the contract for what is left, and the
+factory rides out provider exhaustion, quota resets, dead leases, and flaky
+networks deterministically. `metrics` reports effectiveness and efficiency of a
+campaign together, from what the runs recorded. Detail:
+[references/release-1.md](skills/mine/intent-factory/references/release-1.md).
+
 Quickstart, in the repository that will receive the implementation:
 
 ```bash
@@ -61,12 +73,16 @@ node "$INTENT_FACTORY" supervise --detach "$TARGET/.runs/<run-id>"   # unattende
 | Goal | Command |
 | --- | --- |
 | Find the active campaign | `campaign list --cwd <repo>` |
+| Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
+| Advance the session cursor | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |
 | Validate a contract | `validate <contract.json>` |
 | Check credentials, models, binaries | `preflight <contract.json>` / `doctor [--cwd <dir>]` |
 | Start without blocking the session | `run --detach <contract.json>` |
 | Read current state | `status <run-dir>` / `status --json <run-dir>` |
 | View attempts and tokens | `report <run-dir>` |
 | Prepare a repair after gate exhaustion | `findings <run-dir>` |
+| Continue a partly finished run | `contract prune <run-dir> --out <file>` |
+| Read the campaign indicators | `metrics <campaign-id> --cwd <repo>` |
 | Stop a run and terminate its providers | `cancel <run-dir>` |
 | Resume an interrupted run | `resume --detach <run-dir>` |
 | Keep a dead controller alive | `supervise --detach <run-dir> [--interval 30]` |

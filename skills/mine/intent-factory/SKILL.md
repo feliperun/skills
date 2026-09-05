@@ -13,20 +13,33 @@ actionable verdicts into the session.
 
 | You need | Read |
 | --- | --- |
-| Contract, packets, results, capsule, driver protocol, states, resume, cancel | [references/contract.md](references/contract.md) |
-| Workflow steps, runtime catalogue, adapter capabilities, gates | [references/routing.md](references/routing.md) |
-| Campaign plan, transition table, authority, failover routes, commands | [references/campaign-autonomy.md](references/campaign-autonomy.md) |
-| Budget profiles, `budgetDecision`/`budgetState` schemas | [references/budget-governance.md](references/budget-governance.md) |
-| Status line, notifications, notify transport | [references/feedback.md](references/feedback.md) |
-| Harness-side ambient rendering | [references/harness-feedback.md](references/harness-feedback.md) |
-| Session save/resume protocol | [references/session-memory.md](references/session-memory.md) |
+| Contract, packets, results, capsule, driver protocol, states, resume | [contract.md](references/contract.md) |
+| Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
+| Campaign plan, transition table, authority, failover routes, commands | [campaign-autonomy.md](references/campaign-autonomy.md) |
+| Heartbeat, outbox, sync/ack, judge gate, prune, metrics, resilience | [release-1.md](references/release-1.md) |
+| Budget profiles, `budgetDecision`/`budgetState` schemas | [budget-governance.md](references/budget-governance.md) |
+| Status line, notifications, notify transport | [feedback.md](references/feedback.md) |
+| Harness-side ambient rendering | [harness-feedback.md](references/harness-feedback.md) |
+| Session save/resume protocol | [session-memory.md](references/session-memory.md) |
+
+## Session commands
+
+Everything else runs detached.
+
+| You want | Run |
+| --- | --- |
+| Probe runtimes and host before spending tokens | `preflight <contract.json>`, `doctor [--cwd <dir>]` |
+| Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
+| Advance that cursor past an event | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |
+| Read the campaign indicators | `metrics <campaign-id> [--cwd <dir>] [--json]` |
+| Continue a partly finished run | `contract prune <run-dir> --out <file> [--targeted-fix]` |
 
 ## Load-bearing rules
 
 **Campaign first.** Establish or discover the durable campaign before launching
 work; stop instead of guessing when several are active. Attach this session,
 read `HANDOFF.md`, and record every material intent, decision, and open
-question as a campaign event: mandatory handoff state, not documentation.
+question as a campaign event — handoff state, not documentation.
 
 **One contract per approved plan step.** Inspect the repository once, then
 author every node of the step with its `dependsOn` edges in a single turn.
@@ -35,72 +48,64 @@ physical runtime. Use `mode: "discovery"` only when no packet is possible.
 
 **Closed packets.** Each node lists exact `readFiles`, `writeFiles`, and
 `verification`. Workers and judges inspect only those paths and return the
-structured `blocked_context` result instead of exploring the repo.
+structured `blocked_context` result instead of exploring.
 
-**Preflight before tokens.** `preflight <contract.json>` probes every routed
-worker and judge runtime read-only; `doctor` checks the target repo (git work
-tree, `.runs/` ignored, node/npm, driver binaries). Then `validate`. Run with
-`maxParallel: 1`; concurrency is rejected until filesystem isolation exists, and
-the target repo must ignore `.runs/`.
+**Prove mechanically.** Every Definition of Done item is an object declaring
+its own proof: a verification `command`, a workspace `path`, or `judgment`.
+Proofs gate before any judge runs, so a fully mechanical node costs no judge.
+Contract-level `finalVerification` runs on the phase-terminal node.
 
 **Detach and supervise.** `run --detach <contract.json>`, then
-`supervise --detach <run-dir>`. Both are plain Node processes that outlive this
-session; the supervisor re-spawns `resume --detach` whenever the controller
-dies before the run is terminal.
+`supervise --detach <run-dir>`: plain Node processes that outlive this session,
+the supervisor re-spawning `resume --detach` whenever the controller dies
+before the run is terminal. Run with `maxParallel: 1`; concurrency is rejected
+until filesystem isolation exists, and the target repo must ignore `.runs/`.
 
 **Never wait inside a turn.** No `sleep`/`while` loops, no repeated `status`
 calls, no watched background jobs — every tool call re-sends the whole session
 context. Check status once per invocation, report one line, end the turn.
-Interrupt the user only for `blocked`, `failed`, `exhausted`, `stalled`,
-or run completion.
+Interrupt the user only for `blocked`, `failed`, `exhausted`, `stalled`, or
+completion.
 
 **Resume, do not restart.** A node marked `running` with no runner process is
 an orphan. `resume --detach <run-dir>` re-judges finished work instead of
 re-implementing it; take a new run id only when routing or the graph changes.
 
-**Gates.** Deterministic argv checks run in the controller before any judge,
-which reviews the captured results instead of re-running them. Default `failOn`
-to `critical`, set `maxRevisions` explicitly, keep judge and worker runtimes
-different. After two rejections or an exhaustion, create one targeted fix node
-from the verbatim finding — never copy the graph.
+**Gates.** The judge reviews captured results instead of re-running them.
+Default `failOn` to `critical`, set `maxRevisions` explicitly, keep judge and
+worker runtimes different. After two rejections or an exhaustion, create one
+targeted fix node from the verbatim finding — never copy the graph.
 
 **Budgets.** `maxInputTokens` is mandatory per contract and may be tightened
 per node; `usagePolicy` must be an explicit object or `false`. A node over its
-cap dies with `token_budget_exceeded`; the contract budget stops every worker
-with `budget_exceeded`. A budget stop becomes visible attention within one
+cap dies with `token_budget_exceeded`, the contract budget stops every worker
+with `budget_exceeded`, and either becomes visible attention within one
 supervisor interval — never a silent provider change.
 
 **Foreground children.** Worker prompts run builds, watchers, and servers in
-the foreground; only the runner is ever detached. Keep output bounded
+the foreground; only the runner is detached. Keep output bounded
 (`| tail -n 200`).
 
 ## Routing and runtimeRules failover
 
 Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or
-an explicit node override — never as model-specific branches in orchestration
-prose. A worker runtime resolves as `nodes[].runtime`, then the first matching
-`runtimeRules[]` entry (a rule matches when every key in its `match` equals the
-node field of the same name), then `runtimeDefaults.worker`; a judge resolves as
-`nodes[].gate.runtime`, then `runtimeDefaults.judge`.
+an explicit node override — never as model-specific branches in prose. A worker
+resolves as `nodes[].runtime`, then the first matching `runtimeRules[]` entry,
+then `runtimeDefaults.worker`; a judge as `nodes[].gate.runtime`, then
+`runtimeDefaults.judge`.
 
 Failover is not resolution: it lives in the campaign plan's
-`authority.runtimeFailover` (`allowedRuntimes` plus `routes` of `from`/`to`). On
-provider-reported exhaustion the supervisor walks the outgoing routes of the
-resolved runtime in configuration order, resumes on the first edge not yet
-attempted, and consumes no gate revision. Once every declared edge is used it stops
-at terminal attention with the remaining-edge count
-(`provider_exhausted_without_declared_failover`) and requires a human; it never
-changes provider or account implicitly. Failover is only for provider
-exhaustion; a local budget, scope, or authority stop never rotates runtime.
-Failover changes the runtime fingerprint, so it rotates to a fresh
-session instead of reusing a continuation.
+`authority.runtimeFailover` and only provider exhaustion triggers it — a local
+budget, scope, or authority stop never rotates runtime. Routes:
+[campaign-autonomy.md](references/campaign-autonomy.md). Synthesis:
+[release-1.md](references/release-1.md).
 
 ## Safety
 
 - Node.js 22+ on `PATH`; TypeScript is development-only.
 - Keep secrets in env vars; contracts carry variable names only.
 - Claude `bypassPermissions` only in a repository-scoped, recoverable
-  environment; otherwise keep `acceptEdits` and let denials become `blocked`.
+  environment; otherwise `acceptEdits`, letting denials become `blocked`.
 - Never overwrite an existing run directory; choose a new run id.
 - One controller lease per run directory; one lease per supervisor.
 - Treat `STATUS.md` and node JSON as state; logs are diagnostics.
