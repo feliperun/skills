@@ -34,7 +34,7 @@ const NODE_FIELDS = new Set([
 const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
   "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
-  "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities",
+  "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities", "costRank",
 ]);
 const GATE_FIELDS = new Set(["enabled", "runtime", "failOn", "maxRevisions", "requiredCapabilities"]);
 const MATCH_FIELDS = new Set(["id", "type", "runtime", "role", "status", "errorCode", "currentRuntime"]);
@@ -64,7 +64,7 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{mode: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], readFiles: string[], writeFiles?: string[], writeRoots?: string[], symbols: string[], decisions: string[], nonGoals: string[], verification: VerificationCommand[]}} TaskPacket */
 
-/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedRuntime */
+/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number}} ValidatedRuntime */
 
 /** @typedef {{id?: string, type?: string, runtime?: string, role?: "worker"|"judge", status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RuntimeRuleMatch */
 
@@ -157,6 +157,7 @@ export function validateContract(raw, contractPath, options = {}) {
   const rules = raw.runtimeRules ?? [];
   if (!Array.isArray(rules)) throw new TypeError("contract.runtimeRules must be an array");
   for (const [index, rule] of rules.entries()) validateRule(rule, runtimes, index);
+  // A declared failover cycle is caught at dispatch as provider_failover_cycle, never here: the run owes each hop one attempt before it stops.
 
   if (!Array.isArray(raw.nodes) || raw.nodes.length === 0) {
     throw new TypeError("contract.nodes must be a non-empty array");
@@ -480,37 +481,6 @@ function validateRule(rule, runtimes, index) {
 }
 
 /**
- * Reject runtime failover cycles when their current-runtime edges are known.
- *
- * @param {unknown[]} rules
- */
-function assertNoFailoverCycles(rules) {
-  const edges = new Map();
-  for (const rule of rules) {
-    const record = /** @type {JsonObject} */ (rule);
-    const match = /** @type {JsonObject} */ (record.match);
-    if (match.currentRuntime === undefined) continue;
-    const current = /** @type {string} */ (match.currentRuntime);
-    const target = /** @type {string} */ (record.runtime);
-    const targets = edges.get(current) ?? [];
-    targets.push(target);
-    edges.set(current, targets);
-  }
-  const visiting = new Set();
-  const visited = new Set();
-  /** @param {string} runtime */
-  const visit = (runtime) => {
-    if (visiting.has(runtime)) throw new TypeError(`runtimeRules contain a cyclic failover at ${runtime}`);
-    if (visited.has(runtime)) return;
-    visiting.add(runtime);
-    for (const next of edges.get(runtime) ?? []) visit(next);
-    visiting.delete(runtime);
-    visited.add(runtime);
-  };
-  for (const runtime of edges.keys()) visit(runtime);
-}
-
-/**
  * @param {string} id
  * @param {unknown} runtime
  */
@@ -544,6 +514,7 @@ function validateRuntimeValues(runtime, label, executableRequired) {
   if (runtime.args !== undefined) requireStringArray(runtime.args, `${label}.args`);
   if (runtime.versionArgs !== undefined) requireStringArray(runtime.versionArgs, `${label}.versionArgs`);
   if (runtime.maxArgvPromptBytes !== undefined) positiveInteger(runtime.maxArgvPromptBytes, `${label}.maxArgvPromptBytes`);
+  if (runtime.costRank !== undefined) nonNegativeNumber(runtime.costRank, `${label}.costRank`);
   validateCapabilityRequirements(
     /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (runtime.requiredCapabilities),
     `${label}.requiredCapabilities`,

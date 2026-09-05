@@ -505,6 +505,59 @@ implementation work requires a sandbox whose environment permits network
 access; record that choice in the contract instead of relying on the caller's
 ambient sandbox.
 
+### Failover edges
+
+An edge is the runtime a phase moves to when its provider exhausts. Every edge
+a run can take is either *declared* or *synthesized*, and preflight walks both
+kinds, so each runtime a run might fall over to is capability-checked before
+the first provider spends anything.
+
+**Declared.** Each `runtimeRules[]` entry whose `match` carries
+`currentRuntime` is one edge from that runtime to `rule.runtime`, taken with
+the rule's `backoffSec`. Cycles among declared edges are rejected at
+validation. A contract that declares any rule owns its routing outright:
+declared rules suppress synthesis entirely, because a rule set is a statement
+about where the run is allowed to spend.
+
+**Synthesized.** A contract with `"runtimeRules": []` still needs somewhere to
+go. Its worker edges are then derived from the remaining healthy runtimes,
+ordered by the optional `costRank` on each runtime — a finite non-negative
+number, cheapest first. The chain out of any runtime is every *other* runtime
+in that order; a runtime with no `costRank` sorts after every ranked one
+whatever those ranks are, and ties break by declaration order, so synthesis is
+deterministic. On exhaustion the worker
+takes the cheapest runtime it has not already burned in the current revision,
+and the routing record cites no `ruleIndex`. Synthesis is worker-only: a judge
+without a declared rule stays on its gate runtime, so a verdict is never
+quietly arbitrated by a model the contract did not name.
+
+Both kinds stay bounded by the existing guards — a runtime already attempted
+in the revision, or a hop count that reaches the number of declared runtimes,
+ends the node `exhausted` instead of routing again.
+
+**Quota reset before an edge.** When the exhaustion envelope announces a reset
+instant (`resetAt`, at the envelope root or on its `error`), the controller
+weighs it against a window bounded at both ends: strictly after now, and
+strictly before the node's own wall-clock deadline (its start plus its
+invocation timeout). Inside that window the wait is cheaper than any hop, so
+the phase is rescheduled on the runtime it already warmed, with the backoff
+running to exactly that instant, and no edge is taken.
+
+Both bounds are load-bearing. A reset at or *after* the deadline would have the
+node sit out its whole budget and die waiting. A reset at or *before* now buys
+no wait at all: honouring it would park the phase on a zero-length backoff and
+re-invoke the exhausted runtime immediately, so a provider that keeps repeating
+a stale instant would hot-loop on it. Outside the window — and for an envelope
+with no announced reset, or an unparseable one — the run takes its declared or
+synthesized edge instead.
+
+A reset retry is not a hop. The hop count is strictly the failover budget, and
+a wait spends no runtime, so it is recorded at the hop the phase already had.
+Charging it would let a wait consume the budget a later real edge needs: in a
+two-runtime contract, whose cap is 2, one charged wait would push the following
+genuine edge to the cap and end the node `exhausted` before its second runtime
+was ever tried.
+
 ## Graph and states
 
 `dependsOn` forms a DAG. A node starts only after every dependency is `done`. A failed terminal dependency makes the node `blocked`.

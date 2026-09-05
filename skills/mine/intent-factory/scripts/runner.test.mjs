@@ -13,7 +13,9 @@ import {
 } from "./lib.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import { cancelRun, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_MIN_TURNS_FOR_AVERAGE } from "./runner.mjs";
-import { invocationAlive, invocationResult, processStartToken } from "./supervisor.mjs";
+import { invocationAlive, invocationResult, processStartToken, quotaResetSchedule } from "./supervisor.mjs";
+import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
+import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts } from "./backoff.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
@@ -1037,7 +1039,7 @@ test("invalid worker result consumes a bounded revision before failing terminall
   assert.equal(state.attempt, 2);
 });
 
-test("invalid worker result without revisions fails terminally", async () => {
+test("a spent repair blocks on protocol_failure and raises attention when no failover edge remains", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-invalid-result-terminal-"));
   const path = writeContract(directory, fixture({
     id: "invalid-result-terminal-run",
@@ -1046,10 +1048,44 @@ test("invalid worker result without revisions fails terminally", async () => {
   }));
   const result = await withFakeCodex(directory, "prose-retry", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "exhausted");
+  // One runtime, no revision left: there is nowhere to route the protocol
+  // failure, so the node stops visibly rather than filing a quiet exhaustion.
+  assert.equal(state.status, "blocked");
   assert.ok(state.error, "invalid worker result records an error");
-  assert.equal(state.error.code, "invalid_worker_result");
+  assert.equal(state.error.code, "protocol_failure");
   assert.equal(state.revisions, 0);
+  assert.equal(state.routing?.history?.length ?? 0, 0, "a blocked protocol failure records no route");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "protocol_failure"));
+});
+
+test("a second unparseable worker result takes the failover edge before it blocks with attention", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-protocol-failover-"));
+  const first = fakeCodex(directory, "prose-retry");
+  const second = fakeCodex(directory, "prose-retry");
+  const path = writeContract(directory, fixture({
+    id: "protocol-failover-run",
+    pollIntervalMs: 10,
+    runtimeRules: [],
+    runtimeDefaults: { worker: "first", judge: "first" },
+    runtimes: {
+      first: { driver: "codex", model: "first", executable: first, costRank: 1 },
+      second: { driver: "codex", model: "second", executable: second, costRank: 2 },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
+  }));
+  const state = nodeState(await runContract(path));
+  assert.equal(state.status, "blocked");
+  assert.equal(state.error?.code, "protocol_failure");
+  assert.equal(state.revisions, 0, "a protocol failover never consumes a gate revision");
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
+  const history = state.routing?.history ?? [];
+  assert.equal(history.length, 1, "exactly one edge before the chain is spent");
+  assert.equal(history[0].errorCode, "protocol_failure");
+  assert.equal(history[0].nextRuntime, "second");
+  assert.equal(history[0].hop, 1);
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "protocol_failure"));
 });
 
 test("fails deterministic verification before the judge", async () => {
@@ -2956,8 +2992,10 @@ test("preflight preserves conflicting runtime and node capability requirements",
     }],
   }));
   const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
-  assert.equal(checks.length, 1);
-  assert.equal(checks[0].ok, false);
+  // With no declared rules the worker's synthesized chain reaches sol as well,
+  // so both runtimes are capability-checked against the node's demand before
+  // anything spends — and the codex sandbox conflicts with sandbox=false on both.
+  assert.deepEqual(checks.map((check) => check.ok), [false, false]);
   assert.match(checks[0].detail ?? "", /requirement 2: sandbox=false/u);
 });
 
@@ -3661,6 +3699,351 @@ test("budget failover boundary D37 never routes a local budget stop", async () =
   assert.equal(state.error?.code, "budget_attention");
   assert.deepEqual(state.invocations?.map(invocation => invocation.runtimeId), ["primary"]);
   assert.equal(state.routing?.history.length, 0);
+});
+
+/** @param {string} prefix @param {Record<string, unknown>} overrides @returns {import("./contract.mjs").ValidatedContract} */
+function failoverContract(prefix, overrides) {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  const path = writeContract(directory, fixture({
+    id: `${prefix}contract`,
+    runtimeDefaults: { worker: "mid", judge: "mid" },
+    runtimeRules: [],
+    nodes: [{ id: "build", type: "backend", runtime: "mid", taskPacket: packet(), gate: false }],
+    ...overrides,
+  }));
+  return validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+}
+
+/** Three runtimes whose costRank deliberately disagrees with declaration order. @returns {Record<string, unknown>} */
+function rankedRuntimes() {
+  return {
+    mid: { driver: "codex", model: "mid", costRank: 2 },
+    dear: { driver: "codex", model: "dear", costRank: 9 },
+    cheap: { driver: "codex", model: "cheap", costRank: 1 },
+  };
+}
+
+test("synthesized failover edges follow costRank, not declaration order", () => {
+  const contract = failoverContract("runner-synth-failover-", { runtimes: rankedRuntimes() });
+  assert.deepEqual(
+    failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to),
+    ["cheap", "dear"],
+    "the cheapest healthy runtime is tried before the dear one",
+  );
+  assert.ok(failoverEdges(contract).every((edge) => edge.source === "synthesized"));
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "cheap");
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["cheap"]), "dear");
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["cheap", "dear"]), null, "a spent chain routes nowhere");
+  assert.equal(nextSynthesizedRuntime(contract, "judge", "mid"), null, "a judge stays on the runtime the contract named");
+});
+
+test("an unranked runtime sorts last in the synthesized failover chain", () => {
+  const contract = failoverContract("runner-unranked-failover-", {
+    runtimes: {
+      mid: { driver: "codex", model: "mid", costRank: 2 },
+      unranked: { driver: "codex", model: "unranked" },
+      cheap: { driver: "codex", model: "cheap", costRank: 1 },
+    },
+  });
+  assert.deepEqual(failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to), ["cheap", "unranked"]);
+});
+
+test("an unranked runtime sorts after even the most expensive costRank in the failover chain", () => {
+  // costRank only has to be a finite non-negative number, so a contract may
+  // declare one at or past any sentinel a ranked-last encoding could pick.
+  const contract = failoverContract("runner-extreme-rank-failover-", {
+    runtimes: {
+      mid: { driver: "codex", model: "mid", costRank: 2 },
+      unranked: { driver: "codex", model: "unranked" },
+      astronomical: { driver: "codex", model: "astronomical", costRank: Number.MAX_SAFE_INTEGER },
+    },
+  });
+  assert.deepEqual(
+    failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to),
+    ["astronomical", "unranked"],
+    "every ranked runtime is still cheaper than an unranked one",
+  );
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "astronomical");
+});
+
+test("declared runtimeRules suppress failover synthesis entirely", () => {
+  const contract = failoverContract("runner-declared-failover-", {
+    runtimes: rankedRuntimes(),
+    runtimeRules: [{ match: { role: "worker", currentRuntime: "mid" }, runtime: "dear" }],
+  });
+  assert.deepEqual(failoverEdges(contract), [{ from: "mid", to: "dear", source: "declared", ruleIndex: 0 }]);
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), null, "a declared rule set owns its routing outright");
+});
+
+// A fixed clock keeps these cases deterministic: the schedule is judged against
+// now at both ends, so wall-clock drift must not decide the assertions.
+const RESET_NOW = Date.parse("2026-09-04T06:00:00.000Z");
+
+test("a quota reset before the node deadline schedules the retry at the reset time", () => {
+  const resetAt = "2026-09-04T12:00:00.000Z";
+  const deadline = "2026-09-04T18:00:00.000Z";
+  assert.deepEqual(quotaResetSchedule({ error: { code: "quota_exhausted", resetAt } }, deadline, RESET_NOW), { kind: "reset", at: resetAt });
+  assert.deepEqual(quotaResetSchedule({ resetAt: Date.parse(resetAt) }, deadline, RESET_NOW), { kind: "reset", at: resetAt });
+  assert.deepEqual(quotaResetSchedule({ resetAt }, null, RESET_NOW), { kind: "reset", at: resetAt }, "a node with no deadline can always wait");
+});
+
+test("a quota reset at or after the node deadline takes the failover edge", () => {
+  const deadline = "2026-09-04T12:00:00.000Z";
+  assert.deepEqual(quotaResetSchedule({ error: { resetAt: "2026-09-04T18:00:00.000Z" } }, deadline, RESET_NOW), { kind: "failover" });
+  assert.deepEqual(quotaResetSchedule({ resetAt: deadline }, deadline, RESET_NOW), { kind: "failover" }, "a reset exactly at the deadline is too late");
+  assert.deepEqual(quotaResetSchedule({ error: { code: "quota_exhausted" } }, deadline, RESET_NOW), { kind: "failover" }, "no announced reset always fails over");
+  assert.deepEqual(quotaResetSchedule({ resetAt: "not a time" }, deadline, RESET_NOW), { kind: "failover" });
+  assert.deepEqual(quotaResetSchedule(null, deadline, RESET_NOW), { kind: "failover" });
+});
+
+test("a quota reset at or before now takes the failover edge instead of hot-looping", () => {
+  const deadline = "2026-09-04T18:00:00.000Z";
+  // A stale reset would otherwise park the phase on a zero-length backoff and
+  // re-invoke the exhausted runtime at once, forever if the provider repeats it.
+  assert.deepEqual(quotaResetSchedule({ resetAt: "2026-09-04T05:00:00.000Z" }, deadline, RESET_NOW), { kind: "failover" }, "a reset already in the past buys no wait");
+  assert.deepEqual(quotaResetSchedule({ error: { resetAt: new Date(RESET_NOW) } }, deadline, RESET_NOW), { kind: "failover" }, "a reset exactly at now buys no wait");
+  assert.deepEqual(quotaResetSchedule({ resetAt: RESET_NOW + 1 }, deadline, RESET_NOW), { kind: "reset", at: new Date(RESET_NOW + 1).toISOString() }, "one millisecond of wait still beats a hop");
+});
+
+test("a quota reset retry spends no failover hop", () => {
+  const reset = /** @type {const} */ ({ kind: "reset" });
+  const failover = /** @type {const} */ ({ kind: "failover" });
+  const parked = { routing: { currentOverride: { role: "worker", revision: 0, hop: 1 }, history: [{ role: "worker", revision: 0, hop: 1 }] } };
+  assert.equal(nextHop({ routing: null }, "worker", 0, failover), 1, "the first real edge is hop 1");
+  assert.equal(nextHop({ routing: null }, "worker", 0, reset), 0, "a reset retry off a fresh node stays at hop 0");
+  assert.equal(nextHop(parked, "worker", 0, reset), 1, "waiting again never advances the budget");
+  assert.equal(nextHop(parked, "worker", 0, failover), 2, "only an actual edge advances it");
+  // The regression the hop cap made possible: with two runtimes the cap is 2,
+  // so charging a reset retry would push the following real edge to 2 and get
+  // it rejected before the second runtime was ever tried.
+  assert.equal(nextHop({ routing: { currentOverride: { role: "worker", revision: 0, hop: nextHop({ routing: null }, "worker", 0, reset) } } }, "worker", 0, failover), 1);
+  assert.equal(nextHop({ routing: { history: [{ role: "worker", revision: 0, hop: 3 }, { role: "judge", revision: 0, hop: 9 }] } }, "worker", 0, failover), 4, "another role's hops are not this role's budget");
+  assert.equal(nextHop({ routing: { history: [{ role: "worker", revision: 0, hop: 3 }] } }, "worker", 1, failover), 1, "a new revision starts its budget over");
+});
+
+const NETWORK_NOW = Date.parse("2026-09-04T06:00:00.000Z");
+const NETWORK_DEADLINE = "2026-09-04T12:00:00.000Z";
+/** Fixed jitter draw: the classification under test, not the random number generator. */
+const halfJitter = () => 0.5;
+
+test("network backoff classifies a dropped connection but hands node-owned deadlines straight to failover", () => {
+  const options = { now: NETWORK_NOW, random: halfJitter, deadline: NETWORK_DEADLINE };
+  assert.deepEqual(
+    classifyTransition({ status: "failed", error: { code: "provider_error", message: "socket hang up" } }, options),
+    { kind: "reset", at: new Date(NETWORK_NOW + 750).toISOString(), reason: "network_backoff" },
+    "a CLI that reports only prose is still classified off its message",
+  );
+  assert.equal(classifyTransition({ error: { code: "ECONNRESET", message: "" } }, options).reason, "network_backoff", "an error class needs no message");
+  assert.equal(classifyTransition({ error: { code: "provider_error", message: "boom" } }, { ...options, exitCode: 28 }).reason, "network_backoff", "a timeout exit code is enough on its own");
+  assert.deepEqual(
+    classifyTransition({ error: { code: "provider_error", message: "deliberate failure" } }, { ...options, exitCode: 1 }),
+    { kind: "failover", reason: "provider" },
+    "a provider CLI exits 1 for everything, so exit 1 is evidence of nothing",
+  );
+  for (const error of [
+    { code: "wall_clock_timeout", message: "worker ran longer than 30s" },
+    { code: "progress_stalled", message: "allowed workspace scope made no progress" },
+    { code: "stall_timeout", message: "no provider output for 30s" },
+  ]) {
+    assert.equal(isTimeoutOrStall(error), true, `${error.code} is the node's own deadline`);
+    assert.equal(classifyTransition({ error }, options).reason, "provider", `${error.code} never buys a network wait`);
+  }
+  assert.equal(isTimeoutOrStall({ code: "ECONNRESET", message: "socket hang up" }), false);
+  assert.equal(
+    classifyTransition({ error: { code: "unexpected_write", message: "verification log mentions connection reset by peer" } }, options).reason,
+    "provider",
+    "a failure the run imposed on itself keeps its own settlement, whatever its message quotes",
+  );
+  assert.equal(
+    classifyTransition({ resetAt: "2026-09-04T07:00:00.000Z", error: { code: "ECONNRESET", message: "" } }, options).reason,
+    "quota_reset",
+    "an announced reset instant outranks a guessed wait",
+  );
+});
+
+test("network backoff windows grow exponentially, stay jittered, and cap at two minutes", () => {
+  assert.equal(backoffDelayMs(0, () => 0), 500);
+  assert.equal(backoffDelayMs(0, () => 1), 1_000);
+  assert.equal(backoffDelayMs(1, () => 0), 1_000);
+  assert.equal(backoffDelayMs(2, () => 1), 4_000);
+  assert.equal(backoffDelayMs(20, () => 1), NETWORK_BACKOFF_CAP_MS, "the cap holds however far the exponent runs");
+  assert.equal(backoffDelayMs(20, () => 0), NETWORK_BACKOFF_CAP_MS / 2);
+  // No wait may round to zero: a zero-length backoff parks the phase and
+  // re-invokes the same failing runtime in the same tick, forever.
+  for (let attempt = 0; attempt < 8; attempt += 1) assert.ok(backoffDelayMs(attempt, () => 0) > 0, `attempt ${attempt} waited nothing`);
+});
+
+test("network backoff spends three attempts on the warm runtime before it takes the failover edge", () => {
+  const envelope = { status: "failed", error: { code: "provider_error", message: "connection reset by peer" } };
+  const options = { now: NETWORK_NOW, random: halfJitter, deadline: NETWORK_DEADLINE };
+  /** @param {number} count @param {string} [errorCode] */
+  const parked = (count, errorCode = "network_backoff:provider_error") => ({
+    routing: {
+      history: Array.from({ length: count }, () => ({ role: "worker", revision: 0, runtime: "first", nextRuntime: "first", errorCode })),
+      currentOverride: null,
+    },
+  });
+  for (let spent = 0; spent < NETWORK_MAX_ATTEMPTS; spent += 1) {
+    const attempt = networkBackoffAttempts(parked(spent), "worker", 0);
+    assert.equal(attempt, spent, "the attempt budget is read back off the durable node");
+    assert.equal(classifyTransition(envelope, { ...options, attempt }).kind, "reset");
+  }
+  assert.deepEqual(classifyTransition(envelope, { ...options, attempt: NETWORK_MAX_ATTEMPTS }), { kind: "failover", reason: "network_backoff" });
+  assert.equal(networkBackoffAttempts(parked(3), "judge", 0), 0, "another role's waits are not this role's budget");
+  assert.equal(networkBackoffAttempts(parked(3), "worker", 1), 0, "a new revision starts its budget over");
+  assert.equal(networkBackoffAttempts(parked(3, "quota_exhausted"), "worker", 0), 0, "a quota wait is not a network wait");
+  assert.deepEqual(
+    classifyTransition(envelope, { ...options, deadline: new Date(NETWORK_NOW + 100).toISOString() }),
+    { kind: "failover", reason: "network_backoff" },
+    "a wait the node cannot outlive is not a recovery",
+  );
+  assert.equal(nextHop({ routing: null }, "worker", 0, classifyTransition(envelope, options)), 0, "staying on the warm runtime costs no hop");
+});
+
+test("an unspent repair keeps the worker result on its provider and a spent one takes the failover edge", () => {
+  assert.equal(isRepairable({ gate: { enabled: true, maxRevisions: 1 } }, { revisions: 0 }), true);
+  assert.equal(isRepairable({ gate: { enabled: true, maxRevisions: 1 } }, { revisions: 1 }), false);
+  assert.equal(isRepairable({ gate: { enabled: true, maxRevisions: 0 } }, { revisions: 0 }), false);
+  assert.equal(isRepairable({ gate: { enabled: true } }, { revisions: 0 }), true, "one repair by default");
+  assert.equal(isRepairable({ gate: { enabled: false, maxRevisions: 3 } }, { revisions: 0 }), false, "a gateless node has no repair to spend");
+});
+
+test("a transient network failure retries on the warm runtime before it spends a failover hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-network-backoff-"));
+  // The counter lives outside the workspace: a provider that writes into the
+  // contract cwd trips the unexpected-write gate before the network path runs.
+  const outside = mkdtempSync(join(tmpdir(), "runner-network-calls-"));
+  const calls = join(outside, "network-calls.txt");
+  const flaky = join(outside, "flaky-provider.mjs");
+  writeFileSync(flaky, `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+if (process.argv.includes("--version")) { console.log("flaky 1.0.0"); process.exit(0); }
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  appendFileSync(${JSON.stringify(calls)}, "call\\n");
+  const seen = readFileSync(${JSON.stringify(calls)}, "utf8").trim().split("\\n").length;
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "flaky" }));
+  if (seen === 1) {
+    console.log(JSON.stringify({ type: "turn.failed", error: { message: "socket hang up: connection reset by peer" } }));
+    process.exit(1);
+  }
+  const text = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+});
+`);
+  chmodSync(flaky, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "network-backoff-run",
+    pollIntervalMs: 10,
+    timeoutSec: 60,
+    runtimeRules: [],
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: {
+      primary: { driver: "codex", model: "primary", executable: flaky, costRank: 1 },
+      spare: { driver: "codex", model: "spare", executable: fakeCodex(directory, "pass"), costRank: 2 },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const state = nodeState(await runContract(path));
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["primary", "primary"], "the warm runtime gets the retry, not the spare");
+  const history = state.routing?.history ?? [];
+  assert.equal(history.length, 1);
+  assert.equal(history[0].status, "failed");
+  assert.equal(history[0].errorCode, "network_backoff:provider_error", "the wait is countable and the provider's own code stays visible");
+  assert.equal(history[0].nextRuntime, "primary");
+  assert.equal(history[0].hop, 0, "a network wait spends no failover hop");
+  const waited = history[0].backoffSec ?? 0;
+  assert.ok(waited > 0 && waited <= 1, `unexpected backoff ${waited}`);
+});
+
+test("a judge that lost its socket takes the network backoff, not its one judge_unavailable re-dispatch", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-network-backoff-"));
+  // Outside the workspace: a provider that writes into the contract cwd trips
+  // the unexpected-write gate before the network path ever runs.
+  const outside = mkdtempSync(join(tmpdir(), "runner-judge-network-calls-"));
+  const calls = join(outside, "judge-calls.txt");
+  const flaky = join(outside, "flaky-judge.mjs");
+  writeFileSync(flaky, `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+if (process.argv.includes("--version")) { console.log("flaky 1.0.0"); process.exit(0); }
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const prompt = input || process.argv.at(-1) || "";
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "flaky" }));
+  if (!prompt.startsWith("Review node")) {
+    const text = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+    return;
+  }
+  appendFileSync(${JSON.stringify(calls)}, "judge\\n");
+  const seen = readFileSync(${JSON.stringify(calls)}, "utf8").trim().split("\\n").length;
+  if (seen === 1) {
+    console.log(JSON.stringify({ type: "turn.failed", error: { message: "socket hang up: connection reset by peer" } }));
+    process.exit(1);
+  }
+  const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+});
+`);
+  chmodSync(flaky, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judge-network-backoff-run",
+    pollIntervalMs: 10,
+    timeoutSec: 60,
+    runtimeRules: [],
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: { primary: { driver: "codex", model: "primary", executable: flaky } },
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "quality", text: "the result is high quality", judgment: true }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const state = nodeState(await runContract(path));
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.judgeFailures ?? 0, 0, "a network wait spends none of the judge_unavailable budget");
+  const history = (state.routing?.history ?? []).filter((entry) => entry.role === "judge");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].errorCode, "network_backoff:provider_error");
+  assert.equal(history[0].nextRuntime, "primary", "the judge stays on the runtime the gate named");
+  assert.equal(history[0].hop, 0, "a network wait spends no failover hop");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(!outbox.some((event) => event.type === "run.attention"), "a recovered socket raises no attention");
+});
+
+test("undeclared quota exhaustion takes the synthesized failover edge to the cheapest runtime", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-synth-quota-failover-"));
+  const exhausted = fakeCodex(directory, "quota-429");
+  const cheap = fakeCodex(directory, "pass");
+  const path = writeContract(directory, fixture({
+    id: "synth-failover-run",
+    pollIntervalMs: 10,
+    timeoutSec: 5,
+    runtimeRules: [],
+    runtimeDefaults: { worker: "mid", judge: "mid" },
+    runtimes: {
+      mid: { driver: "codex", model: "mid", executable: exhausted, costRank: 2 },
+      dear: { driver: "codex", model: "dear", executable: exhausted, costRank: 9 },
+      cheap: { driver: "codex", model: "cheap", executable: cheap, costRank: 1 },
+    },
+    nodes: [{ id: "build", type: "backend", runtime: "mid", taskPacket: packet(), gate: false }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["mid", "cheap"]);
+  assert.equal(state.routing?.history?.[0]?.nextRuntime, "cheap");
+  assert.equal(state.routing?.history?.[0]?.ruleIndex, undefined, "a synthesized edge cites no declared rule");
 });
 
 test("quota exhaustion routes through the declared failover edge", async () => {

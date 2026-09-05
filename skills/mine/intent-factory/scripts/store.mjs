@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
+import { captureEntry, claimGenerationFence, discardEntry, leaseAdoption, restoreEntry } from "./lease-liveness.mjs";
 
 export const LEASE_FILE = "controller-lease.json";
 export const SUPERVISOR_LEASE_FILE = "supervisor-lease.json";
@@ -22,11 +23,16 @@ export const BOOTSTRAP_FILE = "bootstrap.json";
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 const FILE_LOCK_TTL_MS = 5_000;
 const FILE_LOCK_ATTEMPTS = 120;
+// A takeover only writes while its lock still has this much life left. This is
+// an early exit for an obviously stale contender, not the serialization point:
+// the generation fence in lease-liveness.mjs is what admits a single writer.
+const LOCK_WRITE_MARGIN_MS = 1_000;
+const LEASE_TAKEOVER_ATTEMPTS = 8;
 const JSONL_RECOVERY_TAIL_BYTES = 64 * 1024;
 
 /** @typedef {{schemaVersion: number, contractVersion: string, holderId: string, generation: number, pid: number, processStartToken: string|null, acquiredAt: string, renewedAt: string, expiresAt: string, invalid?: never}} LeaseRecord */
 /** @typedef {LeaseRecord|null|{invalid: true, path: string}} ReadLeaseResult */
-/** @typedef {{holderId?: string, pid?: number, ttlMs?: number, contractVersion?: string, processStartToken?: string|null, now?: number, fileName?: string, onRenew?: (lease: LeaseRecord) => void}} LeaseOptions */
+/** @typedef {{holderId?: string, pid?: number, ttlMs?: number, contractVersion?: string, processStartToken?: string|null, now?: number, fileName?: string, requireHolderDeath?: boolean, livenessProbes?: import("./lease-liveness.mjs").LivenessProbes, onRenew?: (lease: LeaseRecord) => void}} LeaseOptions */
 
 export class LeaseBusyError extends Error {
   /**
@@ -290,7 +296,7 @@ export function leaseHealthy(lease, now = Date.now()) {
  * @returns {ReturnType<typeof createLeaseHandle>}
  */
 export function acquireControllerLease(runDir, options = {}) {
-  return acquireLease(runDir, { ...options, fileName: LEASE_FILE });
+  return acquireLease(runDir, { requireHolderDeath: true, ...options, fileName: LEASE_FILE });
 }
 
 /**
@@ -323,7 +329,8 @@ export function acquireLease(runDir, options) {
   }
 
   const now = options.now ?? Date.now();
-  for (;;) {
+  let fenced = false;
+  for (let attempt = 0; attempt < LEASE_TAKEOVER_ATTEMPTS; attempt += 1) {
     const lock = acquireFileMutationLock(runDir, /** @type {string} */ (options.fileName));
     try {
       const previous = readLeaseFile(path);
@@ -335,27 +342,148 @@ export function acquireLease(runDir, options) {
             previous,
           );
         }
-        unlinkLease(path, runDir);
+        // An expired lease is not an abandoned one. Taking it over while its
+        // controller still runs forks the run, so adoption needs proof of death
+        // (pid gone, or its process start token no longer matches).
+        if (options.requireHolderDeath) {
+          const verdict = leaseAdoption(previous, { now, probes: options.livenessProbes });
+          if (!verdict.adopt) {
+            throw new LeaseBusyError(
+              `run controller lease held by ${previous.holderId} expired at ${previous.expiresAt} but its controller pid ${previous.pid} is alive`,
+              previous,
+            );
+          }
+        }
       }
-      const acquiredAt = new Date(now).toISOString();
-      /** @type {LeaseRecord} */
-      const lease = {
-        schemaVersion: 1,
-        contractVersion,
-        holderId,
+      // Take the exclusive right to install this generation before anything
+      // destructive happens. The mutation lock expires, so a contender
+      // descheduled past its TTL can wake up holding decisions made from a
+      // lease that has since been replaced; the fence is what stops it from
+      // acting on them, because the rival that would replace the lease cannot
+      // get past this claim while the claim's owner lives.
+      const fence = claimGenerationFence(
+        path,
+        { holderId, pid, processStartToken: options.processStartToken ?? null },
         generation,
-        pid,
-        processStartToken: options.processStartToken ?? null,
-        acquiredAt,
-        renewedAt: acquiredAt,
-        expiresAt: new Date(now + ttlMs).toISOString(),
-      };
-      writeLeaseExclusive(path, lease, runDir);
-      return createLeaseHandle(runDir, lease, ttlMs, { ...options, fileName: /** @type {string} */ (options.fileName) });
+        { probes: options.livenessProbes },
+      );
+      if (!fence.claimed) {
+        fenced = true;
+        continue;
+      }
+      try {
+        // Cheap early exit for a contender that already lost: the lock must
+        // still be ours with room to finish, and the file must still hold the
+        // record the takeover was decided from.
+        if (!lock.heldWithMargin(LOCK_WRITE_MARGIN_MS) || !sameLeaseFile(readLeaseFile(path), previous)) continue;
+        const acquiredAt = new Date(now).toISOString();
+        /** @type {LeaseRecord} */
+        const lease = {
+          schemaVersion: 1,
+          contractVersion,
+          holderId,
+          generation,
+          pid,
+          processStartToken: options.processStartToken ?? null,
+          acquiredAt,
+          renewedAt: acquiredAt,
+          expiresAt: new Date(now + ttlMs).toISOString(),
+        };
+        if (!installFencedLease(path, lease, runDir, fence)) continue;
+        return createLeaseHandle(runDir, lease, ttlMs, { ...options, fileName: /** @type {string} */ (options.fileName) });
+      } finally {
+        fence.release();
+      }
     } finally {
       lock.release();
     }
   }
+  if (fenced) throw new LeaseBusyError(`lease takeover for ${options.fileName} was fenced by another contender`, readLeaseFile(path));
+  throw new LeaseBusyError(`contended lease takeover for ${options.fileName} did not settle`, readLeaseFile(path));
+}
+
+/**
+ * Take the lease file out of the way and rule on what came out of it.
+ *
+ * This is the takeover's compare-and-swap, and it is split in two on purpose:
+ * every step that could destroy another controller's lease is either atomic or
+ * reversible, so a contender may be descheduled anywhere in the sequence and
+ * still be unable to do damage.
+ *
+ * The capture is one rename. It does not read the file and then remove it —
+ * there is no gap in which a newer winner could slip under the name and be
+ * deleted by a decision made about its predecessor. What the rename yields is
+ * the occupant itself, and the generation carried in that occupant is the
+ * fencing token: a token at or beyond the one being installed means this
+ * contender lost while it was away, and the occupant is put straight back.
+ *
+ * The install is one conditional link. It can only create the name, never
+ * replace it, so a contender that stalls between the ruling and the write
+ * finds the name taken and fails instead of overwriting the taker. The
+ * generation claim narrows who reaches this code; these two steps are what
+ * make exactly one of them succeed.
+ * @param {string} path
+ * @param {number} generation the generation this contender intends to install
+ * @param {string} runDir
+ * @returns {{authorized: boolean, occupant: ReadLeaseResult, install: (lease: LeaseRecord) => boolean}}
+ */
+export function captureLeaseSlot(path, generation, runDir) {
+  const aside = captureEntry(path);
+  fsyncDirectory(runDir);
+  const occupant = aside === null ? null : readLeaseFile(aside);
+  const held = occupant !== null && !occupant.invalid ? occupant : null;
+  const superseded = held === null || !Number.isInteger(held.generation) || held.generation < generation;
+  if (!superseded) {
+    restoreEntry(/** @type {string} */ (aside), path);
+    fsyncDirectory(runDir);
+    return { authorized: false, occupant, install: () => false };
+  }
+  return {
+    authorized: true,
+    occupant,
+    install(lease) {
+      let installed = true;
+      try {
+        writeLeaseExclusive(path, lease, runDir);
+      } catch (error) {
+        // The link only fails because a lease already holds the name, and the
+        // holder of that name won: this contender installs nothing.
+        if (errorCode(error) !== "EEXIST") throw error;
+        installed = false;
+      }
+      // The captured predecessor is superseded either way — by this lease or by
+      // whichever one took the name first.
+      if (aside !== null) discardEntry(aside);
+      fsyncDirectory(runDir);
+      return installed;
+    },
+  };
+}
+
+/**
+ * @param {string} path
+ * @param {LeaseRecord} lease
+ * @param {string} runDir
+ * @param {{owned: () => boolean}|null} fence
+ * @returns {boolean} false when another contender holds the lease this one meant to install
+ */
+export function installFencedLease(path, lease, runDir, fence = null) {
+  // A contender that no longer holds its generation claim has already lost the
+  // takeover; refusing here keeps it from even capturing the file.
+  if (fence && !fence.owned()) return false;
+  return captureLeaseSlot(path, lease.generation, runDir).install(lease);
+}
+
+/**
+ * Compare-and-swap witness: the lease file must still hold exactly the record a
+ * takeover decision was made from. A renewal, a takeover or a release by anyone
+ * else all change these bytes.
+ * @param {ReadLeaseResult} actual
+ * @param {ReadLeaseResult} expected
+ * @returns {boolean}
+ */
+function sameLeaseFile(actual, expected) {
+  return JSON.stringify(actual ?? null) === JSON.stringify(expected ?? null);
 }
 
 /**
@@ -428,8 +556,16 @@ function createLeaseHandle(runDir, initial, ttlMs, options) {
     const lock = acquireFileMutationLock(runDir, /** @type {string} */ (options.fileName));
     try {
       const path = join(runDir, /** @type {string} */ (options.fileName));
-      const actual = readLeaseFile(path);
-      if (sameLease(actual, current)) unlinkLease(path, runDir);
+      // Capture before deciding, for the same reason a takeover does: a release
+      // that read the file, stalled, and then unlinked would take a successor's
+      // lease with it. What is captured is either ours to drop or theirs to
+      // keep.
+      const aside = captureEntry(path);
+      if (aside !== null) {
+        if (sameLease(readLeaseFile(aside), current)) discardEntry(aside);
+        else restoreEntry(aside, path);
+        fsyncDirectory(runDir);
+      }
     } finally {
       lock.release();
       released = true;
@@ -466,7 +602,7 @@ function sameLease(left, right) {
 /**
  * @param {string} directory
  * @param {string} fileName
- * @returns {{release: () => void}}
+ * @returns {{holderId: string, heldWithMargin: (marginMs: number) => boolean, release: () => void}}
  */
 export function acquireFileMutationLock(directory, fileName) {
   mkdirSync(directory, { recursive: true });
@@ -487,6 +623,25 @@ export function acquireFileMutationLock(directory, fileName) {
       }
       fsyncDirectory(directory);
       return {
+        holderId: holder.holderId,
+        /**
+         * The lock has a TTL, so a contender descheduled inside its critical
+         * section can find the lock reclaimed and reissued to somebody else.
+         * A destructive write must therefore confirm it still owns the lock and
+         * still has time to finish before it touches the file.
+         * @param {number} marginMs
+         * @returns {boolean}
+         */
+        heldWithMargin(marginMs) {
+          try {
+            const current = readJson(path);
+            return current.holderId === holder.holderId
+              && Date.parse(/** @type {string} */ (current.expiresAt)) - Date.now() >= marginMs;
+          } catch (error) {
+            if (errorCode(error) === "ENOENT" || error instanceof SyntaxError) return false;
+            throw error;
+          }
+        },
         release() {
           try {
             const current = readJson(path);
@@ -549,19 +704,6 @@ function writeLeaseExclusive(path, lease, runDir) {
     try { unlinkSync(temporary); } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
     }
-  }
-}
-
-/**
- * @param {string} path
- * @param {string} runDir
- */
-function unlinkLease(path, runDir) {
-  try {
-    unlinkSync(path);
-    fsyncDirectory(runDir);
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
   }
 }
 
