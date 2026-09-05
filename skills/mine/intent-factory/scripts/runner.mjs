@@ -136,6 +136,7 @@ import {
 } from "./outbox.mjs";
 import { projectEvent } from "./events.mjs";
 import { deriveGovernanceMetrics, LIVENESS_JOURNAL_TYPE, recordLiveness, writeGovernanceMetrics } from "./heartbeat.mjs";
+import { METRICS_OPTIONS, renderCampaignMetrics, weightedInput } from "./metrics.mjs";
 import {
   canonicalBudgetHash,
   deriveBudgetDecision,
@@ -4099,18 +4100,6 @@ function cacheReadWeightOf(contract) {
   return contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
 }
 
-/**
- * Weighted input for a persisted node, comparable with the live meter and the
- * campaign cap: cache reads count at the campaign `cacheReadWeight`, not raw.
- *
- * @param {Usage|undefined|null} usage
- * @param {number} cacheReadWeight
- * @returns {number}
- */
-function weightedInput(usage, cacheReadWeight) {
-  return Math.round(((usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0) * cacheReadWeight) * 1000) / 1000;
-}
-
 /** @param {ValidatedNode} node */
 function budgetIdentity(node) {
   return {
@@ -6675,6 +6664,7 @@ const COMMAND_OPTIONS = {
   findings: {},
   handoff: { node: { type: "string" }, runtime: { type: "string" }, reason: { type: "string" } },
   doctor: { cwd: { type: "string" }, json: { type: "boolean" } },
+  metrics: METRICS_OPTIONS,
 };
 
 /**
@@ -6830,6 +6820,7 @@ async function main(argv) {
     process.stdout.write(values.json === true ? renderReportJson(resolve(target)) : renderReport(resolve(target)));
     return;
   }
+  if (command === "metrics") { process.stdout.write(renderCampaignMetrics(target, values)); return; }
   if (command === "findings") { process.stdout.write(renderFindings(resolve(target))); return; }
   if (command === "handoff") {
     const ok = await handoffCommand(target, values);
@@ -6974,6 +6965,7 @@ function usage() {
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "handoff <run-dir> --node <id> --runtime <runtime-id> [--reason <text>] | " +
     "doctor [<contract.json>] [--cwd <dir>] [--json] | contract <prune|validate> ... | " +
+    "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|attach|note|resolve|close|show|list> ...\n",
   );
   process.exitCode = 2;

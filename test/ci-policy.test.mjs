@@ -69,11 +69,12 @@ const EMPTY_CATCH_CEILING = 32;
 // ratchet — ceilings only decrease (spec section 9.1)
 /** @type {Record<string, number>} */
 const LINE_CEILINGS = {
-  "runner.mjs": 7006,
+  "runner.mjs": 6998,
   "contract.mjs": 1600,
   "campaign-autonomy.mjs": 1320,
   "campaign.mjs": 1300,
   "heartbeat.mjs": 650,
+  "metrics.mjs": 578,
   "drivers/exec-jsonl.mjs": 1250,
 };
 const DEFAULT_LINE_CEILING = 900;
