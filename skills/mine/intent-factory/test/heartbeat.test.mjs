@@ -16,8 +16,10 @@ import {
   validateLivenessFact,
   writeGovernanceMetrics,
 } from "../scripts/heartbeat.mjs";
-import { PUSH_EVENT_TYPES, loadNotifyAdapters, pushNotification, routeNotification } from "../scripts/notify/index.mjs";
+import { PUSH_EVENT_TYPES, loadNotifyAdapters, pushNotification, routeNotification, routeWake, wakeSession } from "../scripts/notify/index.mjs";
+import { SESSION_WAKE_ENV, WAKE_MAX_BYTES, createClaudeSessionAdapter } from "../scripts/notify/claude-session.mjs";
 import { createMacosNotifier } from "../scripts/notify/os-macos.mjs";
+import { projectEvent } from "../scripts/events.mjs";
 
 /** @typedef {import("../scripts/heartbeat.mjs").LivenessFact} LivenessFact */
 
@@ -396,4 +398,164 @@ test("notify no progress push never routes or delivers progress events", async (
     delivered: [],
     failed: [{ id: "rejects", error: "kaput" }],
   });
+});
+
+/** @typedef {import("../scripts/notify/index.mjs").NotificationEvent} NotificationEvent */
+
+/**
+ * A session adapter that counts wakes and records every read of its canWake
+ * capability, so a test can prove the capability is never consulted.
+ *
+ * @returns {{adapter: import("../scripts/notify/index.mjs").NotifyAdapter, woken: NotificationEvent[], canWakeReads: () => number}}
+ */
+function countingSessionAdapter() {
+  /** @type {NotificationEvent[]} */
+  const woken = [];
+  let reads = 0;
+  return {
+    adapter: {
+      id: "session",
+      capabilities: {
+        canPush: false,
+        get canWake() {
+          reads += 1;
+          return true;
+        },
+        canRenderAmbient: false,
+      },
+      async deliver() {
+        return { ok: false, error: "claude-session cannot push" };
+      },
+      async wake(event) {
+        woken.push(event);
+        return { ok: true };
+      },
+    },
+    woken,
+    canWakeReads: () => reads,
+  };
+}
+
+/** @param {number} index @returns {string} */
+const wakeAt = (index) => new Date(Date.parse(EMISSION_AT) + index * 60_000).toISOString();
+
+/** @param {number} index */
+const progressEvent = (index) =>
+  projectEvent({
+    type: "campaign.progress",
+    campaignId: "wake",
+    runId: "run-a",
+    nodeId: `node-${index}`,
+    at: wakeAt(index),
+    key: `progress-${index}`,
+    counters: { done: index, total: 12 },
+  });
+
+const blockingEvent = () =>
+  projectEvent({
+    type: "run.attention",
+    campaignId: "wake",
+    runId: "run-a",
+    nodeId: "node-blocked",
+    at: wakeAt(20),
+    key: "blocked",
+    identifiers: { errorCode: "context_missing" },
+  });
+
+const exhaustedEvent = () =>
+  projectEvent({
+    type: "run.attention",
+    campaignId: "wake",
+    runId: "run-a",
+    nodeId: "node-exhausted",
+    at: wakeAt(21),
+    key: "exhausted",
+    remainingEdges: 0,
+    identifiers: { errorCode: "provider_exhausted" },
+  });
+
+const completedEvent = () =>
+  projectEvent({ type: "campaign.completed", campaignId: "wake", at: wakeAt(22), key: "done", counters: { done: 12, total: 12 } });
+
+test("notify wake bridge performs zero wakes for a campaign whose events are all progress", async () => {
+  const { adapter, woken, canWakeReads } = countingSessionAdapter();
+  for (let index = 0; index < 12; index += 1) {
+    const event = progressEvent(index);
+    assert.equal(event.requiresUser, false, "the projector marks progress as never requiring the user");
+    assert.deepEqual(routeWake(event, [adapter]), [], "progress never routes a wake");
+    assert.deepEqual(await wakeSession(event, [adapter]), { woke: [], failed: [] });
+  }
+  assert.deepEqual(woken, [], "zero wakes for a campaign of only progress");
+  assert.equal(canWakeReads(), 0, "canWake is not consulted at all for a progress event");
+});
+
+test("notify wake bridge wakes exactly once for each requiresUser class", async () => {
+  for (const build of [blockingEvent, exhaustedEvent, completedEvent]) {
+    const { adapter, woken, canWakeReads } = countingSessionAdapter();
+    const event = build();
+    assert.equal(event.requiresUser, true, `${event.type} is an actionable class`);
+    assert.deepEqual(routeWake(event, [adapter]).map((entry) => entry.id), ["session"]);
+    assert.deepEqual(await wakeSession(event, [adapter]), { woke: ["session"], failed: [] });
+    assert.equal(woken.length, 1, "exactly one wake for one actionable event");
+    assert.equal(woken[0], event, "the projected record is handed to the session unchanged");
+    assert.ok(canWakeReads() >= 1, "canWake is consulted for a requiresUser event");
+  }
+});
+
+test("notify wake bridge gives a healthy campaign two wakes, never one per progress transition", async () => {
+  const { adapter, woken } = countingSessionAdapter();
+  /** @type {NotificationEvent[]} */
+  const stream = [];
+  for (let index = 0; index < 12; index += 1) stream.push(progressEvent(index));
+  stream.splice(6, 0, blockingEvent());
+  stream.push(completedEvent());
+  for (const event of stream) await wakeSession(event, [adapter]);
+  assert.equal(stream.length, 14, "a healthy campaign has many more transitions than wakes");
+  assert.equal(woken.length, 2, "two wakes: the blocking question and the completion");
+  assert.ok(woken.length <= 3, "a healthy campaign wakes two or three times in total (ADR-0019)");
+  assert.deepEqual(woken.map((event) => event.next), ["answer the blocking question", "campaign closed"]);
+});
+
+test("notify claude session adapter declares canWake, refuses to push, and writes one bounded wake record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "session-wake-"));
+  const wakeFile = join(directory, "wake.jsonl");
+  const adapter = createClaudeSessionAdapter({ wakeFile, at: () => EMISSION_AT });
+  assert.equal(adapter.id, "claude-session");
+  assert.deepEqual(adapter.capabilities, { canPush: false, canWake: true, canRenderAmbient: false });
+  assert.deepEqual(routeNotification({ type: "campaign.completed", requiresUser: true }, [adapter]), [], "canPush false keeps it off every push route");
+  assert.deepEqual(await pushNotification({ type: "campaign.completed", requiresUser: true }, [adapter]), { delivered: [], failed: [] });
+
+  const completed = completedEvent();
+  assert.deepEqual(await wakeSession(completed, [adapter]), { woke: ["claude-session"], failed: [] });
+  const lines = readFileSync(wakeFile, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1, "one wake writes exactly one record");
+  const record = JSON.parse(lines[0]);
+  assert.equal(record.requiresUser, true);
+  assert.equal(record.eventId, completed.eventId);
+  assert.equal(record.type, "campaign.completed");
+  assert.equal(record.next, "campaign closed");
+  assert.equal(record.wokeAt, EMISSION_AT);
+
+  const wide = await adapter.wake?.({ type: "campaign.completed", campaignId: "wake", requiresUser: true, summary: "😀".repeat(2000), next: "campaign closed" });
+  assert.deepEqual(wide, { ok: true });
+  for (const line of readFileSync(wakeFile, "utf8").trim().split("\n")) {
+    assert.ok(Buffer.byteLength(line, "utf8") <= WAKE_MAX_BYTES, `wake record ${Buffer.byteLength(line, "utf8")} bytes exceeds ${WAKE_MAX_BYTES}`);
+  }
+
+  const progress = progressEvent(1);
+  assert.deepEqual(await adapter.wake?.(progress), { ok: false, error: "wake requires a requiresUser event" });
+  assert.equal(readFileSync(wakeFile, "utf8").trim().split("\n").length, 2, "a refused wake writes nothing");
+
+  const unbound = createClaudeSessionAdapter({ wakeFile: "" });
+  assert.deepEqual(await unbound.wake?.(completed), { ok: false, error: "no session wake channel bound" });
+  const failing = createClaudeSessionAdapter({
+    wake() {
+      throw new Error("session gone");
+    },
+  });
+  assert.deepEqual(await wakeSession(completed, [failing]), { woke: [], failed: [{ id: "claude-session", error: "session gone" }] });
+
+  assert.equal(SESSION_WAKE_ENV, "INTENT_FACTORY_SESSION_WAKE");
+  assert.deepEqual(loadNotifyAdapters({ platform: "linux", wakeFile }).map((entry) => entry.id), ["claude-session"]);
+  assert.deepEqual(loadNotifyAdapters({ platform: "linux", wakeFile: "" }), [], "no bound channel means no session adapter");
 });
