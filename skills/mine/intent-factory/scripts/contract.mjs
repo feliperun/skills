@@ -9,6 +9,7 @@ import { validateWorkerResult } from "./worker-result.mjs";
 import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 import { validateBudgetDecision, validateBudgetProfile, validateBudgetState } from "./budget.mjs";
 import { validateDefinitionOfDone } from "./definition-of-done.mjs";
+import { validateFinalVerification, validateVerificationSnapshot } from "./final-verification.mjs";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
@@ -21,14 +22,14 @@ export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index
 const CONTRACT_FIELDS = new Set([
   "schemaVersion", "contractVersion", "id", "campaignId", "goal", "cwd", "sourceIdentity",
   "maxParallel", "pollIntervalMs", "stallTimeoutSec", "timeoutSec", "maxInputTokens", "maxCostUsd", "usagePolicy",
-  "runtimeDefaults", "runtimes", "runtimeRules", "nodes", "warnings",
+  "runtimeDefaults", "runtimes", "runtimeRules", "nodes", "warnings", "finalVerification",
 ]);
 const DEFAULTS_FIELDS = new Set(["worker", "judge"]);
 const RULE_FIELDS = new Set(["match", "runtime", "backoffSec"]);
 const NODE_FIELDS = new Set([
   "id", "type", "phase", "runtime", "dependsOn", "taskPacket", "taskPacketFile", "prompt", "promptFile",
   "definitionOfDone", "gate", "timeoutSec", "maxInputTokens", "maxCostUsd", "progressPolicy",
-  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy", "budgetProfile",
+  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy", "budgetProfile", "targetedFix",
 ]);
 const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
@@ -73,9 +74,9 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{graceSec: number, intervalSec: number, maxDryHeartbeats: number}} ProgressPolicy */
 /** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
-/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
+/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never", targetedFix?: boolean}} ValidatedNode */
 
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, warnings: string[]}} ValidatedContract */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
 /** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
@@ -173,6 +174,7 @@ export function validateContract(raw, contractPath, options = {}) {
     ids.add(node.id);
     requireString(node.type, `nodes[${index}].type`);
     boundedString(node.phase, `nodes[${index}].phase`, 128);
+    if (node.targetedFix !== undefined && typeof node.targetedFix !== "boolean") throw new TypeError(`nodes[${index}].targetedFix must be a boolean`);
     if (node.runtime !== undefined) requireRuntime(runtimes, node.runtime, `nodes[${index}].runtime`);
     const dependsOn = node.dependsOn ?? [];
     if (!Array.isArray(dependsOn) || dependsOn.some((id) => typeof id !== "string")) {
@@ -251,7 +253,7 @@ export function validateContract(raw, contractPath, options = {}) {
   assertPhaseOrdering(nodes);
 
   const warnings = nodes.flatMap((node, index) => [...commandCoverageWarnings(node, index), ...unsnapshottedWriteWarnings(node, index, cwd)]);
-  if (nodes.length === 1) {
+  if (nodes.length === 1 && nodes[0].targetedFix !== true) {
     warnings.push("single-node contract: a plan step arrives as one batched multi-node DAG with dependsOn; single nodes are only for targeted fix nodes after gate exhaustion");
   }
   return /** @type {ValidatedContract} */ ({
@@ -273,6 +275,7 @@ export function validateContract(raw, contractPath, options = {}) {
     // (workers burned 1.2M+ input tokens unbounded).
     maxInputTokens: positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
     usagePolicy,
+    finalVerification: validateFinalVerification(raw.finalVerification, "contract.finalVerification"),
     maxCostUsd: raw.maxCostUsd === undefined
       ? undefined
       : positiveNumber(raw.maxCostUsd, "contract.maxCostUsd"),
@@ -1106,55 +1109,6 @@ function validateSnapshotBinding(value, node) {
   if (value.packetHash !== node.packetHash) throw new TypeError(`node snapshot.packetHash does not match contract node ${node.id}`);
   if (canonicalJson(value.sourceIdentity) !== canonicalJson(node.sourceIdentity)) {
     throw new TypeError(`node snapshot.sourceIdentity does not match contract node ${node.id}`);
-  }
-}
-
-/**
- * @param {unknown} value
- */
-function validateVerificationSnapshot(value) {
-  assertObject(value, "node snapshot.verification");
-  if (typeof value.passed !== "boolean" || !Array.isArray(value.commands) || value.commands.length > 32) {
-    throw new TypeError("node snapshot.verification is invalid");
-  }
-  if (value.completed !== undefined && typeof value.completed !== "boolean") throw new TypeError("node snapshot.verification.completed is invalid");
-  if (value.attempts !== undefined) {
-    if (!Array.isArray(value.attempts) || value.attempts.length > 16) throw new TypeError("node snapshot.verification.attempts is invalid");
-    const attempts = /** @type {unknown[]} */ (value.attempts);
-    for (const [index, attempt] of attempts.entries()) validateVerificationAttempt(attempt, `node snapshot.verification.attempts[${index}]`);
-  }
-  if (value.error !== undefined && (typeof value.error !== "string" || Buffer.byteLength(value.error, "utf8") > 4096)) {
-    throw new TypeError("node snapshot.verification.error is invalid");
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function validateVerificationAttempt(value, label) {
-  assertObject(value, label);
-  rejectUnknown(value, new Set([
-    "invocationId", "commandIndex", "attempt", "pid", "processStartToken", "processGroupId",
-    "startedAt", "deadlineAt", "status", "completedAt", "result",
-  ]), label);
-  requireString(value.invocationId, `${label}.invocationId`);
-  nonNegativeInteger(value.commandIndex, `${label}.commandIndex`);
-  positiveInteger(value.attempt, `${label}.attempt`);
-  if (value.pid !== null) requireInteger(value.pid, `${label}.pid`);
-  if (value.processGroupId !== null) requireInteger(value.processGroupId, `${label}.processGroupId`);
-  if (value.processStartToken !== null) requireString(value.processStartToken, `${label}.processStartToken`);
-  requireTimestamp(value.startedAt, `${label}.startedAt`);
-  requireTimestamp(value.deadlineAt, `${label}.deadlineAt`);
-  if (!["active", "closed", "failed", "crashed", "canceled"].includes(/** @type {string} */ (value.status))) throw new TypeError(`${label}.status is invalid`);
-  if (value.completedAt !== null) requireTimestamp(value.completedAt, `${label}.completedAt`);
-  if (value.result !== null) {
-    assertObject(value.result, `${label}.result`);
-    const result = /** @type {JsonObject} */ (value.result);
-    for (const key of ["stdout", "stderr", "error"]) {
-      if (result[key] !== null && result[key] !== undefined && (typeof result[key] !== "string" || Buffer.byteLength(result[key], "utf8") > 2048)) throw new TypeError(`${label}.result.${key} is invalid`);
-    }
-    if (typeof result.passed !== "boolean") throw new TypeError(`${label}.result.passed is invalid`);
   }
 }
 

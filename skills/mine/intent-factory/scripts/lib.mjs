@@ -99,15 +99,12 @@ export function parseJudge(result) {
 /**
  * @param {JudgeNode} node
  * @param {unknown} workerResult
- * @param {{diff?: unknown[], verification?: unknown}} context
+ * @param {{diff?: unknown[], verification?: unknown, deterministic?: unknown}} context
  * @returns {string}
  */
 export function judgePrompt(node, workerResult, context = {}) {
   const criteria = node.definitionOfDone.length
-    ? node.definitionOfDone.map((item) => {
-        const evidence = item.proof === undefined ? "(judgment)" : `(proof: ${item.proof.kind} ${item.proof.ref})`;
-        return `- [${item.id}] ${item.text} ${evidence}`;
-      }).join("\n")
+    ? judgeDoDChecklist(node.definitionOfDone, context.deterministic)
     : "- The requested work is complete, correct, tested, and limited to scope.";
   const taskInstructions = node.taskPacket.instructions.length
     ? node.taskPacket.instructions.map((item, index) => `${index + 1}. ${item}`).join("\n")
@@ -138,8 +135,43 @@ export function judgePrompt(node, workerResult, context = {}) {
     "Return only the JSON object required by the output schema. Evidence must be concrete. " +
     "Use verdict pass only when findings is empty and maxSeverity is none. " +
     "Use verdict fail whenever findings is non-empty, including advisory findings below failOn. " +
-    "Use pass only when every Definition of Done item is satisfied. " +
-    "Assess every Definition of Done item by its id and cite the id you are addressing in each finding.";
+    (node.definitionOfDone.length
+      ? "Arbitrate only the judgment items; deterministic items are already proven by the controller and must not be re-arbitrated. " +
+        "Use pass only when every judgment item is satisfied. Every finding must cite the id of the judgment item it addresses; a fail verdict whose findings cite no id is a protocol failure."
+      : "Use pass only when every Definition of Done item is satisfied. " +
+        "Assess every Definition of Done item by its id and cite the id you are addressing in each finding.");
+}
+
+/**
+ * The Definition of Done checklist for the judge prompt: judgment items the
+ * judge must arbitrate, plus each deterministic item with the controller-run
+ * proof result when one is attached.
+ *
+ * @param {import("./definition-of-done.mjs").DefinitionOfDoneItem[]} items
+ * @param {unknown} deterministic
+ * @returns {string}
+ */
+function judgeDoDChecklist(items, deterministic) {
+  const results = Array.isArray(deterministic)
+    ? /** @type {Array<{id: string, pass: boolean, detail: string}>} */ (deterministic)
+    : null;
+  const parts = [];
+  const judgmentItems = items.filter((item) => item.judgment === true);
+  parts.push(judgmentItems.length
+    ? `Judgment items — arbitrate only these:\n${judgmentItems.map((item) => `- [${item.id}] ${item.text} (judgment)`).join("\n")}`
+    : "No judgment items require arbitration.");
+  const proofItems = items.filter((item) => item.proof !== undefined);
+  if (proofItems.length) {
+    parts.push(`Deterministic items — already proven by the controller; do not re-arbitrate them:\n${proofItems.map((item) => {
+      const proof = /** @type {import("./definition-of-done.mjs").DefinitionOfDoneProof} */ (item.proof);
+      const result = results?.find((entry) => entry.id === item.id);
+      const outcome = result === undefined
+        ? "controller proof recorded"
+        : result.pass ? "PASS" : `FAIL — ${result.detail}`;
+      return `- [${item.id}] ${outcome} — ${item.text} (proof: ${proof.kind} ${proof.ref})`;
+    }).join("\n")}`);
+  }
+  return parts.join("\n\n");
 }
 
 /**

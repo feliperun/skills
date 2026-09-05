@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -18,6 +18,8 @@ import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import { deriveBudgetDecision } from "./budget.mjs";
+import { buildCapsule } from "./capsule.mjs";
+import { pruneRun } from "./contract-prune.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
@@ -206,7 +208,7 @@ if (process.argv.includes("--version")) {
       appendFileSync(${JSON.stringify(judgeCounter)}, "x\\n");
       const run = readFileSync(${JSON.stringify(judgeCounter)}, "utf8").trim().split("\\n").length;
       const text = run === 1
-        ? JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "critical defect", findings: [{ severity: "critical", description: "broken", evidence: "test failed" }] })
+        ? JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "critical defect", findings: [{ severity: "critical", description: "broken [works]", evidence: "test failed" }] })
         : JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
       console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
       console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 1 } }));
@@ -231,6 +233,158 @@ async function withResultFileCodex(directory, mode, path) {
   process.env.INTENT_FACTORY_CODEX_BIN = resultFileCodex(directory, mode);
   try {
     return await runContract(path);
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/**
+ * A codex-mode provider whose judge always rejects the judgment item it is
+ * asked to arbitrate with a cited critical finding, so the rejection is a
+ * legitimate gate revision rather than an uncited protocol failure.
+ *
+ * @param {string} directory
+ * @returns {string}
+ */
+function citedGateCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-cited-gate-")), "cited-gate.mjs");
+  const workerCounter = join(directory, ".runs", "cited-gate-workers");
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    if (!prompt.startsWith("Review node")) {
+      const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+      appendFileSync(${JSON.stringify(workerCounter)}, "x\\n");
+      const run = readFileSync(${JSON.stringify(workerCounter)}, "utf8").trim().split("\\n").length;
+      const result = JSON.stringify({ status: "done", summary: \`worker attempt \${run}\`, changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+      if (resultPath) writeFileSync(resultPath, result);
+      console.log(JSON.stringify({ type: "thread.started", thread_id: "cited-gate-thread" }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+      return;
+    }
+    const text = JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "judgment item [works] is not satisfied", findings: [{ severity: "critical", description: "item [works] is not satisfied", evidence: "quality is below the bar for works" }] });
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "cited-gate-thread" }));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 1 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
+async function withCitedGateCodex(directory, fn) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = citedGateCodex(directory);
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/**
+ * A codex-mode provider whose judge returns a cited minor advisory verdict
+ * that settles below failOn critical, with the same usage shape as the
+ * generic fake codex so token-total assertions keep holding under the
+ * conditional judge (uncited fail verdicts are now protocol failures).
+ *
+ * @param {string} directory
+ * @returns {string}
+ */
+function advisoryGateCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-advisory-gate-")), "advisory-gate.mjs");
+  writeFileSync(executable, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const judge = prompt.startsWith("Review node");
+    const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+    const text = judge
+      ? JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "minor advisory", findings: [{ severity: "minor", description: "minor advisory on [works]", evidence: "advisory" }] })
+      : JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (!judge && resultPath) writeFileSync(resultPath, text);
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "advisory-gate-thread" }));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
+async function withAdvisoryGateCodex(directory, fn) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = advisoryGateCodex(directory);
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/**
+ * A codex-mode provider whose judge rejects the judgment item it is asked to
+ * arbitrate with a cited critical finding, so the rejection is a legitimate
+ * gate revision rather than an uncited protocol failure.
+ *
+ * @param {string} directory
+ * @returns {string}
+ */
+function brokenGateCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-broken-gate-")), "broken-gate.mjs");
+  writeFileSync(executable, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const judge = prompt.startsWith("Review node");
+    const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+    const text = judge
+      ? JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "critical defect", findings: [{ severity: "critical", description: "broken [works]", evidence: "test failed" }] })
+      : JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (!judge && resultPath) writeFileSync(resultPath, text);
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "broken-gate-thread" }));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
+async function withBrokenGateCodex(directory, fn) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = brokenGateCodex(directory);
+  try {
+    return await fn();
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
@@ -350,12 +504,17 @@ async function withRotatingCodex(directory, mode, path) {
 
 test("runs the CLI through an installed symlink", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-symlink-"));
-  const contractPath = writeContract(directory, fixture());
+  const contractPath = writeContract(directory, fixture({
+    nodes: [
+      { id: "build", type: "backend", taskPacket: packet(), gate: false },
+      { id: "ship", type: "backend", taskPacket: packet({ objective: "Ship it" }), dependsOn: ["build"], gate: false },
+    ],
+  }));
   const link = join(directory, "runner-link.mjs");
   symlinkSync(fileURLToPath(new URL("./runner.mjs", import.meta.url)), link);
   const result = spawnSync(process.execPath, [link, "validate", contractPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^valid \(1 warning\)\n\[warn\] single-node contract/u);
+  assert.equal(result.stdout, "valid\n");
 });
 
 test("doctor checks repository prerequisites without mutating anything", () => {
@@ -546,17 +705,10 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
     }],
   });
   const path = writeContract(directory, contract);
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory);
-  try {
-    const result = await runContract(path);
-    assert.equal(result.ok, true);
-    assert.equal(nodeState(result).status, "done");
-    assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
+  const result = await withAdvisoryGateCodex(directory, () => runContract(path));
+  assert.equal(result.ok, true);
+  assert.equal(nodeState(result).status, "done");
+  assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
 });
 
 test("runs a full contract through the generic exec-jsonl driver end to end", async () => {
@@ -575,7 +727,7 @@ process.stdin.on("end", () => {
   if (request.type !== "run.request" || request.schemaVersion !== 1) process.exit(2);
   const judge = request.prompt.startsWith("Review node");
   const result = judge
-    ? JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "minor advisory", findings: [{ severity: "minor", description: "style", evidence: "line 1" }] })
+    ? JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "minor advisory", findings: [{ severity: "minor", description: "style on [works]", evidence: "line 1" }] })
     : JSON.stringify({ status: "done", summary: "jsonl worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
   console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "jsonl-thread" }));
   console.log(JSON.stringify({ schemaVersion: 1, type: "message", text: "working" }));
@@ -593,6 +745,7 @@ process.stdin.on("end", () => {
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"] },
     }],
   }));
@@ -772,9 +925,9 @@ test("resume judge recovery surfaces an invalid canonical result file", async ()
   const path = writeContract(directory, fixture({
     id: "resume-judge-invalid-file-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   // The judge completed, but the durable result file is corrupt. Presence is
   // authoritative: judge-phase recovery must not fall back to the worker
   // transcript, which still holds a valid final message.
@@ -857,7 +1010,7 @@ test("a gate revision clears the stale canonical result file", async () => {
   const path = writeContract(directory, fixture({
     id: "result-regrind-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
   const result = await withResultFileCodex(directory, "revision-regrinds", path);
   const state = nodeState(result);
@@ -935,7 +1088,18 @@ test("oversized judge prompt fails before judge spawn or persistence", async () 
   const path = writeContract(directory, fixture({
     id: "judge-prompt-cap-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", definitionOfDone: [{ id: "huge-0", text: "x".repeat(2 * 1024), proof: { kind: "command", ref: "true" } }].concat(Array.from({ length: 40 }, (_, index) => ({ id: `huge-${index + 1}`, text: "y".repeat(2 * 1024), proof: { kind: "command", ref: "true" } }))), taskPacket: packet(), gate: {} }],
+    // The judge must be required (a judgment item) for the prompt cap to bite:
+    // a purely mechanical Definition of Done now settles without a judge.
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: /** @type {import("./definition-of-done.mjs").DefinitionOfDoneItem[]} */ ([
+        { id: "huge-0", text: "x".repeat(2 * 1024), judgment: true },
+        ...Array.from({ length: 40 }, (_, index) => ({ id: `huge-${index + 1}`, text: "y".repeat(2 * 1024), proof: { kind: "command", ref: "true" } })),
+      ]),
+      taskPacket: packet(),
+      gate: {},
+    }],
   }));
   const result = await withFakeCodex(directory, "pass", () => runContract(path));
   const state = nodeState(result);
@@ -943,6 +1107,527 @@ test("oversized judge prompt fails before judge spawn or persistence", async () 
   assert.ok(state.error, "judge prompt cap records an error");
   assert.equal(state.error.code, "judge_prompt_too_large");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0);
+});
+
+test("skips the judge when every Definition of Done item is mechanical", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-mechanical-gate-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-mechanical-gate-out-"));
+  const script = join(outDir, "mechanical-proof.mjs");
+  const marker = join(outDir, "proved.txt");
+  writeFileSync(script, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "proved");\n`);
+  const fake = join(directory, "mechanical-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("mechanical-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "mech" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "mech", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "mechanical-gate-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "marker", text: "marker file exists", proof: { kind: "command", ref: `${process.execPath} ${script}` } }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(result.ok, true);
+  assert.equal(state.status, "done");
+  assert.equal(state.revisions, 0);
+  assert.equal(state.gate?.verdict, "pass", "the mechanical gate records a green verdict");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0, "no judge invocation for a purely mechanical Definition of Done");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+  assert.equal(readFileSync(marker, "utf8"), "proved", "the mechanical proof command ran in the contract workspace");
+});
+
+test("invokes the judge with the deterministic checklist when a judgment item exists", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judgment-gate-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-judgment-gate-out-"));
+  writeFileSync(join(directory, "proved.txt"), "proved");
+  const promptPath = join(outDir, "judge-prompt.txt");
+  const fake = join(directory, "judgment-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("judgment-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    writeFileSync(${JSON.stringify(promptPath)}, request.prompt);
+    const result = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "quality passes", findings: [] });
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "judge", usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judgment-gate-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [
+        { id: "proved", text: "marker file exists", proof: { kind: "path", ref: "proved.txt" } },
+        { id: "quality", text: "the result is high quality", judgment: true },
+      ],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(result.ok, true);
+  assert.equal(state.status, "done");
+  assert.equal(state.revisions, 0);
+  assert.equal(state.gate?.verdict, "pass");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 1, "the judgment item invokes the judge");
+  assert.equal(existsSync(join(result.runDir, "logs", "build.1.judge.jsonl")), true, "judge protocol events are persisted");
+  const prompt = readFileSync(promptPath, "utf8");
+  assert.match(prompt, /Judgment items — arbitrate only these:\n- \[quality\]/u);
+  assert.match(prompt, /Deterministic items — already proven by the controller/u);
+  assert.match(prompt, /- \[proved\] PASS — marker file exists \(proof: path proved\.txt\)/u);
+  assert.match(prompt, /do not re-arbitrate them/u);
+  assert.match(prompt, /Arbitrate only the judgment items/u);
+});
+
+test("a failing mechanical proof rejects the worker generation without any judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-mechanical-fail-"));
+  const fake = join(directory, "mechanical-fail-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log("mechanical-fail-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "mech" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "mech", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "mechanical-fail-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "must-pass", text: "the check passes", proof: { kind: "command", ref: `${process.execPath} -e ${JSON.stringify("process.exit(3)")}` } }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.error?.code, "mechanical_gate_failed");
+  assert.equal(state.revisions, 1, "a failing mechanical proof consumes a bounded revision like deterministic verification");
+  assert.equal(state.attempt, 2);
+  assert.equal(state.gate?.verdict, "fail");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0, "no judge was ever invoked");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("an uncited judge rejection re-asks once then blocks attention without consuming a revision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-judge-uncited-out-"));
+  const counter = join(outDir, "judge-calls.txt");
+  const promptOne = join(outDir, "judge-prompt-1.txt");
+  const promptTwo = join(outDir, "judge-prompt-2.txt");
+  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "not acceptable", findings: [{ severity: "critical", description: "the work is not acceptable", evidence: "inspected the delivered diff" }] });
+  const fake = join(directory, "uncited-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("uncited-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    let count = 0;
+    try { count = readFileSync(${JSON.stringify(counter)}, "utf8").trim().split("\\n").filter(Boolean).length; } catch {}
+    appendFileSync(${JSON.stringify(counter)}, "x\\n");
+    writeFileSync(count === 0 ? ${JSON.stringify(promptOne)} : ${JSON.stringify(promptTwo)}, request.prompt);
+    const result = ${JSON.stringify(uncited)};
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "judge", usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judge-uncited-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "quality", text: "the result is high quality", judgment: true }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", state.error?.message);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_protocol");
+  assert.equal(state.revisions, 0, "an uncited rejection never consumes a revision");
+  assert.equal(state.attempt, 1);
+  const judges = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.equal(judges.length, 2, "exactly one bounded judge re-ask before attention");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
+});
+
+test("skips the judge for an empty Definition of Done checklist", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-empty-dod-gate-"));
+  const judgeCalls = join(directory, ".runs", "empty-dod-judge-calls.txt");
+  const fake = join(directory, "empty-dod-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("empty-dod-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    appendFileSync(${JSON.stringify(judgeCalls)}, "x\\n");
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "unexpected-judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result: "not a structured judge result", continuationId: "unexpected-judge", usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "empty-dod-gate-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(result.ok, true);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.revisions, 0);
+  assert.equal(state.gate?.verdict, "pass", "an empty checklist settles mechanically with a green verdict");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0, "an empty Definition of Done never invokes the judge");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")), "no judge protocol events for an empty Definition of Done");
+  assert.ok(!existsSync(judgeCalls), "the judge provider is never spawned for an empty Definition of Done");
+});
+
+test("an uncited fail below the gate failOn threshold is a judge protocol failure, not a pass", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-below-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-judge-uncited-below-out-"));
+  const counter = join(outDir, "judge-calls.txt");
+  const promptOne = join(outDir, "judge-prompt-1.txt");
+  const promptTwo = join(outDir, "judge-prompt-2.txt");
+  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "major", summary: "major but uncited", findings: [{ severity: "major", description: "the work needs rework", evidence: "inspected the delivered diff" }] });
+  const fake = join(directory, "uncited-below-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("uncited-below-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    let count = 0;
+    try { count = readFileSync(${JSON.stringify(counter)}, "utf8").trim().split("\\n").filter(Boolean).length; } catch {}
+    appendFileSync(${JSON.stringify(counter)}, "x\\n");
+    writeFileSync(count === 0 ? ${JSON.stringify(promptOne)} : ${JSON.stringify(promptTwo)}, request.prompt);
+    const result = ${JSON.stringify(uncited)};
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "judge", usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judge-uncited-below-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "quality", text: "the result is high quality", judgment: true }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", state.error?.message);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_protocol");
+  assert.equal(state.revisions, 0, "an uncited rejection never consumes a revision");
+  assert.equal(state.attempt, 1);
+  assert.equal(state.gate?.verdict, "fail", "the below-threshold verdict is recorded");
+  assert.equal(state.gate?.maxSeverity, "major", "an uncited major fail under failOn [critical] is a protocol failure, not a pass");
+  const judges = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.equal(judges.length, 2, "the bounded re-ask still applies below the failOn threshold");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
+});
+
+test("a judge protocol re-ask over a mixed checklist neither reruns mechanical proofs nor consumes a revision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-mixed-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-judge-uncited-mixed-out-"));
+  const counter = join(outDir, "judge-calls.txt");
+  const proofRuns = join(outDir, "proof-runs.txt");
+  const proofScript = join(outDir, "counting-proof.mjs");
+  // Passes on its first execution and fails on every later one, so a re-ask
+  // that reran it would turn the mechanical gate red instead of blocking.
+  writeFileSync(proofScript, `import { appendFileSync, readFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(proofRuns)}, "x\\n");\nprocess.exit(readFileSync(${JSON.stringify(proofRuns)}, "utf8").trim().split("\\n").filter(Boolean).length > 1 ? 1 : 0);\n`);
+  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "not acceptable", findings: [{ severity: "critical", description: "the work is not acceptable", evidence: "inspected the delivered diff" }] });
+  const fake = join(directory, "uncited-mixed-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("uncited-mixed-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    let count = 0;
+    try { count = readFileSync(${JSON.stringify(counter)}, "utf8").trim().split("\\n").filter(Boolean).length; } catch {}
+    appendFileSync(${JSON.stringify(counter)}, "x\\n");
+    writeFileSync(count === 0 ? ${JSON.stringify(join(outDir, "judge-prompt-1.txt"))} : ${JSON.stringify(join(outDir, "judge-prompt-2.txt"))}, request.prompt);
+    const result = ${JSON.stringify(uncited)};
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "judge", usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judge-uncited-mixed-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [
+        { id: "proved", text: "the proof command runs", proof: { kind: "command", ref: `${process.execPath} ${proofScript}` } },
+        { id: "quality", text: "the result is high quality", judgment: true },
+      ],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", state.error?.message);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_protocol");
+  assert.equal(state.revisions, 0, "the judge protocol failure never consumes a worker revision");
+  assert.equal(state.attempt, 1);
+  const judges = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.equal(judges.length, 2, "exactly one bounded judge re-ask before attention");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal(readFileSync(proofRuns, "utf8").trim().split("\n").filter(Boolean).length, 1, "the mechanical proof runs exactly once and is not rerun by the re-ask");
+  assert.match(readFileSync(join(outDir, "judge-prompt-2.txt"), "utf8"), /already proven by the controller/u);
+});
+
+test("the judge re-ask bound survives a controller crash in either gap because it is persisted with the node", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-judge-reask-durable-"));
+  const outDir = mkdtempSync(join(tmpdir(), "runner-judge-reask-durable-out-"));
+  const counter = join(outDir, "judge-calls.txt");
+  const promptTwo = join(outDir, "judge-prompt-2.txt");
+  const runDir = join(directory, ".runs", "judge-reask-durable-run");
+  // Crash images the controller itself persisted, taken at the two instants a
+  // standalone marker left open: the write that dispatches the bounded re-ask,
+  // and the moment its verdict is durable while the blocked transition is not.
+  // Each excludes what no successor controller inherits: the dead controller's
+  // lease, its in-flight atomic temporaries and its file locks.
+  const dispatchGap = join(directory, ".runs", "judge-reask-dispatch-gap");
+  const verdictGap = join(directory, ".runs", "judge-reask-verdict-gap");
+  /** @param {string} source @returns {boolean} */
+  const inherited = (source) => !source.endsWith(".tmp") && !source.endsWith(".lock") && !source.endsWith("controller-lease.json");
+  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "not acceptable", findings: [{ severity: "critical", description: "the work is not acceptable", evidence: "inspected the delivered diff" }] });
+  const fake = join(directory, "durable-provider.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, cpSync, readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("durable-provider 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (request.prompt.startsWith("Review node")) {
+    let count = 0;
+    try { count = readFileSync(${JSON.stringify(counter)}, "utf8").trim().split("\\n").filter(Boolean).length; } catch {}
+    appendFileSync(${JSON.stringify(counter)}, "x\\n");
+    writeFileSync(count === 0 ? ${JSON.stringify(join(outDir, "judge-prompt-1.txt"))} : ${JSON.stringify(promptTwo)}, request.prompt);
+    // The re-ask is in flight and its verdict is not written yet: this is the
+    // image a controller loss leaves behind between dispatch and verdict.
+    if (count === 1) cpSync(${JSON.stringify(runDir)}, ${JSON.stringify(dispatchGap)}, { recursive: true, filter: ${inherited.toString()} });
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "judge" }));
+    console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result: ${JSON.stringify(uncited)}, continuationId: "judge", usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0 } }));
+    return;
+  }
+  const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.started", continuationId: "worker" }));
+  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result, continuationId: "worker", usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const path = writeContract(directory, fixture({
+    id: "judge-reask-durable-run",
+    // Wide enough that the closed re-ask stays durable-but-unapplied for a
+    // whole poll interval, the window the verdict-gap image is taken in.
+    pollIntervalMs: 250,
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
+    runtimeRules: [],
+    nodes: [{
+      id: "build",
+      type: "backend",
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      taskPacket: packet(),
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const nodePath = join(runDir, "nodes", "build.json");
+  let capturedVerdictGap = false;
+  const capturing = setInterval(() => {
+    if (capturedVerdictGap) return;
+    let persisted;
+    try { persisted = JSON.parse(readFileSync(nodePath, "utf8")); } catch { return; }
+    const last = /** @type {Record<string, unknown>[]} */ (persisted.invocations ?? []).at(-1);
+    const spent = /** @type {Record<string, unknown>[]} */ (persisted.executionOverrides ?? []).some((item) => item.kind === "judge-reask");
+    if (!spent || persisted.status !== "running" || last?.phase !== "judge" || last?.status !== "closed") return;
+    capturedVerdictGap = true;
+    cpSync(runDir, verdictGap, { recursive: true, filter: inherited });
+  }, 5);
+  const state = nodeState(await runContract(path).finally(() => clearInterval(capturing)));
+  assert.equal(state.status, "blocked", state.error?.message);
+  assert.equal(state.error?.code, "judge_protocol");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded judge re-ask before attention");
+  assert.equal(existsSync(join(runDir, "judge-reask")), false, "the bound is node state, not a standalone marker beside it");
+  assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
+
+  // Gap one: the write that spends the bound is the write that dispatches the
+  // re-ask, so no crash image can hold one without the other.
+  const dispatched = JSON.parse(readFileSync(join(dispatchGap, "nodes", "build.json"), "utf8"));
+  assert.ok(
+    /** @type {Record<string, unknown>[]} */ (dispatched.executionOverrides).some((item) => item.kind === "judge-reask"),
+    "the crash image carries the bound in the node snapshot",
+  );
+  assert.equal(
+    /** @type {Record<string, unknown>[]} */ (dispatched.invocations).filter((item) => item.phase === "judge").length,
+    2,
+    "the same atomic write carries the re-ask that bound permits",
+  );
+  const afterDispatch = nodeState(await resumeRun(dispatchGap));
+  assert.equal(afterDispatch.status, "blocked", afterDispatch.error?.message);
+  assert.equal(afterDispatch.phase, "judge");
+  assert.equal(afterDispatch.error?.code, "judge_protocol", "the replayed re-ask blocks instead of asking a second one");
+  assert.equal(afterDispatch.revisions, 0, "an uncited rejection never consumes a revision");
+  assert.equal(afterDispatch.attempt, 1, "the recovered re-ask does not burn a worker attempt");
+  assert.equal((afterDispatch.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal((afterDispatch.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 3, "recovery replays the interrupted re-ask exactly once");
+
+  // Gap two: the re-ask verdict is durable and the blocked transition is not,
+  // so recovery reads the spent bound from the node and blocks rather than
+  // treating the second uncited verdict as a first failure.
+  assert.ok(capturedVerdictGap, "the controller persisted the re-ask verdict before the blocked transition");
+  const afterVerdict = nodeState(await resumeRun(verdictGap));
+  assert.equal(afterVerdict.status, "blocked", afterVerdict.error?.message);
+  assert.equal(afterVerdict.phase, "judge");
+  assert.equal(afterVerdict.error?.code, "judge_protocol", "the recovered second uncited verdict is not a first failure");
+  assert.equal(afterVerdict.revisions, 0, "an uncited rejection never consumes a revision");
+  assert.equal((afterVerdict.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "the recovered verdict settles the node without another judge invocation");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
 });
 
 test("provider diagnostics stay bounded and recovery consumes only a bounded tail", async () => {
@@ -1110,7 +1795,7 @@ test("preserves the worker report when the judge provider fails", async () => {
   const path = writeContract(directory, fixture({
     id: "judge-fail-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
   const result = await withFakeCodex(directory, "judge-fail", () => runContract(path));
   const state = nodeState(result);
@@ -1126,7 +1811,7 @@ test("a judge whose tool host is disabled never yields a verdict and blocks as j
   const path = writeContract(directory, fixture({
     id: "judge-tool-host-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
   const result = await withFakeCodex(directory, "judge-tool-host-disabled", () => runContract(path));
   const state = nodeState(result);
@@ -1169,7 +1854,7 @@ test("spends the wall-clock budget per phase, not per node", async () => {
     id: "phase-budget-run",
     pollIntervalMs: 10,
     timeoutSec: 5,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: { failOn: ["critical"] } }],
   }));
   // The worker takes 3.5s of a 5s budget. A node-wide clock leaves the judge
   // 1.5s for work that needs 2s and kills a healthy reviewer.
@@ -1189,20 +1874,14 @@ test("bounds gate retries and reports exhausted", async () => {
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 1 },
     }],
   }));
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
-  try {
-    const result = await runContract(path);
-    assert.equal(result.ok, false);
-    assert.equal(nodeState(result).status, "exhausted");
-    assert.equal(nodeState(result).attempt, 2);
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  assert.equal(result.ok, false);
+  assert.equal(nodeState(result).status, "exhausted");
+  assert.equal(nodeState(result).attempt, 2);
 });
 
 test("resume adopts an orphaned worker result instead of repeating the work", async () => {
@@ -1330,9 +2009,9 @@ test("resume adopts a completed orphan judge without running it twice", async ()
   const path = writeContract(directory, fixture({
     id: "resume-gate-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } }],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
 
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
@@ -1349,9 +2028,9 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   const path = writeContract(directory, fixture({
     id: "resume-invalid-judge-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } }],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   const nodePath = join(runDir, "nodes", "build.json");
   /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string}>}} */
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
@@ -1360,7 +2039,7 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   writeFileSync(judgeInvocation.stdoutPath, "not a structured judge result\n");
   writeFileSync(nodePath, JSON.stringify({ ...state, status: "running", phase: "judge" }, null, 2));
 
-  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
   const final = nodeState(resumed);
   assert.equal(final.status, "done");
   assert.ok(final.usage, "usage persisted");
@@ -1379,9 +2058,9 @@ test("invalid orphan judge usage survives a full worker restart exactly once", a
     id: "resume-invalid-restart-run",
     pollIntervalMs: 10,
     usagePolicy: { epoch: "resume-invalid-restart", maxInputTokens: 1000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1000, maxInvocationTokens: 500, cacheReadWeight: 0.1 },
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } }],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   const nodePath = join(runDir, "nodes", "build.json");
   /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string, usage?: unknown}>}} */
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
@@ -1407,7 +2086,7 @@ test("invalid orphan judge usage survives a full worker restart exactly once", a
   delete ledger.epochs["resume-invalid-restart"].invocations[judgeInvocation.id];
   writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
 
-  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
   const final = nodeState(resumed);
   assert.equal(final.status, "done");
   assert.equal(final.attempt, 2, "an unusable worker forces a full worker restart");
@@ -1920,12 +2599,12 @@ test("ledger enforcement on resume lets a done budgeted worker reach its judge",
     timeoutSec: 5,
     usagePolicy: { epoch: "judge-gate-budget-resume", maxInputTokens: 1_000_000, judgeReserveInputTokens: 500_000, maxPhaseInputTokens: 1_000_000, maxInvocationTokens: 100_000, cacheReadWeight: 1 },
     nodes: [
-      { id: "gated", type: "backend", taskPacket: packet({ objective: "Finish at the derived cap" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
-      { id: "revision", type: "backend", taskPacket: packet({ objective: "Re-dispatch for a gate revision" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
-      { id: "sibling", type: "backend", taskPacket: packet({ objective: "No persisted result" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, gate: { failOn: ["critical"] } },
+      { id: "gated", type: "backend", taskPacket: packet({ objective: "Finish at the derived cap" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
+      { id: "revision", type: "backend", taskPacket: packet({ objective: "Re-dispatch for a gate revision" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
+      { id: "sibling", type: "backend", taskPacket: packet({ objective: "No persisted result" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
     ],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   /** @param {string} id @returns {string} */
   const persistedPath = (id) => join(runDir, "nodes", `${id}.json`);
   /** @type {Array<[id: string, phase: string, keepResult: boolean]>} */
@@ -1951,7 +2630,7 @@ test("ledger enforcement on resume lets a done budgeted worker reach its judge",
     }, null, 2));
   }
 
-  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
   const gated = nodeState(resumed, "gated");
   assert.equal(gated.status, "done", `done worker must reach its judge: ${gated.error?.message ?? gated.status}`);
   assert.equal(gated.phase, "complete");
@@ -2020,7 +2699,9 @@ test("gate revisions are not consumed by attempts burned in restarts", async () 
   await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
   assert.equal(JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).attempt, 2);
 
-  const final = await withFakeCodex(directory, "critical", () => resumeRun(runDir));
+  // The judge must cite the judgment item id it rejects: an uncited rejection
+  // is a protocol failure (bounded re-ask, then attention), never a revision.
+  const final = await withCitedGateCodex(directory, () => resumeRun(runDir));
   assert.equal(nodeState(final).status, "exhausted");
   assert.equal(nodeState(final).attempt, 4, "two burned starts plus the gate retry start");
   assert.equal(nodeState(final).revisions, 1, "one real gate rejection consumed");
@@ -2083,9 +2764,9 @@ test("report aggregates per-node status, attempts, revisions, and tokens", async
   const path = writeContract(directory, fixture({
     id: "report-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } }],
   }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   const report = renderReport(runDir);
   assert.match(report, /1 nodes · 1 done/u);
   // The node ends on its judge runtime, and tokens sum worker plus judge.
@@ -2102,26 +2783,20 @@ test("events record attempt, runtime, and gate verdict", async () => {
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
-  try {
-    const result = await runContract(path);
-    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8")
-      .trim().split("\n").map((line) => JSON.parse(line));
-    const started = events.find((event) => event.to === "running" && event.phase === "worker");
-    assert.equal(started.attempt, 1);
-    assert.equal(started.runtime, "luna");
-    const rejected = events.find((event) => event.to === "exhausted");
-    assert.equal(rejected.verdict, "fail");
-    assert.equal(rejected.error, "revision_cap");
-    assert.equal(rejected.phase, "judge");
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line));
+  const started = events.find((event) => event.to === "running" && event.phase === "worker");
+  assert.equal(started.attempt, 1);
+  assert.equal(started.runtime, "luna");
+  const rejected = events.find((event) => event.to === "exhausted");
+  assert.equal(rejected.verdict, "fail");
+  assert.equal(rejected.error, "revision_cap");
+  assert.equal(rejected.phase, "judge");
 });
 
 test("runner emits campaign.progress only for material node changes and keeps terminal events", async () => {
@@ -2528,7 +3203,7 @@ test("judge provider failover preserves the completed worker result", async () =
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-judge-"));
   const worker = fakeCodex(directory, "pass");
   const judgeFirst = fakeCodex(directory, "exhausted");
-  const judgeSecond = fakeCodex(directory, "pass");
+  const judgeSecond = advisoryGateCodex(directory);
   const path = writeContract(directory, fixture({
     id: "failover-judge-run",
     runtimeDefaults: { worker: "worker", judge: "judge-first" },
@@ -2538,7 +3213,7 @@ test("judge provider failover preserves the completed worker result", async () =
       "judge-second": { driver: "codex", model: "judge-second", executable: judgeSecond },
     },
     runtimeRules: [{ match: { role: "judge", status: "exhausted", errorCode: "provider_error", currentRuntime: "judge-first" }, runtime: "judge-second" }],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
   const state = nodeState(await runContract(path));
   assert.equal(state.status, "done");
@@ -2574,7 +3249,7 @@ test("persists and recovers cost exactly once and reports totals", async () => {
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
     runtimeRules: [],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
   }));
   const runDir = (await runContract(path)).runDir;
   const first = nodeState(await resumeRun(runDir));
@@ -2628,7 +3303,7 @@ test("blocks new work at contract and node monetary budgets", async () => {
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
     runtimeRules: [],
-    nodes: [{ id: "build", type: "backend", maxCostUsd: 0.01, taskPacket: packet(), gate: {} }],
+    nodes: [{ id: "build", type: "backend", maxCostUsd: 0.01, taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
   }));
   const nodeBudget = await runContract(nodeBudgetPath);
   assert.equal(nodeState(nodeBudget).status, "blocked");
@@ -2663,21 +3338,15 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "critical");
-  try {
-    const result = await runContract(path);
-    const rendered = renderFindings(result.runDir);
-    assert.match(rendered, /## build/u);
-    assert.match(rendered, /\[critical\] broken/u);
-    assert.match(rendered, /Evidence: test failed/u);
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  const rendered = renderFindings(result.runDir);
+  assert.match(rendered, /## build/u);
+  assert.match(rendered, /\[critical\] broken/u);
+  assert.match(rendered, /Evidence: test failed/u);
 });
 
 test("a finished run with non-done nodes writes a findings.json handoff", async () => {
@@ -2689,6 +3358,7 @@ test("a finished run with non-done nodes writes a findings.json handoff", async 
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
@@ -2730,6 +3400,7 @@ test("resume removes a stale findings.json after driving the run to done", async
       id: "build",
       type: "backend",
       taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }],
       gate: { failOn: ["critical"], maxRevisions: 0 },
     }],
   }));
@@ -2896,6 +3567,7 @@ if (process.argv.includes("--version")) {
       id: "build",
       type: "backend",
       taskPacket: packet({ objective: "Complete and use the judge reserve" }),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       gate: { failOn: ["critical"] },
     }],
   }));
@@ -4416,4 +5088,198 @@ if (process.argv.includes("--version")) {
     false,
     "an adapter without an enforceable hook surface receives no policy to pretend with; enforcement lives on the claude-compatible --settings boundary",
   );
+});
+
+test("finalVerification runs on the phase-terminal node and not on its dependencies", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-terminal-"));
+  const path = writeContract(directory, fixture({
+    id: "final-verification-terminal-run",
+    pollIntervalMs: 10,
+    finalVerification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }],
+    nodes: [
+      { id: "build", type: "backend", taskPacket: packet(), gate: false },
+      { id: "ship", type: "backend", taskPacket: packet({ objective: "Ship it" }), dependsOn: ["build"], gate: false },
+    ],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(result.ok, true);
+  const build = nodeState(result, "build");
+  const ship = nodeState(result, "ship");
+  assert.equal(build.status, "done");
+  assert.equal(ship.status, "done");
+  assert.equal(build.verification?.commands?.length, 1, "a node with a dependant runs only its packet verification");
+  assert.equal(ship.verification?.commands?.length, 2, "the phase-terminal node also runs the contract finalVerification");
+  assert.deepEqual(ship.verification?.commands?.[1].argv, [process.execPath, "-e", "process.exit(0)"]);
+});
+
+test("a failing finalVerification stops the phase-terminal node before the judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-fail-"));
+  const path = writeContract(directory, fixture({
+    id: "final-verification-fail-run",
+    pollIntervalMs: 10,
+    finalVerification: [{ argv: [process.execPath, "-e", "process.exit(3)"] }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.ok(state.error, "final verification failure records an error");
+  assert.equal(state.error.code, "verification_failed");
+  assert.equal(state.verification?.passed, false);
+  assert.equal(state.verification?.commands?.[0].passed, true, "the packet verification still passed");
+  assert.equal(state.verification?.commands?.[1].passed, false);
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("a targetedFix node runs finalVerification even with a dependant node", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-targeted-"));
+  const path = writeContract(directory, fixture({
+    id: "final-verification-targeted-run",
+    pollIntervalMs: 10,
+    finalVerification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }],
+    nodes: [
+      { id: "fix", type: "backend", targetedFix: true, taskPacket: packet(), gate: false },
+      { id: "ship", type: "backend", taskPacket: packet({ objective: "Ship it" }), dependsOn: ["fix"], gate: false },
+    ],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(result.ok, true);
+  assert.equal(nodeState(result, "fix").verification?.commands?.length, 2, "targetedFix carries the final checkpoint on a non-terminal node");
+  assert.equal(nodeState(result, "ship").verification?.commands?.length, 2);
+});
+
+test("a contract without finalVerification leaves controller verification untouched", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-absent-"));
+  const path = writeContract(directory, fixture({
+    id: "final-verification-absent-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "pass", () => runContract(path));
+  assert.equal(nodeState(result).status, "done");
+  assert.equal(nodeState(result).verification?.commands?.length, 1);
+});
+
+const RUNNER_CLI = fileURLToPath(new URL("./runner.mjs", import.meta.url));
+
+/**
+ * A run directory as `run` leaves it: the persisted contract, one state file
+ * per node that reached a status, and the capsules attempts left behind.
+ *
+ * @param {string} directory
+ * @param {Record<string, unknown>} contract
+ * @param {Record<string, string>} statuses
+ * @param {Record<string, unknown>} [capsules] keyed by `<nodeId>.<attempt>`
+ * @returns {string}
+ */
+function prunableRun(directory, contract, statuses, capsules = {}) {
+  const runDir = join(directory, ".runs", String(contract.id));
+  writeJsonAtomic(join(runDir, "contract.json"), { ...contract, cwd: directory });
+  for (const [id, status] of Object.entries(statuses)) {
+    writeJsonAtomic(join(runDir, "nodes", `${id}.json`), { status });
+  }
+  for (const [name, capsule] of Object.entries(capsules)) {
+    writeJsonAtomic(join(runDir, "capsules", `${name}.json`), capsule);
+  }
+  return runDir;
+}
+
+/** @param {string} runId @param {string} nodeId @param {Partial<import("./capsule.mjs").Capsule>} [overrides] */
+function prunableCapsule(runId, nodeId, overrides = {}) {
+  return buildCapsule({
+    runId,
+    nodeId,
+    attemptId: "1",
+    objective: "Implement it",
+    decisions: ["the schema stays at version 2"],
+    changedFiles: ["README.md"],
+    verifications: [{ argv: "npm run check", pass: true }],
+    nextAction: "finish the second half of the packet",
+    ...overrides,
+  });
+}
+
+test("contract prune drops done nodes and seeds the survivors with their capsules", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-prune-"));
+  // the packets read `contract.json` relative to the contract cwd
+  writeContract(directory, fixture());
+  const contract = fixture({
+    id: "prune-source",
+    nodes: [
+      { id: "alpha", type: "backend", taskPacket: packet(), gate: false },
+      { id: "beta", type: "backend", taskPacket: packet({ objective: "Continue it" }), dependsOn: ["alpha"], gate: false },
+      { id: "gamma", type: "backend", taskPacket: packet({ objective: "Close it" }), dependsOn: ["alpha", "beta"], gate: false },
+    ],
+  });
+  const runDir = prunableRun(
+    directory,
+    contract,
+    { alpha: "done", beta: "failed", gamma: "pending" },
+    { "beta.0": prunableCapsule("prune-source", "beta", { nextAction: "stale" }), "beta.1": prunableCapsule("prune-source", "beta") },
+  );
+  const out = join(directory, "continuation.json");
+
+  const pruned = pruneRun(runDir, { out });
+
+  assert.deepEqual(pruned.dropped, ["alpha"]);
+  assert.deepEqual(pruned.kept, ["beta", "gamma"]);
+  assert.deepEqual(pruned.seeded, ["beta"], "only the node with a capsule is seeded");
+  const written = JSON.parse(readFileSync(out, "utf8"));
+  assert.equal(written.id, "prune-source-continuation", "a pruned run never resumes the frozen one");
+  assert.deepEqual(written.nodes.map((/** @type {{id: string}} */ node) => node.id), ["beta", "gamma"]);
+  assert.deepEqual(written.nodes[0].dependsOn, [], "the settled dependency is already satisfied");
+  assert.deepEqual(written.nodes[1].dependsOn, ["beta"], "a dependency on a surviving node stays");
+  const seed = written.nodes[0].taskPacket.decisions;
+  assert.match(seed[0], /^continuation seed from attempt 1 of run prune-source \(capsule [0-9a-f]{64}\)$/u);
+  assert.ok(seed.includes("continuation seed next action: finish the second half of the packet"), "the newest capsule wins");
+  assert.ok(seed.includes("continuation seed decided: the schema stays at version 2"));
+  assert.ok(seed.includes("continuation seed already changed: README.md"));
+  assert.ok(seed.includes("continuation seed passed: npm run check"));
+  assert.deepEqual(written.nodes[1].taskPacket.decisions, [], "a node without a capsule keeps its packet");
+  assert.equal(written.nodes[0].packetHash, undefined, "the stale packet hash never survives a reseeded packet");
+  assert.equal(written.nodes.some((/** @type {{targetedFix?: boolean}} */ node) => node.targetedFix), false);
+
+  const validated = spawnSync(process.execPath, [RUNNER_CLI, "validate", out], { encoding: "utf8" });
+  assert.equal(validated.status, 0, validated.stderr);
+  assert.equal(validated.stdout, "valid\n");
+});
+
+test("contract prune writes a single remaining node only with --targeted-fix", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-prune-targeted-"));
+  writeContract(directory, fixture());  // the packets read `contract.json` relative to the contract cwd
+  const contract = fixture({
+    id: "prune-targeted",
+    nodes: [
+      { id: "alpha", type: "backend", taskPacket: packet(), gate: false },
+      { id: "beta", type: "backend", taskPacket: packet({ objective: "Continue it" }), dependsOn: ["alpha"], gate: false },
+    ],
+  });
+  const runDir = prunableRun(directory, contract, { alpha: "done", beta: "exhausted" });
+  const refused = join(directory, "refused.json");
+
+  assert.throws(() => pruneRun(runDir, { out: refused }), /leaves the single node beta.*--targeted-fix/su);
+  assert.equal(existsSync(refused), false, "a refused prune writes nothing");
+
+  const out = join(directory, "targeted.json");
+  const pruned = pruneRun(runDir, { out, targetedFix: true });
+  assert.deepEqual(pruned.kept, ["beta"]);
+  const written = JSON.parse(readFileSync(out, "utf8"));
+  assert.equal(written.nodes.length, 1);
+  assert.equal(written.nodes[0].targetedFix, true, "the flag is stamped on the surviving node");
+
+  const validated = spawnSync(process.execPath, [RUNNER_CLI, "contract", "validate", out], { encoding: "utf8" });
+  assert.equal(validated.status, 0, validated.stderr);
+  assert.equal(validated.stdout, "valid\n", "a targeted fix is not warned about for being alone");
+});
+
+test("validate rejects a single-node contract that is not a targeted fix", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-validate-targeted-"));
+  const serial = writeContract(directory, fixture({ id: "serial-micro-contract" }));
+
+  for (const argv of [["validate", serial], ["contract", "validate", serial]]) {
+    const result = spawnSync(process.execPath, [RUNNER_CLI, ...argv], { encoding: "utf8" });
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /single node build without targetedFix: true/u);
+    assert.equal(result.stdout, "", "a rejected contract is never reported as valid");
+  }
 });

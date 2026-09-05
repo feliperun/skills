@@ -933,3 +933,53 @@ test("validates bounded cost, routing, progress, and worktree snapshot state", (
     assert.throws(() => validateNodeSnapshot({ ...snapshot(), ...override }), /costUsd|progress|worktree/u);
   }
 });
+
+test("finalVerification accepts the verification-command schema and rejects unknown shapes", () => {
+  const { path } = writeFixture({
+    finalVerification: [
+      { argv: ["npm", "test"], timeoutSec: 600 },
+      { argv: ["node", "--test"], cwd: "sub", repeat: 2, env: ["CI"] },
+    ],
+  });
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.finalVerification?.length, 2);
+  assert.deepEqual(contract.finalVerification?.[0], { argv: ["npm", "test"], timeoutSec: 600, repeat: 1, env: [] });
+  assert.equal(contract.finalVerification?.[1].cwd, "sub");
+  assert.equal(contract.finalVerification?.[1].repeat, 2);
+  // Absent stays absent: phases predating the field still validate.
+  const bare = writeFixture();
+  assert.equal(validateContract(JSON.parse(readFileSync(bare.path, "utf8")), bare.path).finalVerification, undefined);
+
+  for (const value of /** @type {unknown[]} */ ([
+    { argv: ["npm", "test"] },
+    [{ argv: [] }],
+    [{ argv: ["npm", "test"], timeoutSec: 601 }],
+    [{ argv: ["npm", "test"], timeoutSec: 0 }],
+    [{ argv: ["npm", "test"], repeat: 0 }],
+    [{ argv: ["npm", "test"], env: ["not a name"] }],
+    [{ argv: ["npm", "test"], cwd: "/absolute" }],
+    [{ argv: ["npm", "test"], retries: 2 }],
+  ])) {
+    const invalid = writeFixture({ finalVerification: value });
+    assert.throws(
+      () => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path),
+      /contract\.finalVerification/u,
+      `expected ${JSON.stringify(value)} to be rejected`,
+    );
+  }
+});
+
+test("targetedFix is a declared node field and only accepts a boolean", () => {
+  const { path } = writeFixture({
+    nodes: [{ id: "build", type: "backend", targetedFix: true, taskPacket: packet(), gate: false }],
+  });
+  assert.equal(validateContract(JSON.parse(readFileSync(path, "utf8")), path).nodes[0].targetedFix, true);
+
+  const invalid = writeFixture({
+    nodes: [{ id: "build", type: "backend", targetedFix: "yes", taskPacket: packet(), gate: false }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path),
+    /targetedFix must be a boolean/u,
+  );
+});

@@ -83,7 +83,7 @@ test("every provider invocation persists an intent before spawn and a settlement
   const path = writeContract(directory, fixture({
     id: "intent-settle-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), gate: { enabled: true } }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: { enabled: true } }],
   }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
   const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;

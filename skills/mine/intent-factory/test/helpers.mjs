@@ -359,8 +359,8 @@ if (process.argv.includes("--version")) {
     } else {
       const text = judge
         ? mode === "critical"
-          ? JSON.stringify({verdict:"fail",maxSeverity:"critical",summary:"critical defect",findings:[{severity:"critical",description:"broken",evidence:"test failed"}]})
-          : JSON.stringify({verdict:"fail",maxSeverity:"minor",summary:"minor advisory",findings:[{severity:"minor",description:"style",evidence:"line 1"}]})
+          ? JSON.stringify({verdict:"fail",maxSeverity:"critical",summary:"critical defect",findings:[{severity:"critical",description:"broken [works]",evidence:"test failed"}]})
+          : JSON.stringify({verdict:"fail",maxSeverity:"minor",summary:"minor advisory",findings:[{severity:"minor",description:"style [works]",evidence:"line 1"}]})
         : mode === "blocked-context"
           ? JSON.stringify({ status: "blocked_context", summary: "missing context", changedFiles: [], verification: [], artifacts: [], missingContext: ["missing.txt"] })
           : JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });

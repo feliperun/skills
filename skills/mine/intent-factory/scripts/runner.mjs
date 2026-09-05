@@ -35,6 +35,17 @@ import {
   validateContract,
 } from "./lib.mjs";
 import {
+  clearJudgeReask,
+  deterministicGate,
+  judgeReaskOutstanding,
+  judgeRequired,
+  markJudgeReask,
+  resetPhaseRouting,
+  uncitedReaskSuffix,
+  uncitedRejection,
+  verificationFailureVerdict,
+} from "./judge-gate.mjs";
+import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   driverCapabilities,
@@ -86,10 +97,12 @@ import {
   runVerification,
   validateWorkspaceScopeBoundary,
 } from "./verification.mjs";
+import { finalVerificationCommands } from "./final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
 import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
+import { contractCli, validateContractFile } from "./contract-prune.mjs";
 import { LIVENESS_STALE_SEC, campaignIdOf, checkRunLiveness } from "./campaign-autonomy.mjs";
 import {
   CAMPAIGN_PROGRESS_TYPE,
@@ -665,18 +678,7 @@ export async function resumeRun(runDirPath) {
           }
           await executeControllerVerification(contract, runDir, node, state, lease);
           if (!state.verification?.passed) {
-            state.gate = verificationFailureVerdict(state);
-            if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
-              resetPhaseRouting(state);
-              state.revisions += 1;
-              state.attempt += 1;
-              transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
-            } else {
-              transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
-                phase: "worker",
-                error: { code: "verification_failed", message: "deterministic verification failed" },
-              }, lease);
-            }
+            applyVerificationFailure(contract, node, state, runDir, null, lease, states, campaign.path);
             continue;
           }
         } else {
@@ -719,7 +721,7 @@ export async function resumeRun(runDirPath) {
         if (recovery.phase === "worker" && node.gate.enabled) {
           transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
         } else if (recovery.phase === "judge") {
-          applyJudgeResult(contract, node, state, recovery.result, runDir, lease, null, states, campaign.path);
+          await applyJudgeResult(contract, node, state, recovery.result, runDir, lease, null, states, campaign.path);
         } else {
           transition(runDir, state, "done", { phase: "complete", error: null, blockedBy: [] }, lease);
         }
@@ -1170,7 +1172,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
           const state = states.get(node.id);
           if (!state || routingBackoffActive(state, state.phase)) continue;
           if (state.phase === "judge" && state.result) {
-            startJudge(contract, node, state, runDir, running, state.result, lease);
+            await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaign.path);
             continue;
           }
           if (!ensureBudgetDecision(contract, node, state, states, campaign.path, runDir, lease)) continue;
@@ -2111,16 +2113,21 @@ function finishRotationHandoff(contract, node, state, runDir, job, lease, envelo
   process.stdout.write(`[node] ${node.id} rotation handoff materialized · ${Buffer.byteLength(handoff, "utf8")} bytes · fresh session next\n`);
 }
 
-/**
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {Map<string, Job>} running
- * @param {unknown} workerResult
- * @param {LeaseHandle} lease
- */
-function startJudge(contract, node, state, runDir, running, workerResult, lease) {
+/** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when none exist. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+async function startJudge(contract, node, state, runDir, running, workerResult, lease, states, campaignPath) {
+  const reask = judgeReaskOutstanding(state);
+  const { verdict, results } = await deterministicGate(node, contract.cwd, reask, Math.max(1_000, Math.min((node.timeoutSec ?? contract.timeoutSec ?? 60) * 1000, 120_000)));
+  if (verdict.verdict === "fail") {
+    applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+      code: "mechanical_gate_failed",
+      label: "mechanical-gate",
+    });
+    return;
+  }
+  if (!judgeRequired(node)) {
+    transition(runDir, state, "done", { phase: "complete", result: workerResult, gate: verdict }, lease);
+    return;
+  }
   const runtime = routeRuntimeForState(contract, node, state, "judge");
   const paths = logPaths(runDir, node.id, "judge", state.attempt);
   state.phase = "judge";
@@ -2130,7 +2137,11 @@ function startJudge(contract, node, state, runDir, running, workerResult, lease)
     settleInvocation(runDir, previousInvocation, { nextState: operationNextState(state) });
   }
   try {
-    const prompt = judgePrompt(node, workerResult, { diff: state.scope?.changedPaths, verification: state.verification });
+    const prompt = `${judgePrompt(node, workerResult, {
+      diff: state.scope?.changedPaths,
+      verification: state.verification,
+      deterministic: results,
+    })}${reask ? uncitedReaskSuffix() : ""}`;
     const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "judge", prompt);
     if (Buffer.byteLength(phasePlan.prompt, "utf8") > 64 * 1024) {
       const error = /** @type {Error & {code: string}} */ (new Error("judge prompt exceeds 65536 bytes"));
@@ -2811,7 +2822,7 @@ async function executeControllerVerification(contract, runDir, node, state, leas
   };
   writeNode(runDir, state, lease);
   try {
-    const result = await runVerification(node.taskPacket.verification, contract.cwd, {
+    const result = await runVerification([...node.taskPacket.verification, ...finalVerificationCommands(contract, node)], contract.cwd, {
       logDir: join(runDir, "logs", `${node.id}.${state.attempt}.verification`),
       onAttemptStart: (attempt) => persistVerificationAttempt(runDir, state, lease, attempt),
       onAttemptSpawn: (attempt) => persistVerificationAttempt(runDir, state, lease, {
@@ -3322,7 +3333,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       state.judgeFailures = (state.judgeFailures ?? 0) + 1;
       if (state.judgeFailures < JUDGE_MAX_FAILURES) {
         writeNode(runDir, state, lease);
-        startJudge(contract, job.node, state, runDir, running, state.result, lease);
+        await startJudge(contract, job.node, state, runDir, running, state.result, lease, states, campaignPath);
         continue;
       }
       const providerMessage = envelope.error?.message ?? "judge provider failed";
@@ -3332,19 +3343,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         usage: state.usage,
         error: { code: "judge_unavailable", message: excerpt(providerMessage) ?? "judge unavailable" },
       }, lease);
-      await notifyCampaign(
-        campaignPath,
-        projectEvent({
-          type: "run.attention",
-          campaignId: campaignIdOf(campaignPath),
-          runId: basename(runDir),
-          nodeId: state.id,
-          identifiers: { errorCode: "judge_unavailable" },
-          data: { runId: basename(runDir), nodeId: state.id, code: "judge_unavailable" },
-          key: `${basename(runDir)}:${state.id}:judge_unavailable`,
-        }),
-        `${basename(runDir)}:${state.id}:judge_unavailable`,
-      );
+      await raiseJudgeAttention(campaignPath, runDir, state, "judge_unavailable");
       continue;
     }
     // An empty final message is a missing worker result, not a no-op worker:
@@ -3421,7 +3420,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       }
       if (job.resultMaterialization && canReuseResultEvidence(state, job.node)) {
         consumeManualHandoff(state);
-        if (job.node.gate.enabled) applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running, states, campaignPath);
+        if (job.node.gate.enabled) await applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running, states, campaignPath);
         else transition(runDir, state, "done", { phase: "complete", result: workerResult, error: null }, lease);
         continue;
       }
@@ -3436,15 +3435,17 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         state,
         runDir,
         lease,
-        job.node.gate.enabled ? "await judge verdict" : "worker result accepted; node complete",
+        job.node.gate.enabled && judgeRequired(job.node) ? "await judge verdict" : "worker result accepted; node complete",
       );
       consumeManualHandoff(state);
-      if (job.node.gate.enabled && monetaryBudgetReached(contract, job.node, state, states)) {
+      if (job.node.gate.enabled && judgeRequired(job.node) && monetaryBudgetReached(contract, job.node, state, states)) {
         transition(runDir, state, "blocked", {
           phase: "budget",
           error: { code: "cost_budget_exceeded", message: "monetary budget reached before scheduling the judge" },
         }, lease);
-      } else if (job.node.gate.enabled) {
+        continue;
+      }
+      if (job.node.gate.enabled && judgeRequired(job.node)) {
         const policy = contract.usagePolicy;
         if (policy !== false && campaignUsage(campaignPath, policy).budgetInputTokens >= policy.maxInputTokens) {
           appendTransitionEvent(runDir, state, state.status, state.status, {
@@ -3457,12 +3458,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           }, lease);
           recordRunLiveness({ path: campaignPath }, runDir, contract, states);
         }
-        startJudge(contract, job.node, state, runDir, running, workerResult, lease);
       }
+      if (job.node.gate.enabled) await startJudge(contract, job.node, state, runDir, running, workerResult, lease, states, campaignPath);
       else transition(runDir, state, "done", { phase: "complete", result: workerResult }, lease);
       continue;
     }
-    applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running, states, campaignPath);
+    await applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running, states, campaignPath);
   }
 }
 
@@ -3654,25 +3655,11 @@ function budgetStopError(scope, state) {
     : { code: "budget_exceeded", message: `run input-token budget exhausted (spent ${observed})` };
 }
 
-/**
- * A judge provider that returns a failed envelope is allowed one bounded
- * re-dispatch; a second consecutive failure blocks the node as
- * judge_unavailable instead of ever adopting an ungrounded verdict.
- */
+/** A failed judge envelope gets one bounded re-dispatch, then judge_unavailable. */
 const JUDGE_MAX_FAILURES = 2;
 
-/**
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {unknown} result
- * @param {string} runDir
- * @param {LeaseHandle} lease
- * @param {Map<string, Job>|null} running
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- */
-function applyJudgeResult(contract, node, state, result, runDir, lease, running, states, campaignPath) {
+/** Apply a judge verdict: pass settles done; a rejection citing no judgment item id is a judge protocol failure — one durable bounded re-ask, then blocked judge_protocol attention — and never consumes a revision, at any severity. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {unknown} result @param {string} runDir @param {LeaseHandle} lease @param {Map<string, Job>|null} running @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+async function applyJudgeResult(contract, node, state, result, runDir, lease, running, states, campaignPath) {
   /** @type {JudgeVerdict} */
   let verdict;
   try {
@@ -3685,85 +3672,73 @@ function applyJudgeResult(contract, node, state, result, runDir, lease, running,
   state.judgeFailures = 0;
   const shouldFail = verdict.verdict === "fail" && verdict.maxSeverity !== "none"
     && (node.gate.failOn ?? ["critical"]).includes(verdict.maxSeverity);
+  const protocolFailure = verdict.verdict === "fail" && uncitedRejection(verdict, node);
+  if (protocolFailure && judgeReaskOutstanding(state)) {
+    transition(runDir, state, "blocked", {
+      phase: "judge",
+      gate: verdict,
+      result: state.result,
+      error: { code: "judge_protocol", message: "judge rejection cited no Definition of Done item id after the bounded re-ask" },
+    }, lease);
+    await raiseJudgeAttention(campaignPath, runDir, state, "judge_protocol");
+    return;
+  }
+  if (protocolFailure) {
+    // The bound rides on the node: the next write — the recovered pending
+    // judge below or the re-ask dispatch's own invocation — persists it with
+    // the transition it belongs to, leaving no gap either way.
+    markJudgeReask(state);
+    if (!running) {
+      // A verdict recovered after controller loss keeps its durable bound:
+      // the drive loop dispatches the one remaining bounded re-ask.
+      transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lease);
+      return;
+    }
+    await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaignPath);
+    return;
+  }
+  clearJudgeReask(state);
   if (!shouldFail) {
     transition(runDir, state, "done", { phase: "complete", gate: verdict }, lease);
-  } else if (state.revisions < (node.gate.maxRevisions ?? 1)) {
-    process.stdout.write(`[gate] ${node.id} retry · ${verdict.maxSeverity} · ${verdict.summary}\n`);
-    persistNodeCapsule(contract, node, state, runDir, lease, "address gate findings on a fresh worker attempt");
-    resetPhaseRouting(state);
-    state.revisions += 1;
-    state.attempt += 1;
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
-    else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
-  } else {
-    transition(runDir, state, "exhausted", { phase: "judge", gate: verdict, error: { code: "revision_cap", message: verdict.summary } }, lease);
+    return;
   }
+  applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+    code: "revision_cap",
+    label: "gate",
+    phase: "judge",
+    capsule: "address gate findings on a fresh worker attempt",
+  });
 }
 
-/** @param {NodeSnapshot} state */
-function resetPhaseRouting(state) {
-  if (state.routing) state.routing.currentOverride = null;
-  state.progress = null;
-}
-
-/**
- * @param {NodeSnapshot} state
- * @returns {JudgeVerdict}
- */
-function verificationFailureVerdict(state) {
-  const failedCommands = (state.verification?.commands ?? []).filter((command) => !command.passed);
-  const evidence = failedCommands.length
-    ? failedCommands.map((command) => `${command.argv.join(" ")}: ${command.attempts.map((attempt) => `exit=${attempt.exitCode ?? "-"}${attempt.timedOut ? " timeout" : ""}`).join(", ")}`).join("; ")
-    : state.verification?.error ?? "verification controller failed to execute a command";
-  return {
-    verdict: "fail",
-    maxSeverity: "critical",
-    summary: "deterministic verification failed",
-    findings: [{ severity: "critical", description: "deterministic verification failed", evidence: boundedUtf8(evidence, 4 * 1024) }],
-  };
-}
-
-/**
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {Map<string, Job>} running
- * @param {LeaseHandle} lease
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- */
-function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath) {
-  const verdict = verificationFailureVerdict(state);
+/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", capsule?: string|null, message?: string}} options */
+function applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, options) {
+  const { code, label, phase = "worker", capsule = null, message = verdict.summary } = options;
   state.gate = verdict;
   if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
     resetPhaseRouting(state);
     state.revisions += 1;
     state.attempt += 1;
-    process.stdout.write(`[verification] ${node.id} retry · ${verdict.summary}\n`);
-    startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
+    if (capsule !== null) persistNodeCapsule(contract, node, state, runDir, lease, capsule);
+    process.stdout.write(`[${label}] ${node.id} retry · ${verdict.summary}\n`);
+    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
+    else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
     return;
   }
   transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
-    phase: "worker",
+    phase,
     gate: verdict,
-    error: { code: "verification_failed", message: verdict.summary },
+    error: { code, message },
   }, lease);
 }
 
-/**
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {Map<string, Job>|null} running
- * @param {LeaseHandle} lease
- * @param {string} message
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- */
+/** Deterministic verification failure settles through the shared rejection path. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
+function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath, verdict = verificationFailureVerdict(state)) {
+  applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
+}
+
+/** A worker result that does not match the structured protocol rejects through the shared path. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {string} message @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
 function applyInvalidWorkerResult(contract, node, state, runDir, running, lease, message, states, campaignPath) {
-  const verdict = /** @type {GateResult} */ ({
+  const verdict = /** @type {JudgeVerdict} */ ({
     verdict: "fail",
     maxSeverity: "critical",
     summary: "worker result did not match the structured result protocol",
@@ -3773,21 +3748,34 @@ function applyInvalidWorkerResult(contract, node, state, runDir, running, lease,
       evidence: boundedUtf8(message, 4 * 1024),
     }],
   });
-  state.gate = verdict;
-  if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
-    resetPhaseRouting(state);
-    state.revisions += 1;
-    state.attempt += 1;
-    process.stdout.write(`[worker-result] ${node.id} retry · ${verdict.summary}\n`);
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
-    else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
-    return;
-  }
-  transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
-    phase: "worker",
-    gate: verdict,
-    error: { code: "invalid_worker_result", message },
-  }, lease);
+  applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+    code: "invalid_worker_result",
+    label: "worker-result",
+    message,
+  });
+}
+
+/**
+ * Surface a judge attention state on the campaign outbox.
+ * @param {string} campaignPath
+ * @param {string} runDir
+ * @param {NodeSnapshot} state
+ * @param {string} code
+ */
+async function raiseJudgeAttention(campaignPath, runDir, state, code) {
+  await notifyCampaign(
+    campaignPath,
+    projectEvent({
+      type: "run.attention",
+      campaignId: campaignIdOf(campaignPath),
+      runId: basename(runDir),
+      nodeId: state.id,
+      identifiers: { errorCode: code },
+      data: { runId: basename(runDir), nodeId: state.id, code },
+      key: `${basename(runDir)}:${state.id}:${code}`,
+    }),
+    `${basename(runDir)}:${state.id}:${code}`,
+  );
 }
 
 /**
@@ -6774,6 +6762,7 @@ function parseCli(argv, quiet = false) {
  */
 async function main(argv) {
   if (argv[0] === "campaign") { await campaignCli(argv.slice(1)); return; }
+  if (argv[0] === "contract") { contractCli(argv.slice(1)); return; }
   const parsed = parseCli(argv);
   if (!parsed) { usage(); return; }
   const { command, values } = parsed;
@@ -6891,13 +6880,7 @@ async function main(argv) {
     if (!ok) process.exitCode = 1;
     return;
   }
-  if (command === "validate") {
-    const path = resolve(target);
-    const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-    process.stdout.write(`valid${contract.warnings.length ? ` (${contract.warnings.length} warning${contract.warnings.length === 1 ? "" : "s"})` : ""}\n`);
-    for (const warning of contract.warnings) process.stdout.write(`[warn] ${warning}\n`);
-    return;
-  }
+  if (command === "validate") { validateContractFile(resolve(target)); return; }
   usage();
 }
 
@@ -7163,7 +7146,8 @@ function usage() {
     "<resume|supervise|cancel> <run-dir> [--detach] [--interval <sec>] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "handoff <run-dir> --node <id> --runtime <runtime-id> [--reason <text>] | " +
-    "doctor [<contract.json>] [--cwd <dir>] [--json] | campaign <init|attach|note|resolve|close|show|list> ...\n",
+    "doctor [<contract.json>] [--cwd <dir>] [--json] | contract <prune|validate> ... | " +
+    "campaign <init|attach|note|resolve|close|show|list> ...\n",
   );
   process.exitCode = 2;
 }
