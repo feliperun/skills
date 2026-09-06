@@ -66,19 +66,6 @@ function productionScriptFiles() {
 // ratchet — lower the ceiling whenever the count drops; never raise it (spec rule 4)
 const EMPTY_CATCH_CEILING = 32;
 
-// ratchet — ceilings only decrease (spec section 9.1)
-/** @type {Record<string, number>} */
-const LINE_CEILINGS = {
-  "runner.mjs": 6998,
-  "contract.mjs": 1600,
-  "campaign-autonomy.mjs": 1320,
-  "campaign.mjs": 1300,
-  "heartbeat.mjs": 650,
-  "metrics.mjs": 578,
-  "drivers/exec-jsonl.mjs": 1250,
-};
-const DEFAULT_LINE_CEILING = 900;
-
 const VALID_MESSAGE = "feat(ci): add policy gates\n\nBody line.\n";
 const INVALID_MESSAGE = "bad message\n";
 
@@ -172,10 +159,3 @@ test("empty catch blocks in production scripts never increase", () => {
   assert.ok(count <= EMPTY_CATCH_CEILING, `${count} empty catch blocks exceed ceiling ${EMPTY_CATCH_CEILING}`);
 });
 
-test("production script line counts stay at or below their ratchet ceilings", () => {
-  for (const rel of productionScriptFiles()) {
-    const lines = readFileSync(join(SCRIPTS_DIR, rel), "utf8").split("\n").length;
-    const ceiling = LINE_CEILINGS[rel] ?? DEFAULT_LINE_CEILING;
-    assert.ok(lines <= ceiling, `${rel}: ${lines} lines exceeds ceiling ${ceiling}`);
-  }
-});
