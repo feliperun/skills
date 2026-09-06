@@ -441,6 +441,16 @@ test("builds glm commands pinned to the Z.ai endpoint", () => {
     assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "test-zai-token");
     assert.equal(command.env?.ANTHROPIC_MODEL, "glm-5.3[1m]");
     assert.equal(command.env?.ANTHROPIC_API_KEY, null, "ambient Anthropic key must be removed");
+    assert.equal(command.env?.API_TIMEOUT_MS, "3000000");
+    assert.equal(command.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+    assert.equal(command.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL, "glm-5.3-flash[1m]", "a 1M-context runtime routes small-model calls to the 1M flash tier");
+    assert.equal(command.env?.ANTHROPIC_DEFAULT_SONNET_MODEL, "glm-5.3[1m]");
+    assert.equal(command.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, "glm-5.3[1m]");
+    assert.equal(command.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1048576");
+
+    const flash = providerCommand({ driver: "glm", model: "glm-5.3-flash" }, "task");
+    assert.equal(flash.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL, "glm-5.3-flash");
+    assert.equal(flash.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000", "a model without the [1m] suffix keeps the 200k compaction window");
 
     const custom = providerCommand({
       driver: "glm",
