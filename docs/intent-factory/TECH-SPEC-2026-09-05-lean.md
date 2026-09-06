@@ -162,7 +162,10 @@ Seven rules replace the eighteen.
    and counted separately. Nothing else is metered for control; usage is
    recorded per attempt in `usage.jsonl` for reporting.
 4. **Retry in place.** `resume <run-dir>` first adopts and re-judges completed
-   work (as today), then re-dispatches ordinary failures (`failed`, `stalled`,
+   work: orphaned running nodes as today, and also nodes whose worker result
+   and verification are recorded but whose review is unresolved (`blocked`
+   with `judge_unavailable`) — those are re-judged, never re-dispatched to a
+   worker. Then it re-dispatches ordinary failures (`failed`, `stalled`,
    `exhausted` by timeout, `canceled`, and `blocked` by `dependency_failed`)
    as attempt plus one with the previous error and findings appended, in a
    fresh worktree from the integration head. `unknown_effect_reconciled`
@@ -175,12 +178,16 @@ Seven rules replace the eighteen.
 5. **One controller, an atomic lock, files as state.** `run --detach` starts
    one controller that acquires `controller.lock` by atomic exclusive create,
    recording pid and process start time; a contender treats the lock as
-   stale only when the pid is dead or its start time differs, and a takeover
-   kills the previous controller's process group before proceeding. Status
-   shows a stale controller explicitly. Node JSON and `events.jsonl` are the
-   state; `status.json` per run and `.runs/status.json` (pointer to the
-   active run) are derived each tick for readers. No supervisor lease,
-   heartbeat, liveness journal, outbox, projector or generation fencing.
+   stale only when the pid is dead or its start time differs. Workers and
+   verification run in their own detached process groups, so a takeover
+   first terminates every invocation process group the dead controller
+   recorded in node state (the same list `cancel` uses), waits for them to
+   exit, and only then dispatches anything; a test proves an orphaned
+   invocation is reaped. Status shows a stale controller explicitly. Node
+   JSON and `events.jsonl` are the state; `status.json` per run and
+   `.runs/status.json` (pointer to the active run) are derived each tick for
+   readers. No supervisor lease, heartbeat, liveness journal, outbox,
+   projector or generation fencing.
 6. **Notify with receipts, session pulls.** On `node.terminal`,
    `run.terminal` and `attention` the controller calls
    `INTENT_FACTORY_NOTIFY_BIN` with a one-line message and appends a receipt
@@ -194,18 +201,29 @@ Seven rules replace the eighteen.
 
 **Integration transaction (rule 1 and 2 detail).** Integration is serialized
 by the controller: it creates the candidate `integration-head + attempt
-branch` (fast-forward or merge), runs the node's `verification` on the
-candidate, and only then writes the node `done` and advances the recorded
-integration head, in that order, so a crash after the merge and before the
-state write is repaired by re-running the same integration idempotently. A
-conflict marks the node `attention` with the conflicting paths and keeps the
-attempt worktree for inspection; nothing is auto-resolved.
+branch` on the run branch (fast-forward or merge), runs the node's
+`verification` on the candidate, and then performs exactly one state write:
+the node JSON becomes `done` carrying `integratedHead` (the candidate sha).
+The integration head is never persisted separately; it is derived on read as
+the run branch tip, which must equal the newest `integratedHead` among done
+nodes, and dependents are scheduled only from done nodes. The single crash
+window is therefore "merged but not written": on startup the controller
+detects an attempt branch already contained in the run branch
+(`git merge-base --is-ancestor`), re-verifies the candidate and performs the
+same write idempotently. A conflict marks the node `attention` with the
+conflicting paths and keeps the attempt worktree for inspection; nothing is
+auto-resolved. Tests cover a crash after the merge and before the write, and
+a repeated integration producing no duplicate effect.
 
 **Verification once per attempt (error 11).** The worker is told to run the
 targeted checks it needs; the controller runs `verification` once on the
-worktree and once on the integrated candidate; a Definition-of-Done command
-proof whose command equals a `verification` entry reuses the recorded result
-instead of running a third time. The judge sees the recorded results.
+worktree and once on the integrated candidate. A Definition-of-Done item may
+declare `proof: {kind: "verification", ref: <index>}`, which names a
+`verification` entry by position and reuses its recorded result (pass or
+fail and output) at gate time; `command` proofs always execute. Reuse is by
+reference only, never by comparing command strings, because a joined argv
+does not preserve argument boundaries or shell semantics. The judge sees the
+recorded results.
 
 Modules after v0.3 (line budgets are review guidance, not CI ceilings):
 
@@ -276,11 +294,14 @@ on 0.2.0 and therefore uses `mode: "autonomous"` packets with `writeRoots`
 (whole-repo read, directory-scoped write), the only closed-scope shape 0.2.0
 offers that cannot suffer the enumeration defects.
 
-Phase 0 nodes share one mutable tree, so they are chained with `dependsOn`:
-a failed node stops the phase instead of letting its partial edits leak into
-the next node, and `resume` re-dispatches the failed node and unblocks the
-rest after the orchestrator has quarantined or fixed the tree. Phases 1 and
-later run on worktrees and need edges only for real data dependencies.
+A phase always runs on the runner shipped by the previous phase, so a
+feature becomes available to the campaign one phase after it is implemented.
+Phase 0 and phase 1 therefore share one mutable tree and their nodes are
+chained with `dependsOn`: a failed node stops the phase instead of letting
+its partial edits leak into the next node, and `resume` re-dispatches the
+failed node and unblocks the rest after the orchestrator has quarantined or
+fixed the tree. Attempt worktrees, implemented in phase 1, isolate nodes from
+phase 2a onward, where edges are needed only for real data dependencies.
 
 **Bootstrap commit (orchestrator, before phase 0).** Delete the per-file line
 ceilings from `test/ci-policy.test.mjs` (keep the empty-catch ceiling, the
@@ -299,11 +320,19 @@ default for runner code; `luna` (`gpt-5.6-luna`, xhigh, codex
 in place, worktree integration, controller lock); `glm` (`glm-5.3[1m]`) for
 the dashboard page, status line and documentation. Judge `sol` (medium, codex
 `read-only`) for Claude and GLM workers, `opus` (`claude-opus-5`) for Luna
-workers. Worker fallback on exhaustion keeps the vendor split: sonnet → glm
-(judge sol), luna → glm (judge opus), glm → sonnet (judge sol). 0.2.0
-synthesizes no judge failover, so a judge exhaustion in phase 0 is
-`attention`, resolved by `resume` after the provider window resets; phase 1
-adds role-aware fallback (`sol` ↔ `opus`). Phase 0 gates are blocking at
+workers. Worker fallback on exhaustion is a single hop that keeps the vendor
+split: sonnet → glm (judge sol) and luna → glm (judge opus); a GLM worker
+that also exhausts is `attention`, never a second hop to an Anthropic worker
+under an Anthropic judge. 0.2.0 synthesizes no judge failover, so a judge
+exhaustion in phase 0 is `attention`, resolved by `resume` after the
+provider window resets. From phase 1, `runtimes[].fallback` covers judges
+too, and a judge fallback is taken only when its vendor differs from the
+vendor of the worker runtime actually used for that attempt (`opus` may
+replace `sol` for a Luna or GLM worker, never for a Sonnet worker; `sol` may
+replace `opus` for a GLM worker, never for a Luna worker); validation rejects
+any statically reachable worker/judge pair from one vendor, and an
+unavailable judge with no admissible fallback is `attention`. Phase 0 gates
+are blocking at
 `failOn: ["major", "critical"]`, `maxRevisions: 1`; from phase 1 the default
 is `advisory` and only nodes that change the gate, the lock or the
 integration transaction are `blocking`.
@@ -311,18 +340,18 @@ integration transaction are `blocking`.
 | Phase | Node | Worker | Outcome | Proof |
 |---|---|---|---|---|
 | 0 unblock | `scope-advisory` | sonnet | On a completed implementation attempt whose controller verification passed, `unexpected_write` becomes a recorded finding (paths listed, event appended, shown to the judge and in status) and the node proceeds to the gate; when verification failed, the existing failure path applies unchanged with the unexpected paths appended to the message. `writeRoots` accepts file paths. `declared_paths_changed`, unknown-effect/materialization guards and ignore-source integrity are untouched. | targeted tests via `verification`, `check` and `typecheck` proofs |
-| 0 | `review-modes` | sonnet | `gate.review: none\|advisory\|blocking` (default advisory; `gate: false` is none); verdict candidates are counted at the provider boundary (codex driver: separate agent messages; empty output; missing terminal envelope; timeout) and zero-or-many candidates trigger one bounded re-ask, after which advisory records `invalid_judge_output` and completes while blocking enters `attention` with the work preserved; validation requires `critical` whenever `major` is in `failOn` and `major` for blocking; a DoD command proof equal to a `verification` argv reuses the recorded result. Node snapshot validation admits the new fields. | targeted tests, `check`, `typecheck` |
-| 0 | `retry-in-place` | luna | `resume <run-dir> [--node <id>] [--reconcile <id>] [--max-input-tokens <n>]`: adopt and re-judge first; then re-dispatch ordinary failures and `dependency_failed` nodes as attempt+1 with a bounded 'Previous attempt' section; `unknown_effect_reconciled` needs `--reconcile`; exhausted run budget is attention unless extended explicitly; a `gitHead` descendant is accepted and recorded, a non-descendant refused, a dirty-tree mismatch warns. `contract prune`/`targetedFix` removed. | targeted tests, `check`, `typecheck` |
-| 1 isolation | `attempt-worktrees` | luna | attempt branches and worktrees per rule 1; integration transaction per section 3 including verification of the candidate, idempotent re-integration after a crash between merge and state write, conflicts as attention. | two-node tests with disjoint and overlapping writes; crash-after-merge test on the replay driver |
-| 1 | `parallel-and-fallback` | sonnet | `maxParallel` > 1 accepted; ready nodes without edges run concurrently; `runtimes[].fallback` replaces `runtimeRules` for workers and judges with the vendor-split validation; capability preflight kept. | three independent replay nodes; fallback tests for worker and judge |
+| 0 | `review-modes` | sonnet | `gate.review: none\|advisory\|blocking` (default advisory; `gate: false` is none); verdict candidates are counted at the provider boundary (codex driver: separate agent messages; empty output; missing terminal envelope; timeout) and zero-or-many candidates trigger one bounded re-ask, after which advisory records `invalid_judge_output` and completes while blocking enters `attention` (`blocked`, `judge_unavailable`) with the worker result and verification preserved; validation requires `critical` whenever `major` is in `failOn` and `major` for blocking; `proof: {kind: "verification", ref: <index>}` reuses a recorded verification result by reference. Node snapshot validation admits the new fields. | targeted tests, `check`, `typecheck` |
+| 0 | `retry-in-place` | luna | `resume <run-dir> [--node <id>] [--reconcile <id>] [--max-input-tokens <n>]`: adopt and re-judge first, including `judge_unavailable` nodes, which are re-judged and never re-dispatched; then re-dispatch ordinary failures and `dependency_failed` nodes as attempt+1 with a bounded 'Previous attempt' section; `unknown_effect_reconciled` needs `--reconcile`; exhausted run budget is attention unless extended explicitly; a `gitHead` descendant is accepted and recorded, a non-descendant refused, a dirty-tree mismatch warns. `contract prune`/`targetedFix` removed. | targeted tests, `check`, `typecheck` |
+| 1 isolation | `attempt-worktrees` | luna | attempt branches and worktrees per rule 1; integration transaction per section 3 (single state write carrying `integratedHead`, derived integration head, recovery of merged-but-unwritten attempts), conflicts as attention. Chained after nothing; `parallel-and-fallback` depends on it. | two-node tests with disjoint and overlapping writes; crash-after-merge-before-write and repeated-integration tests on the replay driver |
+| 1 | `parallel-and-fallback` | sonnet | `maxParallel` > 1 accepted; ready nodes without edges run concurrently in their worktrees; `runtimes[].fallback` replaces `runtimeRules` for workers and judges with the vendor-split validation of section 5; capability preflight kept. | three independent replay nodes; fallback tests for worker and judge including a rejected same-vendor pair |
 | 2a budget | `budget-usd-schema3` | sonnet | schema 3: `maxCostUsd` per node and run, `pricing` per runtime, `usage.jsonl` per attempt with `unknown` usage counted; `usagePolicy`, `budgetProfile`, `progressPolicy`, ledger epochs, segments, continuations and `capsule.mjs` removed together with their tests; `metrics.mjs`, `dashboard.mjs`, `render.mjs` and `status` read the new records so the suite is green at phase end. | tests; full suite by the orchestrator |
-| 2b process | `controller-lock` | luna | `lock.mjs` per rule 5 with takeover killing the old process group; `supervisor.mjs`, `lease-liveness.mjs`, supervisor lease and generations removed; stale controller visible in status; tests for two contenders, pid reuse (start-time mismatch) and orphaned children. | tests |
+| 2b process | `controller-lock` | luna | `lock.mjs` per rule 5: atomic acquisition, stale detection by pid and start time, takeover that terminates every recorded invocation process group before dispatching; `supervisor.mjs`, `lease-liveness.mjs`, supervisor lease and generations removed; stale controller visible in status; tests for two contenders, pid reuse (start-time mismatch) and an orphaned detached invocation reaped on takeover. | tests |
 | 2b | `status-and-notify` | sonnet | `status.json` per run and `.runs/status.json` written each tick; notify with receipts and bounded retry per rule 6 (`notify.jsonl`); heartbeat, liveness journal, outbox, cursors and projector removed after `metrics.mjs`, `dashboard.mjs` and the status line are switched to `status.json`, `usage.jsonl` and `notify.jsonl`; `campaign sync`/`ack` keyed by journal event ids; `campaign-autonomy.mjs` and `campaign start/supervise/configure/drain/watch` removed. | tests; full suite by the orchestrator |
 | 3 visibility | `dashboard-v2` | glm | page and server per section 4 over `status.json`, node JSON, `events.jsonl`, `usage.jsonl`, `notify.jsonl`. | server API tests and a DOM test on the rendered snapshot |
 | 3 | `status-surfaces` | glm | `status` CLI order, status line ≤ 40 lines reading `.runs/status.json`, notify one-line templates. | tests |
 | 4 release | `runner-split` | luna | `runner.mjs` split per the section 3 table; no behaviour change. | full suite, unchanged pass count |
 | 4 | `docs-v03` | glm | SKILL.md ≤ 6 KB, contract.md ≤ 20 KB, operations.md ≤ 10 KB describing only what exists; other references deleted or merged; history moved to `docs/intent-factory/`. | byte-ceiling test; link check |
-| 4 | `metrics-v03` | sonnet | indicators of section 6 over `usage.jsonl`, node attempts, `notify.jsonl` receipts and active intervals; `ambientCoverage`, `silentStallRate` and the weighted-token indicators deleted; baseline fixture from this campaign's own records. | tests |
+| 4 | `metrics-v03` | sonnet | indicators of section 6 over `usage.jsonl`, node attempts, `notify.jsonl` receipts and active intervals, including the reporting-only `tokensByKind` sums (uncached input, cache read, output) per campaign and per runtime; `ambientCoverage`, `silentStallRate` and every weighted-token indicator deleted; baseline fixture from this campaign's own records. | tests |
 | close | orchestrator | — | version 0.3.0, retrospective note, `campaign close`, push. | full suite |
 
 Every node's Definition of Done: mechanical items are `npm run check` and
@@ -339,8 +368,9 @@ forbid the canonical result file the controller designates under
 
 - One contract per phase, authored in one turn, validated and preflighted
   before launch.
-- Contract `maxInputTokens` 6 M weighted as a safety net; target ≤ 2 M per
-  phase. `stallTimeoutSec` 900, `timeoutSec` 3600.
+- On the 0.2.0 runner (phases 0 to 2a) the contract `maxInputTokens` is
+  6 M weighted as a safety net only; from 2b the safety net is `maxCostUsd`.
+  `stallTimeoutSec` 900, `timeoutSec` 3600.
 - After each phase: orchestrator runs `npm test`, reviews the diff, commits
   with Conventional Commits, records an outcome note (attempts, USD, wall
   clock, first-attempt rate), refreshes the controller snapshot.
@@ -370,7 +400,7 @@ cost plus priced usage, with `unknown` invocations counted separately.
 | Linked runs per closed checkpoint | 2.04 | ≤ 1.3 |
 | Runs per campaign | 49 | ≤ 8 (6 contracts + retries by resume) |
 | Wall clock | 4 days | ≤ 2 days (hypothesis) |
-| Weighted input | 40.7 M | ≤ 10 M (hypothesis; measurable on 0.2.0 records for phases 0-2a, on `usage.jsonl` after) |
+| Tokens by kind, all vendors (reporting only, no weighting) | uncached input 8.6 M · cache read 321 M · output 3.0 M | uncached input ≤ 4 M · cache read ≤ 150 M (hypotheses); ledger records cover phases 0-2a, `usage.jsonl` covers the rest, `tokensByKind` sums both |
 | Cost, all vendors | USD 69.68 Claude only, others unrecorded | reported in full with provenance; Claude ≤ USD 150 |
 | Blocking judge first-pass rate | 0.5 (`sol-medium`) | ≥ 0.7 |
 | Notifications | 0 of 99 delivered | 100 % of terminal/attention events carry a receipt (`delivered` or `failed` after 3 tries) within 60 s |
@@ -435,4 +465,19 @@ Verdict `contested`: 16 findings, 8 blocking. All accepted; responses:
 | F15 phases not working checkpoints | phase 0 chained; readers adapted in the deleting node; phase 2 split into 2a and 2b; records captured early; `finalVerification` row corrected (5, 7) |
 | F16 target denominators mixed | denominators defined, hypotheses labelled, code-size estimate re-baselined (6) |
 
-Round 2: pending, targeted at the round-1 findings.
+### Round 2 (2026-09-06, gpt-6-astra xhigh, read-only, at `cbf3dfe`)
+
+Verdict `contested`: F01-F04, F07-F12 resolved; F05, F06, F13-F16 open; one
+new blocking finding. Responses, all accepted:
+
+| Finding | Response |
+|---|---|
+| F05 takeover missed detached invocation groups | takeover terminates every recorded invocation process group before dispatching; reaping test (rule 5, 2b) |
+| F06 `done` written before the integration head | one state write carrying `integratedHead`; head derived from the run branch; merged-but-unwritten recovery (3, phase 1) |
+| F13 `judge_unavailable` would be re-dispatched, and the packets forbade the fix | resume re-judges unresolved-review nodes; `retry-in-place` is authorized and tests it (rule 4, contract) |
+| F14 second hop reached an Anthropic worker under Opus; judge fallback broke the split | single-hop worker fallback to GLM only; judge fallback admissible only across vendors, validated statically (5, contract) |
+| F15 phase 1 shares the tree too | phases 0 and 1 chained; isolation from 2a (5) |
+| F16 weighted target with the indicator deleted | reporting-only `tokensByKind`; targets restated in raw token kinds (4, 6) |
+| F17 proof reuse by joined argv is unsound | `proof: {kind: "verification", ref: <index>}` by reference; command proofs always execute (3, contract) |
+
+Round 3: pending, targeted at F05, F06, F13-F17.
