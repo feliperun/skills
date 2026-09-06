@@ -66,3 +66,9 @@ When this file governs anything in production:
   unreviewed destructive action against production data.
 - Never grant an agent operating under this file unsupervised write or delete access
   to a production database.
+
+<!-- intent-factory-active:start (managed by intent-factory — read, never edit) -->
+Before starting new work here, check `.runs/`: if a campaign is active or a run is not terminal, continue it instead of starting over — read its `HANDOFF.md`/`STATUS.md`, attach to the campaign, and `resume` or `supervise` the run. Active runs are supervised by a deterministic detached process: do not poll `status` in a loop — on resume, check status once and act only on terminal states.
+
+- intent-factory campaign `intent-factory-lean-20260905`: active — read `.runs/campaigns/intent-factory-lean-20260905/HANDOFF.md`
+<!-- intent-factory-active:end -->
