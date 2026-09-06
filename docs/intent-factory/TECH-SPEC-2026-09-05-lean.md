@@ -200,20 +200,28 @@ Seven rules replace the eighteen.
    `docs/intent-factory/`.
 
 **Integration transaction (rule 1 and 2 detail).** Integration is serialized
-by the controller: it creates the candidate `integration-head + attempt
-branch` on the run branch (fast-forward or merge), runs the node's
-`verification` on the candidate, and then performs exactly one state write:
-the node JSON becomes `done` carrying `integratedHead` (the candidate sha).
-The integration head is never persisted separately; it is derived on read as
-the run branch tip, which must equal the newest `integratedHead` among done
-nodes, and dependents are scheduled only from done nodes. The single crash
-window is therefore "merged but not written": on startup the controller
-detects an attempt branch already contained in the run branch
-(`git merge-base --is-ancestor`), re-verifies the candidate and performs the
-same write idempotently. A conflict marks the node `attention` with the
-conflicting paths and keeps the attempt worktree for inspection; nothing is
-auto-resolved. Tests cover a crash after the merge and before the write, and
-a repeated integration producing no duplicate effect.
+by the controller and never touches the run branch until the candidate is
+accepted. It builds the candidate commit `integration-head + attempt branch`
+(fast-forward or merge) on a separate candidate ref
+(`refs/intent-factory/<run>/candidate`) checked out in a scratch worktree,
+runs the node's `verification` there, and only on success fast-forwards the
+run branch to the candidate sha and performs exactly one state write: the
+node JSON becomes `done` carrying `integratedHead` (that sha). A failed
+candidate verification deletes the candidate ref and scratch worktree, leaves
+the run branch tip exactly where it was, keeps the attempt worktree for
+inspection and records the failure on the node. The integration head is never
+persisted separately; it is derived on read as the run branch tip, which must
+equal the newest `integratedHead` among done nodes, and dependents are
+scheduled only from done nodes. The single crash window is therefore
+"fast-forwarded but not written": on startup the controller detects a run
+branch tip that is not the `integratedHead` of any done node, finds the
+attempt branch it contains (`git merge-base --is-ancestor`) and performs the
+same write idempotently; the candidate was already verified before the
+fast-forward. A conflict marks the node `attention` with the conflicting
+paths and keeps the attempt worktree; nothing is auto-resolved. Tests cover a
+failed candidate verification leaving the run branch unchanged, a crash after
+the fast-forward and before the write, and a repeated integration producing
+no duplicate effect.
 
 **Verification once per attempt (error 11).** The worker is told to run the
 targeted checks it needs; the controller runs `verification` once on the
@@ -342,7 +350,7 @@ integration transaction are `blocking`.
 | 0 unblock | `scope-advisory` | sonnet | On a completed implementation attempt whose controller verification passed, `unexpected_write` becomes a recorded finding (paths listed, event appended, shown to the judge and in status) and the node proceeds to the gate; when verification failed, the existing failure path applies unchanged with the unexpected paths appended to the message. `writeRoots` accepts file paths. `declared_paths_changed`, unknown-effect/materialization guards and ignore-source integrity are untouched. | targeted tests via `verification`, `check` and `typecheck` proofs |
 | 0 | `review-modes` | sonnet | `gate.review: none\|advisory\|blocking` (default advisory; `gate: false` is none); verdict candidates are counted at the provider boundary (codex driver: separate agent messages; empty output; missing terminal envelope; timeout) and zero-or-many candidates trigger one bounded re-ask, after which advisory records `invalid_judge_output` and completes while blocking enters `attention` (`blocked`, `judge_unavailable`) with the worker result and verification preserved; validation requires `critical` whenever `major` is in `failOn` and `major` for blocking; `proof: {kind: "verification", ref: <index>}` reuses a recorded verification result by reference. Node snapshot validation admits the new fields. | targeted tests, `check`, `typecheck` |
 | 0 | `retry-in-place` | luna | `resume <run-dir> [--node <id>] [--reconcile <id>] [--max-input-tokens <n>]`: adopt and re-judge first, including `judge_unavailable` nodes, which are re-judged and never re-dispatched; then re-dispatch ordinary failures and `dependency_failed` nodes as attempt+1 with a bounded 'Previous attempt' section; `unknown_effect_reconciled` needs `--reconcile`; exhausted run budget is attention unless extended explicitly; a `gitHead` descendant is accepted and recorded, a non-descendant refused, a dirty-tree mismatch warns. `contract prune`/`targetedFix` removed. | targeted tests, `check`, `typecheck` |
-| 1 isolation | `attempt-worktrees` | luna | attempt branches and worktrees per rule 1; integration transaction per section 3 (single state write carrying `integratedHead`, derived integration head, recovery of merged-but-unwritten attempts), conflicts as attention. Chained after nothing; `parallel-and-fallback` depends on it. | two-node tests with disjoint and overlapping writes; crash-after-merge-before-write and repeated-integration tests on the replay driver |
+| 1 isolation | `attempt-worktrees` | luna | attempt branches and worktrees per rule 1; integration transaction per section 3 (candidate ref verified before the run branch moves, single state write carrying `integratedHead`, derived integration head, recovery of fast-forwarded-but-unwritten attempts), conflicts as attention. Chained after nothing; `parallel-and-fallback` depends on it. | two-node tests with disjoint and overlapping writes; failed-candidate-leaves-branch-unchanged, crash-after-fast-forward-before-write and repeated-integration tests on the replay driver |
 | 1 | `parallel-and-fallback` | sonnet | `maxParallel` > 1 accepted; ready nodes without edges run concurrently in their worktrees; `runtimes[].fallback` replaces `runtimeRules` for workers and judges with the vendor-split validation of section 5; capability preflight kept. | three independent replay nodes; fallback tests for worker and judge including a rejected same-vendor pair |
 | 2a budget | `budget-usd-schema3` | sonnet | schema 3: `maxCostUsd` per node and run, `pricing` per runtime, `usage.jsonl` per attempt with `unknown` usage counted; `usagePolicy`, `budgetProfile`, `progressPolicy`, ledger epochs, segments, continuations and `capsule.mjs` removed together with their tests; `metrics.mjs`, `dashboard.mjs`, `render.mjs` and `status` read the new records so the suite is green at phase end. | tests; full suite by the orchestrator |
 | 2b process | `controller-lock` | luna | `lock.mjs` per rule 5: atomic acquisition, stale detection by pid and start time, takeover that terminates every recorded invocation process group before dispatching; `supervisor.mjs`, `lease-liveness.mjs`, supervisor lease and generations removed; stale controller visible in status; tests for two contenders, pid reuse (start-time mismatch) and an orphaned detached invocation reaped on takeover. | tests |
@@ -480,4 +488,15 @@ new blocking finding. Responses, all accepted:
 | F16 weighted target with the indicator deleted | reporting-only `tokensByKind`; targets restated in raw token kinds (4, 6) |
 | F17 proof reuse by joined argv is unsound | `proof: {kind: "verification", ref: <index>}` by reference; command proofs always execute (3, contract) |
 
-Round 3: pending, targeted at F05, F06, F13-F17.
+### Round 3 (2026-09-06, gpt-6-astra xhigh, read-only, at `a704cb4`)
+
+F05, F06, F13-F17 resolved. One new blocking finding, accepted:
+
+| Finding | Response |
+|---|---|
+| F18 a failed candidate verification left the run branch tip contaminated | the candidate is built and verified on a separate ref and scratch worktree; the run branch fast-forwards only after acceptance; failure restores nothing because nothing moved; test named (3, phase 1) |
+
+Phase 0 launched on the owner's instruction at `cbf3dfe` before this round
+closed; F18 concerns the phase-1 integration transaction only. The phase-1
+contract receives a targeted round 4 (F18 and the contract itself) before it
+launches.
