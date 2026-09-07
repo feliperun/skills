@@ -82,7 +82,7 @@ test("discovery and verification aggregate prompt limits fail before spawn", () 
   writeFileSync(join(cwd, "README.md"), "read\n");
   const base = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: "0.1.0", id: "oversized", campaignId: "oversized-campaign", goal: "test", cwd: ".",
-    usagePolicy: false, runtimeDefaults: { worker: "worker", judge: "worker" }, runtimes: { worker: { driver: "codex", model: "test" } }, runtimeRules: [],
+    usagePolicy: false, runtimeDefaults: { worker: "worker", judge: "worker" }, runtimes: { worker: { driver: "codex", model: "test" } },
   };
   assert.throws(() => validateContract({
     ...base,
@@ -311,10 +311,21 @@ test("linked-worktree Git identity changes fail closed", () => {
 
   const before = captureWorkspaceSnapshot(first);
   assert.ok(before.ignoreSources.some((entry) => entry.path === ".git"));
-  writeFileSync(join(first, ".git"), "gitdir: /missing/worktree/identity\n");
+  assert.ok(before.ignoreSources.some((entry) => entry.path === ".git/config"));
+  assert.ok(before.ignoreSources.some((entry) => entry.path === ".git/info/exclude"));
+  const configPath = execFileSync("git", ["-C", first, "rev-parse", "--git-path", "config"], { encoding: "utf8" }).trim();
+  writeFileSync(configPath, `${readFileSync(configPath, "utf8")}\n[core]\nexcludesFile = linked-worktree-exclude\n`);
 
   assert.throws(
     () => compareWorkspaceSnapshot(before, first, { files: [".git"], roots: [] }),
+    /ignore sources changed/u,
+  );
+
+  const beforeExclude = captureWorkspaceSnapshot(first);
+  const excludePath = execFileSync("git", ["-C", first, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8" }).trim();
+  writeFileSync(excludePath, `${readFileSync(excludePath, "utf8")}\nlinked-hidden.txt\n`);
+  assert.throws(
+    () => compareWorkspaceSnapshot(beforeExclude, first, { files: [".git"], roots: [] }),
     /ignore sources changed/u,
   );
 });

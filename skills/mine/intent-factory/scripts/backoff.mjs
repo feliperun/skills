@@ -12,7 +12,6 @@
  * the override, the node transition — stays in runner.mjs, so this module can
  * be tested without a run directory, a lease, or a provider.
  */
-import { routeRuntime } from "./lib.mjs";
 import { nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { latestTimeoutSec, quotaResetSchedule } from "./supervisor.mjs";
 
@@ -269,34 +268,30 @@ export function isRepairable(node, state) {
  * @returns {{blocked: RouteError|null, nextRuntime: string, ruleIndex: number|undefined, revision: number, hop: number, backoffSec: number, backoffUntil: string}}
  */
 export function planRoute(contract, node, state, role, error, current, schedule, now = Date.now()) {
-  const routed = routeRuntime(contract, node, role, { status: "exhausted", errorCode: error.code, currentRuntime: current });
   const revision = state.revisions ?? 0;
   const attempted = new Set((state.invocations ?? [])
     .filter((invocation) => invocation.phase === role && (invocation.revision === undefined || invocation.revision === revision))
     .map((invocation) => invocation.runtimeId)
     .filter(Boolean));
-  // A contract that declared no rule still gets an edge: the cheapest healthy
-  // runtime it has not burned in this revision (ADR-0022 synthesis).
-  const synthesized = routed.ruleIndex === undefined
-    ? nextSynthesizedRuntime(contract, role, current, attempted)
-    : null;
+  // The runtime's own declared fallback is the only edge that exists: one
+  // hop, never a chain over every other runtime in the contract.
+  const fallback = nextSynthesizedRuntime(contract, role, current, attempted);
   const hop = nextHop(state, role, revision, schedule);
-  const nextRuntime = schedule.kind === "reset" ? current : synthesized ?? routed.id;
-  const runtimeCount = Object.keys(contract.runtimes).length;
+  const nextRuntime = schedule.kind === "reset" ? current : fallback ?? current;
   const blocked = schedule.kind === "reset"
     ? null
-    : routed.ruleIndex === undefined && synthesized === null
-    ? { code: error.code, message: error.message }
-    : attempted.has(nextRuntime)
-      ? { code: "provider_failover_cycle", message: `runtime ${nextRuntime} was already attempted in ${role} revision ${revision}` }
-      : hop >= runtimeCount
-        ? { code: "provider_failover_hop_cap", message: `provider failover exceeded the ${runtimeCount}-runtime hop cap` }
-        : null;
+    : fallback === null
+      ? { code: error.code, message: error.message }
+      : attempted.has(fallback)
+        ? { code: "provider_failover_cycle", message: `runtime ${fallback} was already attempted in ${role} revision ${revision}` }
+        : hop > 1
+          ? { code: "provider_failover_hop_cap", message: "provider failover exceeded the one-hop cap" }
+          : null;
   const backoffSec = schedule.kind === "reset"
     ? Math.max(0, (Date.parse(schedule.at) - now) / 1_000)
-    : routed.backoffSec ?? 0;
+    : 0;
   const backoffUntil = schedule.kind === "reset" ? schedule.at : new Date(now + backoffSec * 1_000).toISOString();
-  return { blocked, nextRuntime, ruleIndex: routed.ruleIndex, revision, hop, backoffSec, backoffUntil };
+  return { blocked, nextRuntime, ruleIndex: undefined, revision, hop, backoffSec, backoffUntil };
 }
 
 /**

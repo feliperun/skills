@@ -570,7 +570,6 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
     maxCostUsd: repairCostUsd,
     runtimeDefaults: { worker: workerRuntime, judge: workerRuntime },
     runtimes,
-    runtimeRules: [],
     nodes: [{
       id: `repair-${stableId(repairKey).slice(0, 16)}`,
       type: String(failedNode.type ?? "repair"),
@@ -875,13 +874,10 @@ function inferRunDir(record) {
 
 /** @param {JsonObject|undefined} contract @param {unknown} current @param {string} next @returns {boolean} */
 function runAllowsFailover(contract, current, next) {
-  if (!contract || !Array.isArray(contract.runtimeRules)) return false;
-  return contract.runtimeRules.some((rawRule) => {
-    if (!rawRule || typeof rawRule !== "object") return false;
-    const rule = /** @type {JsonObject} */ (rawRule);
-    const match = rule.match && typeof rule.match === "object" ? /** @type {JsonObject} */ (rule.match) : {};
-    return match.currentRuntime === current && rule.runtime === next;
-  });
+  const runtimes = /** @type {JsonObject|undefined} */ (contract?.runtimes);
+  if (!runtimes || typeof runtimes !== "object") return false;
+  const runtime = /** @type {JsonObject|undefined} */ (runtimes[/** @type {string} */ (current)]);
+  return runtime !== undefined && runtime.fallback === next;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -99,8 +99,11 @@ export function fixture(overrides = {}) {
     usagePolicy: false,
     runtimeDefaults: { worker: "luna", judge: "sol" },
     runtimes: {
+      // sol declares its vendor outright, distinct from luna's driver-default
+      // "openai": every fixture node's default worker (luna) and judge (sol)
+      // pairing must clear the worker/judge cross-vendor gate untouched.
       luna: { driver: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
-      sol: { driver: "codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+      sol: { driver: "codex", model: "gpt-5.6-sol", reasoning: "xhigh", vendor: "openai-sol" },
       opus: { driver: "claude", model: "opus", reasoning: "high" },
       agy: { driver: "agy", model: "gemini-3.7-flash-low" },
       flash: {
@@ -109,10 +112,6 @@ export function fixture(overrides = {}) {
         config: { model_provider: "deepseek", "model_providers.deepseek.env_key": "DEEPSEEK_API_KEY" },
       },
     },
-    runtimeRules: [
-      { match: { type: "frontend" }, runtime: "opus" },
-      { match: { type: "mechanic" }, runtime: "flash" },
-    ],
     ...overrides,
     nodes: /** @type {Record<string, unknown>[]} */ (overrides.nodes ?? [{ id: "build", type: "backend", taskPacket: packet(), gate: false }]).map((node, index) => ({
       phase: `fixture-phase-${index}`,
@@ -157,7 +156,7 @@ export function writeContract(directory, value) {
   const defaultWriteFile = join(cwd, "README.md");
   if (!existsSync(defaultWriteFile)) writeFileSync(defaultWriteFile, "");
   const pathForCampaign = campaignDir(runsDir, campaignId);
-  if (!existsSync(join(cwd, ".git"))) initializeGit(cwd, { commit: false });
+  if (!existsSync(join(cwd, ".git"))) initializeGit(cwd);
   if (!existsSync(pathForCampaign)) {
     initializeCampaign(runsDir, { campaignId, goal: value.goal });
   }
@@ -168,17 +167,7 @@ export function writeContract(directory, value) {
  * @param {string} directory
  * @returns {void}
  */
-export function initializeGit(directory, { commit = true } = {}) {
-  if (!commit) {
-    const git = join(directory, ".git");
-    mkdirSync(join(git, "objects", "info"), { recursive: true });
-    mkdirSync(join(git, "objects", "pack"), { recursive: true });
-    mkdirSync(join(git, "refs", "heads"), { recursive: true });
-    mkdirSync(join(git, "refs", "tags"), { recursive: true });
-    writeFileSync(join(git, "HEAD"), "ref: refs/heads/main\n");
-    writeFileSync(join(git, "config"), "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n");
-    return;
-  }
+export function initializeGit(directory) {
   execFileSync("git", ["init", "-q", directory]);
   execFileSync("git", ["-C", directory, "add", ".", ":!.runs"]);
   execFileSync("git", ["-C", directory, "-c", "user.email=runner@example.test", "-c", "user.name=runner", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
@@ -217,7 +206,7 @@ if (process.argv.includes("--version")) {
       if (canonicalResultPath) writeFileSync(canonicalResultPath, text);
       return text;
     };
-    const protocolModes = new Set(["write-unexpected", "write-unexpected-judge-prompt", "write-unexpected-long-review", "new-symlink-escape", "retargeted-symlink-escape", "write-outside-file-root", "write-under-file-root"]);
+    const protocolModes = new Set(["write-result", "write-unexpected", "write-unexpected-judge-prompt", "write-unexpected-long-review", "new-symlink-escape", "retargeted-symlink-escape", "write-outside-file-root", "write-under-file-root"]);
     if (mode !== "exhausted") console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
     if (mode === "thread-large-timeout" && process.argv.includes("resume")) {
       appendFileSync(${JSON.stringify(join(directory, ".runs", "resume-continuation.txt"))}, process.argv.join(" ") + "\\n");

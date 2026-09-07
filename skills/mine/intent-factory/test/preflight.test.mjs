@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fakeCodex, fixture, writeContract } from "./helpers.mjs";
+import { fakeCodex, fixture, packet, writeContract } from "./helpers.mjs";
 import {
   blockingChecks,
   checkDisk,
@@ -13,7 +13,9 @@ import {
   checkRuntimeBinaries,
   checkWorktree,
   environmentPreflight,
+  reachableRuntimes,
 } from "../scripts/env-preflight.mjs";
+import { validateContract } from "../scripts/contract.mjs";
 
 const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 
@@ -81,6 +83,9 @@ test("preflight --json runs the live probe and reports usage per check", () => {
 function gitRepo(prefix, commands = []) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   spawnSync("git", ["-C", directory, "init", "-q"], { encoding: "utf8" });
+  writeFileSync(join(directory, "README.md"), "fixture\n");
+  spawnSync("git", ["-C", directory, "add", "README.md"], { encoding: "utf8" });
+  spawnSync("git", ["-C", directory, "-c", "user.email=runner@example.test", "-c", "user.name=runner", "commit", "-qm", "fixture"], { encoding: "utf8" });
   for (const args of commands) spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
   return directory;
 }
@@ -110,11 +115,16 @@ test("preflight disk check fails below the configured free-space threshold", () 
   assert.match(starved.detail, /free at least/u);
 });
 
-test("preflight git check accepts an unborn HEAD and rejects a missing cwd", () => {
+test("preflight git check requires an initial commit and rejects a missing cwd", () => {
+  const unborn = mkdtempSync(join(tmpdir(), "env-preflight-unborn-"));
+  spawnSync("git", ["-C", unborn, "init", "-q"], { encoding: "utf8" });
+  const fresh = checkGit(unborn);
+  assert.equal(fresh.ok, false, fresh.detail);
+  assert.match(fresh.detail, /at least one commit/u);
   const directory = gitRepo("env-preflight-git-");
-  const fresh = checkGit(directory);
-  assert.equal(fresh.ok, true, fresh.detail);
-  assert.match(fresh.detail, /no commit yet/u);
+  const committed = checkGit(directory);
+  assert.equal(committed.ok, true, committed.detail);
+  assert.match(committed.detail, /HEAD /u);
   const missing = checkGit(join(directory, "absent"));
   assert.equal(missing.ok, false);
   assert.equal(missing.advisory, false);
@@ -194,6 +204,26 @@ test("preflight failure keeps the run materialized, evidenced, and resumable", (
   const resumed = spawnSync(process.execPath, [runner, "resume", runDir], { encoding: "utf8", env });
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.equal(JSON.parse(readFileSync(join(runDir, "env-preflight.json"), "utf8")).ok, true, "the resume re-checks the environment");
+});
+
+test("preflight's reachable-state enumeration stops at one hop and never probes an unreachable second hop", () => {
+  const directory = mkdtempSync(join(tmpdir(), "env-preflight-one-hop-"));
+  const contractPath = writeContract(directory, fixture({
+    runtimeDefaults: { worker: "a", judge: "a" },
+    runtimes: {
+      a: { driver: "codex", model: "a", fallback: "b" },
+      b: { driver: "codex", model: "b", fallback: "c" },
+      c: { driver: "codex", model: "c" },
+    },
+    nodes: [{ id: "build", type: "backend", runtime: "a", taskPacket: packet(), gate: false }],
+  }));
+  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
+  const runtimes = reachableRuntimes(contract);
+  assert.deepEqual(
+    [...runtimes.keys()].sort(),
+    ["a", "b"],
+    "a node assigned runtime a can take only its one declared hop to b; c is never reachable from it and must never be probed",
+  );
 });
 
 test("doctor reports the four environment checks", () => {

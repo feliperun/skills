@@ -134,23 +134,23 @@ const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
 /** @typedef {import("./contract.mjs").ValidatedNode} ValidatedNode */
 /** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
 /** @typedef {{prompt: string|null, stdout: string, stderr: string}} PathSet */
-/** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, driver: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: import("./contract.mjs").Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
+/** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, driver: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: import("./contract.mjs").Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, nodeId?: string, attempt?: number, workspace?: string, worktreeBranch?: string|null, worktreeBaseSha?: string|null, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
 /** @typedef {import("node:child_process").ChildProcess} ChildProcess */
 /** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
 /** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign"|"wallclock", judgeBudgetOverride?: boolean, liveInputTokens?: number, rotationReason?: string, rotationHandoff?: boolean, rotationHandoffPath?: string, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
 
 /**
- * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
+ * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, workspace?: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
  * @returns {Job}
  */
-export function startProcess({ contract, node, state, runtime, prompt, paths, phase, commandOptions = {}, onInvocation, onInvocationUpdate, onProgress }) {
+export function startProcess({ contract, node, state, runtime, prompt, paths, phase, workspace = contract.cwd, commandOptions = {}, onInvocation, onInvocationUpdate, onProgress }) {
   const command = providerCommand(runtime, prompt, commandOptions);
   if (paths.prompt) writeFileSync(paths.prompt, prompt, { flag: "wx", mode: 0o600 });
   const gateConfigPath = `${paths.prompt}.gate.json`;
   const gateReleasePath = `${paths.prompt}.gate.release`;
   writeJsonAtomic(gateConfigPath, {
-    cwd: contract.cwd,
+    cwd: workspace,
     executable: command.executable,
     args: command.args,
     promptTransport: command.promptTransport,
@@ -162,7 +162,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
   let child;
   try {
     child = spawn(process.execPath, ["-e", GATE_SCRIPT], {
-      cwd: contract.cwd,
+      cwd: workspace,
       env: {
         ...process.env,
         INTENT_FACTORY_GATE_CONFIG: gateConfigPath,
@@ -207,7 +207,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
     node,
     state,
     runtime,
-    cwd: contract.cwd,
+    cwd: workspace,
     paths,
     phase,
     invocation,
@@ -464,7 +464,7 @@ async function checkProgress(job, contract, nowTicks) {
   const baseline = /** @type {import("./verification.mjs").WorkspaceSnapshot|undefined} */ (job.scopeBaseline);
   if (!baseline) return false;
   const boundary = job.state.scope?.boundary;
-  const comparison = compareWorkspaceSnapshot(baseline, contract.cwd, {
+  const comparison = compareWorkspaceSnapshot(baseline, job.cwd, {
     files: job.node.taskPacket.writeFiles,
     roots: job.node.taskPacket.writeRoots,
     boundary,
@@ -493,10 +493,10 @@ async function checkProgress(job, contract, nowTicks) {
  * still-live worker invocation. The persisted progress deadline and dry count
  * are authoritative; provider output is intentionally not considered here.
  *
- * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, invocation: Invocation, baseline?: import("./verification.mjs").WorkspaceSnapshot|null}} args
+ * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, invocation: Invocation, baseline?: import("./verification.mjs").WorkspaceSnapshot|null, workspace?: string}} args
  * @returns {Promise<boolean>}
  */
-export async function checkRecoveredProgress({ contract, node, state, invocation, baseline }) {
+export async function checkRecoveredProgress({ contract, node, state, invocation, baseline, workspace = state.worktree?.path ?? contract.cwd }) {
   const policy = node.progressPolicy;
   if (invocation.phase !== "worker" || !policy) return false;
   const revision = state.revisions ?? 0;
@@ -529,7 +529,7 @@ export async function checkRecoveredProgress({ contract, node, state, invocation
   if (Number.isFinite(nextCheck) && Date.now() < nextCheck) return false;
   if (!baseline) return false;
   const boundary = state.scope?.boundary;
-  const comparison = compareWorkspaceSnapshot(baseline, contract.cwd, {
+  const comparison = compareWorkspaceSnapshot(baseline, workspace, {
     files: node.taskPacket.writeFiles,
     roots: node.taskPacket.writeRoots,
     boundary,

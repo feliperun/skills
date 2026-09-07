@@ -48,7 +48,8 @@ current releases. TypeScript is a development-only dependency for
     "luna": {
       "driver": "codex",
       "model": "gpt-5.6-luna",
-      "reasoning": "xhigh"
+      "reasoning": "xhigh",
+      "fallback": "flash"
     },
     "flash": {
       "driver": "codex",
@@ -70,10 +71,6 @@ current releases. TypeScript is a development-only dependency for
       "reasoning": "xhigh"
     }
   },
-  "runtimeRules": [
-    { "match": { "type": "frontend" }, "runtime": "opus" },
-    { "match": { "type": "mechanic" }, "runtime": "flash" }
-  ],
   "nodes": [
     {
       "id": "implementation",
@@ -405,10 +402,25 @@ execution task packet for the next node.
 Resolve a worker runtime in this order:
 
 1. `nodes[].runtime`
-2. first matching `runtimeRules[]` entry
-3. `runtimeDefaults.worker`
+2. `runtimeDefaults.worker`
 
-Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`. A rule matches when every key in `match` equals the node field with the same name.
+Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`.
+
+### Vendor identity
+
+Vendor is a resolved property, never the driver name: `resolveVendor` in
+`drivers/index.mjs` returns an explicit `vendor` field outright, then a
+provider-configuration override (a codex runtime whose `config.model_provider`
+is `deepseek` is a deepseek vendor, not `openai`), then the driver's own
+default (`claude` → `anthropic`, `codex` → `openai`, `agy` → `google`, `glm` →
+`zhipu`). `replay` and `exec-jsonl` have no default — either driver stands in
+for whatever the recording or the exec'd binary actually is, so a contract
+using either must declare `vendor` outright. A runtime for which nothing above
+names a vendor is a validation error naming the runtime.
+
+Validation rejects a gate-enabled node whose worker and judge runtime resolve
+to the same vendor, naming both runtimes and the shared vendor — the same
+vendor grading its own output is not an independent review.
 
 `driver` is `claude`, `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`. A claude runtime accepts
 `permissionMode` (default `acceptEdits`); a node that must execute commands
@@ -517,33 +529,37 @@ ambient sandbox.
 
 ### Failover edges
 
-An edge is the runtime a phase moves to when its provider exhausts. Every edge
-a run can take is either *declared* or *synthesized*, and preflight walks both
-kinds, so each runtime a run might fall over to is capability-checked before
-the first provider spends anything.
+`runtimes[<id>].fallback` names at most one other runtime id: the single hop
+a role takes out of `<id>` when its provider exhausts. There is no chain and
+no synthesized ordering over the rest of the contract — the reachable set out
+of a runtime is exactly itself and, if declared, its one `fallback`. Because a
+hop is bounded at one, a multi-runtime cycle is structurally impossible, and
+validation still rejects a self-loop (`fallback` naming the runtime itself).
+`costRank` remains optional on a runtime for reporting order only; it plays no
+part in routing.
 
-**Declared.** Each `runtimeRules[]` entry whose `match` carries
-`currentRuntime` is one edge from that runtime to `rule.runtime`, taken with
-the rule's `backoffSec`. Cycles among declared edges are rejected at
-validation. A contract that declares any rule owns its routing outright:
-declared rules suppress synthesis entirely, because a rule set is a statement
-about where the run is allowed to spend.
+This one-hop reachable-state enumeration — a node's role, the runtime it
+started on, and the runtime named by that runtime's `fallback` — is what
+preflight walks: every runtime a run might actually occupy is
+capability-checked before the first provider spends anything, and nothing
+beyond it. A chain like `A.fallback = B`, `B.fallback = C` never has preflight
+probe `C` for a node assigned `A`: that node can take only one hop, so its
+reachable set stops at `B`.
 
-**Synthesized.** A contract with `"runtimeRules": []` still needs somewhere to
-go. Its worker edges are then derived from the remaining healthy runtimes,
-ordered by the optional `costRank` on each runtime — a finite non-negative
-number, cheapest first. The chain out of any runtime is every *other* runtime
-in that order; a runtime with no `costRank` sorts after every ranked one
-whatever those ranks are, and ties break by declaration order, so synthesis is
-deterministic. On exhaustion the worker
-takes the cheapest runtime it has not already burned in the current revision,
-and the routing record cites no `ruleIndex`. Synthesis is worker-only: a judge
-without a declared rule stays on its gate runtime, so a verdict is never
-quietly arbitrated by a model the contract did not name.
+A worker fallback is taken unconditionally once its runtime is reachable and
+not already attempted this revision. A judge fallback is different: whether it
+is admissible depends on which worker runtime actually ran the attempt, which
+a static contract cannot know, so it is not a validation error — it is
+resolved at routing time. `opus` may replace `sol` judging a Luna or GLM
+worker attempt, never a Sonnet worker attempt whose fallback landed on `opus`'s
+own vendor; when a judge fallback would share the vendor of the worker runtime
+that actually ran, the node is refused that fallback and parked `attention`
+with `judge_fallback_vendor_conflict` rather than quietly arbitrated by the
+vendor it is supposed to check.
 
-Both kinds stay bounded by the existing guards — a runtime already attempted
-in the revision, or a hop count that reaches the number of declared runtimes,
-ends the node `exhausted` instead of routing again.
+Both roles stay bounded by the existing guards — a runtime already attempted
+in the revision, or a hop past the one-hop cap, ends the node `exhausted`
+(worker) or `attention` (judge) instead of routing again.
 
 **Quota reset before an edge.** When the exhaustion envelope announces a reset
 instant (`resetAt`, at the envelope root or on its `error`), the controller
@@ -748,6 +764,7 @@ logs/<id>.<attempt>.<worker|judge>[.r<n>].err
 operations/<invocationId>.intent.json
 operations/<invocationId>.settlement.json
 capsules/<nodeId>.<attempt>.json
+integration.jsonl
 events.jsonl
 STATUS.md
 findings.json
@@ -757,6 +774,31 @@ Use `STATUS.md` for normal status queries. Read logs only to diagnose an actiona
 `operations/` holds the exact-once intent and settlement records for every
 provider invocation; `capsules/` holds the portable continuation capsule
 written at each settled worker boundary. Both are state, not diagnostics.
+
+### Attempt worktrees and integration
+
+Every worker attempt gets a linked worktree at
+`.runs/worktrees/<run-id>/<node-id>.<attempt>` on branch
+`if/<run-id>/<node-id>/<attempt>`. The branch starts at the explicit run ref
+`refs/intent-factory/<run-id>/run`, created at the recorded source `gitHead`.
+The node snapshot records `worktree.path`, `worktree.branch`,
+`worktree.baseSha`, and the sealed `worktree.commit`. Provider processes,
+scope snapshots, controller verification, progress checks, capsules, and
+judges use that path; `contract.cwd` remains the home of the run and control
+artifacts. A Codex-shaped worker writes its result to the attempt's
+`.runs/results/<node>.json`; the controller copies it into the canonical run
+directory after the process closes.
+
+Completion is a journalled transaction in `integration.jsonl`. The controller
+seals the branch, records the attempt SHA, previous run-ref tip, candidate SHA,
+and verification evidence, then verifies the candidate through the scratch
+worktree `.runs/worktrees/<run-id>/.candidate`. Only a passing candidate moves
+the run ref with a conditional `update-ref`; the one done-state write then
+records `integratedHead`. Failed verification removes only the candidate
+artifacts and keeps the attempt worktree. Merge conflicts block the node with
+the conflicting paths and keep the attempt worktree. Resume replays the
+unfinished journal record, including an accepted no-change candidate, and
+re-drives terminal cleanup and the node event idempotently.
 
 When a run finishes with any non-done node, the controller writes
 `findings.json`: a consolidated snapshot with per-node status, error,

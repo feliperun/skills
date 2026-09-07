@@ -14,6 +14,7 @@ actionable verdicts into the session.
 | You need | Read |
 | --- | --- |
 | Contract, packets, results, capsule, driver protocol, states, resume | [contract.md](references/contract.md) |
+| Attempt worktrees, integration, and recovery | [operations.md](references/operations.md) |
 | Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
 | Campaign plan, transition table, authority, failover routes, commands | [campaign-autonomy.md](references/campaign-autonomy.md) |
 | Heartbeat, outbox, sync/ack, judge gate, metrics, resilience | [release-1.md](references/release-1.md) |
@@ -57,8 +58,9 @@ Contract-level `finalVerification` runs on the phase-terminal node.
 **Detach and supervise.** `run --detach <contract.json>`, then
 `supervise --detach <run-dir>`: plain Node processes that outlive this session,
 the supervisor re-spawning `resume --detach` whenever the controller dies
-before the run is terminal. Run with `maxParallel: 1`; concurrency is rejected
-until filesystem isolation exists, and the target repo must ignore `.runs/`.
+before the run is terminal. `maxParallel` above one dispatches every ready
+node concurrently, each in its own attempt worktree; integration stays
+serialized. The target repo must ignore `.runs/`.
 
 **Never wait inside a turn.** No `sleep`/`while` loops, no repeated `status`
 calls, no watched background jobs — every tool call re-sends the whole session
@@ -85,19 +87,18 @@ supervisor interval — never a silent provider change.
 the foreground; only the runner is detached. Keep output bounded
 (`| tail -n 200`).
 
-## Routing and runtimeRules failover
+## Routing and fallback
 
-Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or
-an explicit node override — never as model-specific branches in prose. A worker
-resolves as `nodes[].runtime`, then the first matching `runtimeRules[]` entry,
-then `runtimeDefaults.worker`; a judge as `nodes[].gate.runtime`, then
-`runtimeDefaults.judge`.
+Express model choice only in `runtimes`, `runtimeDefaults`, or an explicit
+node override — never as model-specific branches in prose. A worker resolves
+as `nodes[].runtime`, then `runtimeDefaults.worker`; a judge as
+`nodes[].gate.runtime`, then `runtimeDefaults.judge`.
 
-Failover is not resolution: it lives in the campaign plan's
-`authority.runtimeFailover` and only provider exhaustion triggers it — a local
-budget, scope, or authority stop never rotates runtime. Routes:
-[campaign-autonomy.md](references/campaign-autonomy.md). Synthesis:
-[release-1.md](references/release-1.md).
+Each runtime may declare one `fallback` runtime id. Only provider exhaustion
+takes that single hop — a local budget, scope, or authority stop never
+rotates runtime — and a worker/fallback pair is admissible only when the
+judge keeps a different resolved `vendor`. Details:
+[contract.md](references/contract.md).
 
 ## Safety
 

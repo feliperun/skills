@@ -102,6 +102,36 @@ export function driverCapabilities(runtime) {
 }
 
 /**
+ * The vendor a driver talks to when no provider configuration says
+ * otherwise. `replay` and `exec-jsonl` stand in for whatever the recording or
+ * the exec'd binary actually is, so neither gets a default here — a contract
+ * using either must declare `vendor` outright.
+ */
+const DEFAULT_DRIVER_VENDORS = Object.freeze({
+  claude: "anthropic",
+  codex: "openai",
+  agy: "google",
+  glm: "zhipu",
+});
+
+/**
+ * Resolve one runtime's vendor identity: an explicit `vendor` wins outright,
+ * then a provider-configuration override (the codex `model_provider` trap —
+ * a codex runtime configured for deepseek is a deepseek vendor, not openai),
+ * then the driver's own default. `null` means the caller must reject the
+ * runtime: nothing here named a vendor for it.
+ *
+ * @param {{driver: string, vendor?: string, config?: Record<string, unknown>}} runtime
+ * @returns {string|null}
+ */
+export function resolveVendor(runtime) {
+  if (typeof runtime.vendor === "string" && runtime.vendor.length) return runtime.vendor;
+  const provider = runtime.config?.model_provider;
+  if (typeof provider === "string" && provider.length) return provider;
+  return /** @type {Record<string, string>} */ (DEFAULT_DRIVER_VENDORS)[runtime.driver] ?? null;
+}
+
+/**
  * Build one provider invocation. Prompt transport is explicit in the result:
  * stdin adapters return `input`, while argv adapters append the prompt. An
  * optional `env` overlay is merged over the runner environment at spawn time;

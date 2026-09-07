@@ -23,6 +23,10 @@ import * as helpers from "./helpers.mjs";
 
 /** @param {string} directory */
 function initializeGit(directory) {
+  try {
+    execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { stdio: "ignore" });
+    return;
+  } catch {}
   execFileSync("git", ["init", "-q", directory]);
   execFileSync("git", ["-C", directory, "add", "."]);
   execFileSync("git", ["-C", directory, "-c", "commit.gpgSign=false", "-c", "user.email=runner@example.test", "-c", "user.name=runner", "commit", "-qm", "fixture"]);
@@ -71,7 +75,6 @@ function fixture(overrides = {}) {
     usagePolicy: false,
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: { worker: { driver: "codex", model: "test-model" } },
-    runtimeRules: [],
     ...overrides,
     nodes: /** @type {Record<string, unknown>[]} */ (overrides.nodes ?? [{ id: "build", type: "backend", taskPacket: packet(), gate: false }]).map((node, index) => ({
       phase: `fixture-phase-${index}`,
@@ -197,7 +200,6 @@ test("validation rejects unknown fields at every protocol layer", () => {
     [{ typo: true }, /contract has unexpected field typo/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, typo: true }] }, /nodes\[0\] has unexpected field typo/u],
     [{ runtimes: { worker: { driver: "codex", model: "m", typo: true } } }, /runtime worker has unexpected field typo/u],
-    [{ runtimeRules: [{ match: { type: "backend" }, runtime: "worker", typo: true }] }, /runtimeRules\[0\] has unexpected field typo/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { typo: true } }] }, /nodes\[0\]\.gate has unexpected field typo/u],
   ];
   for (const [override, expected] of cases) {
@@ -213,20 +215,31 @@ test("validation rejects unsupported protocol versions and stale packet hashes",
   assert.throws(() => validateContract(JSON.parse(readFileSync(stale.path, "utf8")), stale.path), /packetHash does not match/u);
 });
 
+// A gated node needs a judge on a different vendor than its worker; the base
+// fixture's single "worker" runtime cannot serve both roles once the gate is
+// enabled, so every gate-enabled fixture below adds a cross-vendor judge.
+const gatedRuntimes = {
+  runtimes: { worker: { driver: "codex", model: "test-model" }, judge: { driver: "claude", model: "judge-model" } },
+  runtimeDefaults: { worker: "worker", judge: "judge" },
+};
+
 test("gate review defaults to advisory and accepts none, advisory, and blocking", () => {
   const omitted = writeFixture({
+    ...gatedRuntimes,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
   const omittedContract = validateContract(JSON.parse(readFileSync(omitted.path, "utf8")), omitted.path);
   assert.equal(omittedContract.nodes[0].gate.review, "advisory", "an omitted review mode reviews advisorially");
   for (const review of ["none", "advisory", "blocking"]) {
     const written = writeFixture({
+      ...gatedRuntimes,
       nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review, failOn: ["major", "critical"] } }],
     });
     const contract = validateContract(JSON.parse(readFileSync(written.path, "utf8")), written.path);
     assert.equal(contract.nodes[0].gate.review, review);
   }
   const invalid = writeFixture({
+    ...gatedRuntimes,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "optional" } }],
   });
   assert.throws(
@@ -237,13 +250,13 @@ test("gate review defaults to advisory and accepts none, advisory, and blocking"
 
 test("validation rejects blocking review without major and major without critical", () => {
   const cases = [
-    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking" } }] },
+    [{ ...gatedRuntimes, nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking" } }] },
       /nodes\[0\] \(build\): gate\.review blocking requires major in gate\.failOn \(TECH-SPEC lean, rule 2\)/u],
-    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["critical"] } }] },
+    [{ ...gatedRuntimes, nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["critical"] } }] },
       /nodes\[0\] \(build\): gate\.review blocking requires major in gate\.failOn/u],
-    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["major"] } }] },
+    [{ ...gatedRuntimes, nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["major"] } }] },
       /gate\.failOn lists major without critical/u],
-    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["minor", "major"] } }] },
+    [{ ...gatedRuntimes, nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["minor", "major"] } }] },
       /gate\.failOn lists major without critical/u],
   ];
   for (const [override, expected] of cases) {
@@ -252,6 +265,7 @@ test("validation rejects blocking review without major and major without critica
   }
   // Advisory review ignores failOn entirely, so only the set's own shape is checked.
   const advisory = writeFixture({
+    ...gatedRuntimes,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["minor"] } }],
   });
   const advisoryContract = validateContract(JSON.parse(readFileSync(advisory.path, "utf8")), advisory.path);
@@ -464,15 +478,10 @@ test("validation rejects invalid runtime field types and routing match values", 
     assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), new RegExp(`runtime worker\\.${field}`));
   }
 
-  for (const [field, value] of /** @type {[string, unknown][]} */ ([["id", ""], ["type", false], ["runtime", 4]])) {
-    const { path } = writeFixture({ runtimeRules: [{ match: { [field]: value }, runtime: "worker" }] });
-    assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), new RegExp(`runtimeRules\\[0\\]\\.match\\.${field}`));
-  }
-
-  const unknownRuntime = writeFixture({ runtimeRules: [{ match: { runtime: "missing" }, runtime: "worker" }] });
+  const unknownFallback = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", fallback: "missing" } } });
   assert.throws(
-    () => validateContract(JSON.parse(readFileSync(unknownRuntime.path, "utf8")), unknownRuntime.path),
-    /runtimeRules\[0\]\.match\.runtime.*unknown runtime/u,
+    () => validateContract(JSON.parse(readFileSync(unknownFallback.path, "utf8")), unknownFallback.path),
+    /runtime worker\.fallback.*unknown runtime/u,
   );
 });
 
@@ -1055,37 +1064,81 @@ test("autonomous workers receive durable progress defaults", () => {
   assert.deepEqual(contract.nodes[0].progressPolicy, { graceSec: 300, intervalSec: 120, maxDryHeartbeats: 3 });
 });
 
-test("routes runtime failover rules from event state and rejects self-loops", () => {
+test("runtime fallback is a declared one-hop edge and rejects self-loops", () => {
   const { path } = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker" },
-      fallback: { driver: "codex", model: "fallback" },
+      worker: { driver: "codex", model: "worker", fallback: "backup" },
+      backup: { driver: "codex", model: "backup" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimeRules: [{
-      match: { role: "worker", status: "failed", errorCode: "timeout", currentRuntime: "worker" },
-      runtime: "fallback",
-      backoffSec: 2,
-    }],
   });
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  const routed = routeRuntime(contract, contract.nodes[0], "worker", {
-    status: "failed",
-    errorCode: "timeout",
-    currentRuntime: "worker",
-  });
-  assert.equal(routed.id, "fallback");
-  assert.equal(routed.backoffSec, 2);
+  assert.equal(contract.runtimes.worker.fallback, "backup");
   assert.equal(routeRuntime(contract, contract.nodes[0], "worker").id, "worker");
+  assert.equal(routeRuntime(contract, contract.nodes[0], "worker", { currentRuntime: "backup" }).id, "backup");
 
   const invalid = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker" },
+      worker: { driver: "codex", model: "worker", fallback: "worker" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimeRules: [{ match: { currentRuntime: "worker" }, runtime: "worker" }],
   });
-  assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /self-loop|currentRuntime/u);
+  assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /fallback cannot name itself/u);
+});
+
+test("a gate-enabled node whose worker and judge runtime share a vendor is rejected by name", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path, "utf8")), path),
+    /worker runtime worker and judge runtime worker share vendor openai/u,
+  );
+});
+
+test("a codex runtime with a custom model_provider resolves to that provider's vendor, not openai", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "deepseek-flash", judge: "opus" },
+    runtimes: {
+      "deepseek-flash": { driver: "codex", model: "deepseek-v4-flash", config: { model_provider: "deepseek" } },
+      opus: { driver: "claude", model: "opus" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.runtimes["deepseek-flash"].vendor, "deepseek");
+  assert.equal(contract.runtimes.opus.vendor, "anthropic");
+});
+
+test("two replay runtimes declare distinct vendors outright, since the driver has no default", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "replay-a", judge: "replay-b" },
+    runtimes: {
+      "replay-a": { driver: "replay", model: "a", vendor: "vendor-a", config: { "replay.recording": "a.jsonl" } },
+      "replay-b": { driver: "replay", model: "b", vendor: "vendor-b", config: { "replay.recording": "b.jsonl" } },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.runtimes["replay-a"].vendor, "vendor-a");
+  assert.equal(contract.runtimes["replay-b"].vendor, "vendor-b");
+});
+
+test("a replay runtime with no declared vendor is rejected: the driver names no default", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "replay-a", judge: "replay-a" },
+    runtimes: {
+      "replay-a": { driver: "replay", model: "a", config: { "replay.recording": "a.jsonl" } },
+    },
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path, "utf8")), path),
+    /runtime replay-a has no resolvable vendor/u,
+  );
 });
 
 test("validates bounded cost, routing, progress, and worktree snapshot state", () => {

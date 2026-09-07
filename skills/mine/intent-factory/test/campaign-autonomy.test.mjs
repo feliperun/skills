@@ -652,7 +652,6 @@ test("public campaign CLI continues a detached controller after the launcher exi
         luna: { driver: "codex", model: "fake-luna" },
         sol: { driver: "codex", model: "fake-sol" },
       },
-      runtimeRules: [],
       nodes: [{ id: "build", type: "backend", taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }), gate: false }],
     }));
     runPublicCampaignCli(root, ["init", campaignId, "--cwd", root, "--goal", "Prove detached campaign autonomy"], env);

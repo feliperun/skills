@@ -384,7 +384,7 @@ Worker prompts must run build servers, watchers, and other child commands in the
 
 ## Routing
 
-Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or an explicit node override. Do not add model-specific branches to the orchestration instructions.
+Express model choice only in `runtimes`, `runtimeDefaults`, `runtimes[<id>].fallback`, or an explicit node override. Do not add model-specific branches to the orchestration instructions.
 
 - Route presentation-heavy frontend work to an Opus runtime when its size justifies the process startup and cache cost.
 - Route bounded implementation work to Luna or Terra through Codex.
@@ -409,17 +409,18 @@ Express model choice only in `runtimes`, `runtimeDefaults`, `runtimeRules`, or a
 
 The Codex adapter passes custom provider configuration with `-c`. Never rely on a profile name to select DeepSeek: Codex 0.147.0 silently accepts unknown profiles and does not reliably load provider tables from config files.
 
-### runtimeRules resolution and failover
+### Runtime resolution and failover
 
-A worker runtime resolves as `nodes[].runtime`, then the first matching
-`runtimeRules[]` entry — a rule matches when every key in its `match` equals the
-node field of the same name — then `runtimeDefaults.worker`. A judge resolves as
-`nodes[].gate.runtime`, then `runtimeDefaults.judge`.
+A worker runtime resolves as `nodes[].runtime`, then `runtimeDefaults.worker`.
+A judge resolves as `nodes[].gate.runtime`, then `runtimeDefaults.judge`. On
+provider-reported exhaustion the resolved runtime fails over to its declared
+`runtimes[<id>].fallback` — at most one hop, never a chain — as described in
+[contract.md](contract.md).
 
-Failover is a separate mechanism declared in the campaign plan's
-`authority.runtimeFailover` (`allowedRuntimes` plus `routes` of `from`/`to`);
-`runtimeRules` never fails over on its own. On provider-reported exhaustion the
-supervisor walks the outgoing routes of the resolved runtime in configuration
+Campaign-level failover is a separate mechanism declared in the campaign plan's
+`authority.runtimeFailover` (`allowedRuntimes` plus `routes` of `from`/`to`).
+On provider-reported exhaustion the supervisor walks the outgoing routes of
+the resolved runtime in configuration
 order, resumes on the first edge not yet attempted, and consumes no gate
 revision. Once every declared edge has been used, it reports exhaustion with
 the remaining-edge count the walk produced and stops at terminal attention

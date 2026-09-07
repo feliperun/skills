@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,10 @@ import { readHeartbeat, rebuildHeartbeat, recordLiveness } from "../scripts/hear
 import { JUDGE_SCHEMA } from "../scripts/lib.mjs";
 import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
 import { acknowledgeCampaignEvent, drainNotifications, readNotificationOutbox } from "../scripts/outbox.mjs";
-import { runContract } from "../scripts/runner.mjs";
-import { fixture, packet, writeContract } from "./helpers.mjs";
+import { runContract, resumeRun } from "../scripts/runner.mjs";
+import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../scripts/integrate.mjs";
+import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../scripts/worktree.mjs";
+import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
 const bin = fileURLToPath(new URL("../scripts/drivers/replay-bin.mjs", import.meta.url));
 const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
@@ -362,10 +364,9 @@ test("runContract drives a two-node dependsOn chain through replay worker and ju
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "replay-worker", judge: "replay-judge" },
     runtimes: {
-      "replay-worker": { driver: "replay", model: "replay-worker-model", config: { "replay.recording": workerRecording } },
-      "replay-judge": { driver: "replay", model: "replay-judge-model", config: { "replay.recording": judgeRecording } },
+      "replay-worker": { driver: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
+      "replay-judge": { driver: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
     },
-    runtimeRules: [],
     nodes: [
       { id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
       { id: "ship", type: "backend", dependsOn: ["build"], taskPacket: packet(), gate: false },
@@ -385,6 +386,160 @@ test("runContract drives a two-node dependsOn chain through replay worker and ju
     /** @type {{index: number}[]} */ (readFileSync(`${workerRecording}.invocations.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line))).map((entry) => entry.index),
     [0, 1],
   );
+});
+
+test("three independent replay nodes run concurrently under maxParallel and each integration is rebuilt on the prior accepted head", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-parallel-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-parallel-rec-"));
+  // Long enough that dispatching all three worker processes sequentially
+  // (rather than concurrently) would make the later starts land after the
+  // earlier one's delay has elapsed, however slow this host's own per-node
+  // setup (worktree creation, snapshotting) happens to be.
+  const delayMs = 2_000;
+  /** @type {Record<string, unknown>} */
+  const runtimes = {};
+  /** @type {Record<string, unknown>[]} */
+  const nodes = [];
+  for (const id of ["alpha", "beta", "gamma"]) {
+    const recording = writeRecording(recordingDir, [{
+      envelope: envelope({ result: JSON.stringify(workerResult(`${id} complete`)) }),
+      files: [{ path: `${id}.txt`, content: `${id}\n` }],
+      delayMs,
+    }], `${id}.jsonl`);
+    runtimes[id] = { driver: "replay", model: `${id}-model`, vendor: `${id}-vendor`, config: { "replay.recording": recording } };
+    nodes.push({ id, type: "backend", runtime: id, taskPacket: packet({ writeFiles: [`${id}.txt`] }), gate: false });
+  }
+  const path = writeContract(directory, fixture({
+    id: "replay-parallel-run",
+    pollIntervalMs: 10,
+    maxParallel: 3,
+    runtimeDefaults: { worker: "alpha", judge: "alpha" },
+    runtimes,
+    nodes,
+  }));
+  const result = await runContract(path);
+  assert.equal(result.ok, true);
+  /** @type {number[]} */
+  const startedAtMs = [];
+  for (const id of ["alpha", "beta", "gamma"]) {
+    const state = result.states.get(id);
+    assert.equal(state?.status, "done");
+    const started = Date.parse(state?.invocations?.[0]?.startedAt ?? "");
+    assert.ok(Number.isFinite(started), `${id} must record an invocation start time`);
+    startedAtMs.push(started);
+  }
+  // Each later node started before the earlier one's recorded delay could
+  // have elapsed: the three worker processes were in flight at once, not
+  // dispatched one after another.
+  assert.ok(startedAtMs[1] - startedAtMs[0] < delayMs, "beta started while alpha was still in flight");
+  assert.ok(startedAtMs[2] - startedAtMs[1] < delayMs, "gamma started while beta was still in flight");
+  for (const id of ["alpha", "beta", "gamma"]) {
+    assert.equal(showRefFile(directory, runRefName("replay-parallel-run"), `${id}.txt`), `${id}\n`);
+  }
+  const accepted = readIntegrationJournal(join(directory, ".runs", "replay-parallel-run")).filter((record) => record.status === "accepted");
+  assert.equal(accepted.length, 3);
+  const tips = new Set(accepted.map((record) => record.previousRunRefTip));
+  assert.equal(tips.size, 3, "integration serialized: each candidate was built on the previous one's accepted head, never the same base twice");
+});
+
+test("a worker exhaustion fails over its declared one-hop fallback, and the attempt records it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-worker-fallback-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-worker-fallback-rec-"));
+  const primaryRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ status: "exhausted", result: null, error: { code: "quota_exhausted", message: "quota exhausted" } }),
+  }], "primary.jsonl");
+  const backupRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify(workerResult("backup complete")) }),
+  }], "backup.jsonl");
+  const path = writeContract(directory, fixture({
+    id: "replay-worker-fallback-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: {
+      primary: { driver: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
+      backup: { driver: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await runContract(path);
+  const state = result.states.get("build");
+  assert.equal(state?.status, "done", state?.error?.message);
+  assert.deepEqual((state?.invocations ?? []).map((invocation) => invocation.runtimeId), ["primary", "backup"]);
+  assert.equal(state?.routing?.history?.[0]?.nextRuntime, "backup", "the attempt records the one-hop fallback it took");
+  assert.equal(state?.routing?.history?.[0]?.hop, 1);
+  assert.equal(state?.routing?.history?.[0]?.errorCode, "quota_exhausted");
+});
+
+test("a judge fallback to a runtime of a different vendor than the worker that ran is admissible", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-judge-fallback-ok-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-judge-fallback-ok-rec-"));
+  const workerRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }),
+  }], "worker.jsonl");
+  const primaryJudgeRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ status: "exhausted", result: null, error: { code: "quota_exhausted", message: "quota exhausted" } }),
+  }], "judge-primary.jsonl");
+  const fallbackJudgeRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify({ verdict: "pass", findings: [], maxSeverity: "none", summary: "ok" }) }),
+  }], "judge-fallback.jsonl");
+  const path = writeContract(directory, fixture({
+    id: "replay-judge-fallback-ok-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "worker", judge: "judge-primary" },
+    runtimes: {
+      worker: { driver: "replay", model: "worker-model", vendor: "vendor-worker", config: { "replay.recording": workerRecording } },
+      "judge-primary": { driver: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
+      "judge-fallback": { driver: "replay", model: "judge-fallback-model", vendor: "vendor-judge-fallback", config: { "replay.recording": fallbackJudgeRecording } },
+    },
+    nodes: [{
+      id: "build", type: "backend", taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = result.states.get("build");
+  assert.equal(state?.status, "done", state?.error?.message);
+  assert.equal(state?.gate?.verdict, "pass");
+  const judgeInvocations = (state?.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.deepEqual(judgeInvocations.map((invocation) => invocation.runtimeId), ["judge-primary", "judge-fallback"]);
+});
+
+test("a judge fallback that would share the vendor of the worker that actually ran is refused, and the node is parked attention", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-judge-fallback-conflict-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-judge-fallback-conflict-rec-"));
+  const workerRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }),
+  }], "worker.jsonl");
+  const primaryJudgeRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ status: "exhausted", result: null, error: { code: "quota_exhausted", message: "quota exhausted" } }),
+  }], "judge-primary.jsonl");
+  const fallbackJudgeRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify({ verdict: "pass", findings: [], maxSeverity: "none", summary: "ok" }) }),
+  }], "judge-fallback.jsonl");
+  const path = writeContract(directory, fixture({
+    id: "replay-judge-fallback-conflict-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "worker", judge: "judge-primary" },
+    runtimes: {
+      worker: { driver: "replay", model: "worker-model", vendor: "shared-vendor", config: { "replay.recording": workerRecording } },
+      "judge-primary": { driver: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
+      "judge-fallback": { driver: "replay", model: "judge-fallback-model", vendor: "shared-vendor", config: { "replay.recording": fallbackJudgeRecording } },
+    },
+    nodes: [{
+      id: "build", type: "backend", taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await runContract(path);
+  const state = result.states.get("build");
+  assert.equal(result.ok, false);
+  assert.equal(state?.status, "blocked");
+  assert.equal(state?.error?.code, "judge_fallback_vendor_conflict");
+  // The judge fallback was never invoked: only the primary judge attempt exists.
+  const judgeInvocations = (state?.invocations ?? []).filter((invocation) => invocation.phase === "judge");
+  assert.deepEqual(judgeInvocations.map((invocation) => invocation.runtimeId), ["judge-primary"]);
 });
 
 /**
@@ -415,10 +570,9 @@ async function driveReplayedContract({ id, nodes, worker, judge = [{ envelope: e
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "replay-worker", judge: "replay-judge" },
     runtimes: {
-      "replay-worker": { driver: "replay", model: "replay-worker-model", config: { "replay.recording": workerRecording } },
-      "replay-judge": { driver: "replay", model: "replay-judge-model", config: { "replay.recording": judgeRecording } },
+      "replay-worker": { driver: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
+      "replay-judge": { driver: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
     },
-    runtimeRules: [],
     nodes,
   }));
   const outcome = await runContract(contractPath);
@@ -438,6 +592,271 @@ async function driveReplayedContract({ id, nodes, worker, judge = [{ envelope: e
 function campaignMetrics(campaignPath, runsDir) {
   return projectMetrics(readMetricsSources(campaignPath, { runsDir }));
 }
+
+/** @typedef {{repo: string, runDir: string, id: string, head: string|null}} IntegrationFixture */
+/**
+ * @typedef {{
+ *   verifyCandidate?: import("../scripts/integrate.mjs").CandidateVerifier,
+ *   onAccepted?: import("../scripts/integrate.mjs").AcceptedCallback,
+ *   onVerificationFailure?: import("../scripts/integrate.mjs").VerificationFailureCallback,
+ *   onConflict?: import("../scripts/integrate.mjs").AcceptedCallback,
+ *   onConcurrentMove?: import("../scripts/integrate.mjs").ConcurrentMoveCallback,
+ *   interrupt?: (stage: string) => void,
+ * }} IntegrationFixtureOptions
+ */
+
+/** @param {string} id @returns {IntegrationFixture} */
+function integrationFixture(id) {
+  const repo = mkdtempSync(join(tmpdir(), `${id}-git-`));
+  writeFileSync(join(repo, "README.md"), "base\n");
+  initializeGit(repo);
+  const runDir = join(repo, ".runs", id);
+  mkdirSync(runDir, { recursive: true });
+  const head = gitHead(repo);
+  createRunRef(repo, id, head);
+  return { repo, runDir, id, head };
+}
+
+/**
+ * @param {IntegrationFixture} fixture
+ * @param {string} node
+ * @param {number} attempt
+ * @param {(workspace: string) => void} [write]
+ */
+function sealFixtureAttempt(fixture, node, attempt, write) {
+  const worktree = createAttemptWorktree({ repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: node, attempt });
+  write?.(worktree.path);
+  const sealed = sealAttempt({ repo: fixture.repo, path: worktree.path, baseSha: worktree.baseSha, runId: fixture.id, nodeId: node, attempt });
+  return { worktree, sealed };
+}
+
+/**
+ * @param {IntegrationFixture} fixture
+ * @param {string} node
+ * @param {number} attempt
+ * @param {(workspace: string) => void} [write]
+ * @param {IntegrationFixtureOptions} [options]
+ */
+async function integrateFixtureAttempt(fixture, node, attempt, write, options = {}) {
+  const { worktree, sealed } = sealFixtureAttempt(fixture, node, attempt, write);
+  const result = await integrateAttempt({
+    repo: fixture.repo,
+    runDir: fixture.runDir,
+    runId: fixture.id,
+    nodeId: node,
+    attempt,
+    attemptSha: sealed.sha,
+    branch: worktree.branch,
+    verificationEvidence: { passed: true, commands: [] },
+    verifyCandidate: options.verifyCandidate ?? (async () => ({ passed: true, commands: [] })),
+    onAccepted: options.onAccepted ?? (async () => {}),
+    onVerificationFailure: options.onVerificationFailure ?? (async () => {}),
+    onConflict: options.onConflict ?? (async () => {}),
+    onConcurrentMove: options.onConcurrentMove ?? (async () => {}),
+    interrupt: options.interrupt,
+  });
+  return { ...result, worktree, sealed };
+}
+
+/** @param {string} repo @param {string} ref @param {string} path @returns {string} */
+function showRefFile(repo, ref, path) {
+  return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], { encoding: "utf8" });
+}
+
+test("attempt worktree seals a worker-only file onto its isolated branch and integrated ref", async () => {
+  const fixture = integrationFixture("attempt-seal");
+  const result = await integrateFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "output.txt"), "worker\n"));
+  assert.equal(result.status, "accepted");
+  assert.equal(existsSync(join(fixture.repo, "output.txt")), false, "the main tree stays untouched");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "output.txt"), "worker\n");
+  assert.equal(result.worktree.branch, `if/${fixture.id}/build/1`);
+  assert.equal(result.sealed.empty, false);
+  const lastRecord = readIntegrationJournal(fixture.runDir).at(-1);
+  assert.ok(lastRecord);
+  assert.equal(lastRecord.status, "accepted");
+});
+
+test("a replay worker that only writes a file lands it on the integrated branch", async () => {
+  const replayed = await driveReplayedContract({
+    id: "worker-only-write",
+    worker: [{
+      envelope: envelope({ result: JSON.stringify(workerResult("file written")) }),
+      files: [{ path: "output.txt", content: "from worker\n" }],
+    }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ writeFiles: ["output.txt"] }), gate: false }],
+  });
+  const state = replayed.outcome.states.get("build");
+  assert.equal(replayed.outcome.ok, true);
+  assert.equal(existsSync(join(replayed.directory, "output.txt")), false);
+  assert.equal(showRefFile(replayed.directory, runRefName("worker-only-write"), "output.txt"), "from worker\n");
+  assert.equal(state?.worktree?.status, "removed");
+  assert.equal(existsSync(state?.worktree?.path ?? ""), false);
+});
+
+test("a Codex-shaped worker writes its result in the attempt worktree and resume replays the accepted transaction", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-isolated-result-"));
+  const id = "codex-isolated-result";
+  const contractPath = writeContract(directory, fixture({ id, pollIntervalMs: 10 }));
+  const previousInterrupt = process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT;
+  const runDir = join(directory, ".runs", id);
+  try {
+    process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT = "after-state";
+    await assert.rejects(
+      () => withFakeCodex(directory, "write-result", async () => {
+        await runContract(contractPath);
+      }),
+      /integration interrupted after node state write/u,
+    );
+  } finally {
+    if (previousInterrupt === undefined) delete process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT;
+    else process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT = previousInterrupt;
+  }
+  const node = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8"));
+  const workspace = node.worktree.path;
+  assert.ok(workspace.includes(join(".runs", "worktrees", id, `build.${node.attempt}`)));
+  assert.equal(existsSync(join(workspace, ".runs", "results", "build.json")), true, "the provider result stayed in the isolated worktree until recovery");
+  assert.equal(existsSync(join(runDir, "results", "build.json")), true, "the controller materialized the result into the run directory");
+
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const recovered = resumed.states.get("build");
+  assert.equal(recovered?.status, "done");
+  assert.equal(recovered?.worktree?.status, "removed");
+  assert.equal(existsSync(workspace), false, "recovery removes the completed attempt worktree");
+  assert.equal(readIntegrationJournal(runDir).filter((record) => record.status === "accepted").length, 1);
+});
+
+test("attempt consumers read the attempt workspace rather than the main tree", async () => {
+  const fixture = integrationFixture("attempt-consumer");
+  const { worktree } = sealFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "visible.txt"), "attempt\n"));
+  assert.equal(readFileSync(join(worktree.path, "visible.txt"), "utf8"), "attempt\n");
+  assert.equal(existsSync(join(fixture.repo, "visible.txt")), false);
+});
+
+test("two sequential attempts use the first integrated head as the second base", async () => {
+  const fixture = integrationFixture("sequential-integrate");
+  const first = await integrateFixtureAttempt(fixture, "first", 1, (workspace) => writeFileSync(join(workspace, "first.txt"), "first\n"));
+  const second = await integrateFixtureAttempt(fixture, "second", 1, (workspace) => writeFileSync(join(workspace, "second.txt"), "second\n"));
+  const records = readIntegrationJournal(fixture.runDir).filter((record) => record.status === "accepted");
+  assert.equal(records[1].previousRunRefTip, first.sealed.sha);
+  assert.equal(second.status, "accepted");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "first.txt"), "first\n");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "second.txt"), "second\n");
+});
+
+test("failed candidate verification leaves the run ref unchanged and keeps the attempt worktree", async () => {
+  const fixture = integrationFixture("candidate-failure");
+  const before = gitHead(fixture.repo, runRefName(fixture.id));
+  const result = await integrateFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "output.txt"), "bad\n"), {
+    verifyCandidate: async () => ({ passed: false, error: "candidate failed" }),
+  });
+  assert.equal(result.status, "verification_failed");
+  assert.equal(gitHead(fixture.repo, runRefName(fixture.id)), before);
+  assert.equal(gitHead(fixture.repo, `refs/intent-factory/${fixture.id}/candidate`), null);
+  assert.equal(existsSync(join(fixture.repo, ".runs", "worktrees", fixture.id, ".candidate")), false);
+  assert.equal(existsSync(result.worktree.path), true);
+  const lastRecord = readIntegrationJournal(fixture.runDir).at(-1);
+  assert.ok(lastRecord);
+  assert.equal(lastRecord.status, "failed");
+});
+
+test("integration conflict records paths, keeps the attempt, and lets the next node integrate", async () => {
+  const fixture = integrationFixture("conflict-integrate");
+  const left = sealFixtureAttempt(fixture, "left", 1, (workspace) => writeFileSync(join(workspace, "README.md"), "left\n"));
+  const right = sealFixtureAttempt(fixture, "right", 1, (workspace) => writeFileSync(join(workspace, "README.md"), "right\n"));
+  await integrateAttempt({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "left", attempt: 1,
+    attemptSha: left.sealed.sha, branch: left.worktree.branch, verificationEvidence: { passed: true },
+    verifyCandidate: async () => ({ passed: true }),
+  });
+  /** @type {string[]} */
+  let paths = [];
+  const conflict = await integrateAttempt({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "right", attempt: 1,
+    attemptSha: right.sealed.sha, branch: right.worktree.branch, verificationEvidence: { passed: true },
+    verifyCandidate: async () => ({ passed: true }),
+    onConflict: async (transaction) => { paths = transaction.conflictingPaths; },
+  });
+  assert.ok(conflict);
+  assert.equal(conflict.status, "conflict");
+  assert.ok(paths.includes("README.md"));
+  assert.equal(existsSync(right.worktree.path), true);
+  const next = await integrateFixtureAttempt(fixture, "next", 1, (workspace) => writeFileSync(join(workspace, "next.txt"), "next\n"));
+  assert.equal(next.status, "accepted");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "README.md"), "left\n");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "next.txt"), "next\n");
+});
+
+test("prepared recovery never treats an unverified candidate already in the run ref as accepted", async () => {
+  const fixture = integrationFixture("prepared-unverified");
+  const { worktree, sealed } = sealFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "output.txt"), "unverified\n"));
+  await assert.rejects(() => integrateAttempt({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "build", attempt: 1,
+    attemptSha: sealed.sha, branch: worktree.branch, verificationEvidence: { passed: true },
+    verifyCandidate: async () => ({ passed: true }),
+    interrupt: (stage) => { if (stage === "prepared") throw new Error(stage); },
+  }), /prepared/u);
+  assert.ok(fixture.head);
+  execFileSync("git", ["-C", fixture.repo, "update-ref", runRefName(fixture.id), sealed.sha, fixture.head]);
+  let verified = false;
+  let concurrentMove = false;
+  await recoverIntegrations({
+    repo: fixture.repo,
+    runDir: fixture.runDir,
+    runId: fixture.id,
+    verifyCandidate: async () => { verified = true; return { passed: true }; },
+    onConcurrentMove: async () => { concurrentMove = true; },
+  });
+  assert.equal(verified, false);
+  assert.equal(concurrentMove, true);
+  assert.equal(readIntegrationJournal(fixture.runDir).some((record) => record.status === "accepted"), false);
+});
+
+test("integration interruptions before ref, after ref, and after state recover idempotently", async () => {
+  for (const stage of ["before-ref", "after-ref", "after-state"]) {
+    const fixture = integrationFixture(`interrupt-${stage}`);
+    let accepted = 0;
+    await assert.rejects(() => integrateFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "output.txt"), stage), {
+      onAccepted: async () => { accepted += 1; },
+      interrupt: (current) => { if (current === stage) throw new Error(stage); },
+    }), new RegExp(stage, "u"));
+    await recoverIntegrations({
+      repo: fixture.repo,
+      runDir: fixture.runDir,
+      runId: fixture.id,
+      verifyCandidate: async () => { throw new Error("verified candidate must not be verified twice"); },
+      onAccepted: async () => { accepted += 1; },
+    });
+    assert.equal(readIntegrationJournal(fixture.runDir).filter((record) => record.status === "accepted").length, 1, stage);
+    assert.equal(accepted, stage === "after-state" ? 2 : 1, stage);
+  }
+});
+
+test("accepted no-change attempt recovery works even when the run ref tip does not move", async () => {
+  const fixture = integrationFixture("no-change-recovery");
+  const before = gitHead(fixture.repo, runRefName(fixture.id));
+  await assert.rejects(() => integrateFixtureAttempt(fixture, "build", 1, undefined, {
+    interrupt: (stage) => { if (stage === "after-ref") throw new Error("after-ref"); },
+  }), /after-ref/u);
+  assert.equal(gitHead(fixture.repo, runRefName(fixture.id)), before);
+  await recoverIntegrations({ repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, verifyCandidate: async () => { throw new Error("must reuse verified evidence"); } });
+  const records = readIntegrationJournal(fixture.runDir).filter((record) => record.status === "accepted");
+  assert.equal(records.length, 1);
+  assert.equal(records[0].empty, true);
+  assert.equal(gitHead(fixture.repo, runRefName(fixture.id)), before);
+});
+
+test("repeated integration records one accepted transaction", async () => {
+  const fixture = integrationFixture("repeat-integrate");
+  const first = await integrateFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "output.txt"), "once\n"));
+  const repeated = await integrateAttempt({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "build", attempt: 1,
+    attemptSha: first.sealed.sha, branch: first.worktree.branch, verificationEvidence: { passed: true },
+    verifyCandidate: async () => { throw new Error("repeated accepted integration must not verify"); },
+  });
+  assert.ok(repeated);
+  assert.equal(repeated.status, "accepted");
+  assert.equal(readIntegrationJournal(fixture.runDir).filter((record) => record.status === "accepted").length, 1);
+});
 
 test("D24: a three-node replayed contract without judgment items closes with zero judge invocations", async () => {
   assertExecutable();
@@ -662,7 +1081,10 @@ test("preflight --json measures the worker preamble per runtime and outranks the
   });
   assert.equal(preflight.status, 0, preflight.stderr);
   const payload = /** @type {{checks: {id: string, live: boolean, usage: {inputTokens: number}|null}[]}} */ (JSON.parse(preflight.stdout));
-  assert.deepEqual(payload.checks.map((check) => check.id).sort(), ["replay-judge", "replay-worker"]);
+  // The node's gate is disabled and replay-worker declares no fallback, so
+  // the reachable-state enumeration has exactly one runtime: replay-judge is
+  // never in play for this contract.
+  assert.deepEqual(payload.checks.map((check) => check.id).sort(), ["replay-worker"]);
   for (const check of payload.checks) {
     assert.equal(check.live, true, `${check.id} was probed live`);
     assert.equal(typeof check.usage?.inputTokens, "number", `${check.id} reports a measured preamble`);
@@ -676,7 +1098,7 @@ test("preflight --json measures the worker preamble per runtime and outranks the
   assert.equal(sources.preflight.length, 1, "the recorded preflight payload is a metrics source");
   assert.deepEqual(
     projectMetrics(sources).workerPreambleTokens,
-    { value: { "replay-judge": 0, "replay-worker": 0 }, direction: "down", count: 2 },
+    { value: { "replay-worker": 0 }, direction: "down", count: 1 },
     "the indicator is the per-runtime measurement preflight reported",
   );
 
@@ -690,7 +1112,7 @@ test("preflight --json measures the worker preamble per runtime and outranks the
   const mixed = projectMetrics({ events: [dispatch("replay-worker", 9999), dispatch("unmeasured", 4000)], preflight: [payload] });
   assert.deepEqual(
     mixed.workerPreambleTokens,
-    { value: { "replay-judge": 0, "replay-worker": 0, unmeasured: 4000 }, direction: "down", count: 3 },
+    { value: { "replay-worker": 0, unmeasured: 4000 }, direction: "down", count: 2 },
     "a measured runtime never falls back to its recorded guess; an unmeasured one still reports",
   );
 });

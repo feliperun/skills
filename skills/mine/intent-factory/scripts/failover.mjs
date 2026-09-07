@@ -1,18 +1,13 @@
 /**
- * Worker failover edges: declared, synthesized, and cycle-checked.
+ * Worker and judge failover: one declared hop per runtime.
  *
- * A contract that declares runtimeRules owns its routing outright — nothing
- * here synthesizes an edge behind it, because a declared rule set is a
- * statement about where a run is allowed to spend. A contract that declares
- * none still needs somewhere to go when a worker provider exhausts, so the
- * remaining healthy runtimes become an implicit chain ordered by their
- * declared costRank: cheapest untried runtime first, unranked runtimes last,
- * ties broken by declaration order. Synthesis is worker-only; a judge without
- * a declared rule stays on its gate runtime so a verdict is never quietly
- * arbitrated by a different model than the contract named.
- *
- * This module holds no contract.mjs import on purpose: contract.mjs imports
- * assertNoFailoverCycles from here, so the dependency has to run one way.
+ * Each runtime may declare `fallback`, naming at most one other runtime. A
+ * role that exhausts its current runtime gets exactly that one hop — never a
+ * chain, never a synthesized ordering over every other runtime in the
+ * contract. Reachability is therefore always one enumeration away: the
+ * runtime a role started on, and (if declared) the runtime its `fallback`
+ * names. contract.mjs validates the field is never a self-loop; because a
+ * hop is bounded at one, a multi-runtime cycle is structurally impossible.
  */
 import { driverCapabilities } from "./drivers/index.mjs";
 
@@ -22,7 +17,7 @@ import { driverCapabilities } from "./drivers/index.mjs";
 
 /**
  * Every runtime id in cost order: declared costRank ascending, unranked last,
- * declaration order breaking ties so synthesis stays deterministic.
+ * declaration order breaking ties so reporting stays deterministic.
  *
  * "Unranked last" is a separate sort key rather than a sentinel rank, because
  * costRank only has to be a finite non-negative number — a contract may
@@ -42,27 +37,22 @@ export function rankedRuntimeIds(contract) {
     .map((entry) => entry.id);
 }
 
-/** Synthesis only fills the gap a contract left; a declared rule set suppresses it. @param {ValidatedContract} contract @returns {boolean} */
-export function synthesisEnabled(contract) {
-  return contract.runtimeRules.length === 0;
-}
-
 /**
- * The full synthesized chain out of one runtime, cheapest first.
+ * The one-hop chain out of a runtime: its declared `fallback`, or nothing.
  *
  * @param {ValidatedContract} contract
- * @param {"worker"|"judge"} role
+ * @param {"worker"|"judge"} role unused; kept for signature stability across callers
  * @param {string} currentRuntime
  * @returns {string[]}
  */
 export function synthesizedChain(contract, role, currentRuntime) {
-  if (role !== "worker" || !synthesisEnabled(contract)) return [];
-  return rankedRuntimeIds(contract).filter((id) => id !== currentRuntime);
+  const fallback = contract.runtimes[currentRuntime]?.fallback;
+  return fallback ? [fallback] : [];
 }
 
 /**
- * The next synthesized hop: the cheapest runtime this role has not already
- * burned in the current revision, or null when the chain is spent.
+ * The next hop out of `currentRuntime`, or null when its one declared
+ * fallback has already been attempted this revision.
  *
  * @param {ValidatedContract} contract
  * @param {"worker"|"judge"} role
@@ -78,14 +68,11 @@ export function nextSynthesizedRuntime(contract, role, currentRuntime, attempted
 /**
  * The hop number to record for this exhaustion, in the role's current revision.
  *
- * Hop is the failover budget: the runner caps it at the number of declared
- * runtimes so a run cannot walk its runtimes forever. Only an actual edge
- * spends from it. A quota-reset retry stays on the runtime the node already
- * warmed, so it costs no runtime and must cost no hop either — charging it
- * would let one wait consume the budget the later real edge needs, and a
- * two-runtime contract would hit the cap before ever reaching its second
- * runtime. The prior hop comes from the role's live override when one is open
- * in this revision, and otherwise from the high-water mark in its history.
+ * Hop is the failover budget: bounded at one, so a run cannot walk its
+ * runtimes forever. Only an actual edge spends from it. A quota-reset retry
+ * stays on the runtime the node already warmed, so it costs no runtime and
+ * must cost no hop either — charging it would let one wait consume the
+ * budget the later real edge needs.
  *
  * @param {{routing?: {currentOverride?: {role?: string, revision?: number, hop?: number}|null, history?: {role?: string, revision?: number, hop?: number}[]}|null}} state
  * @param {"worker"|"judge"} role
@@ -104,54 +91,29 @@ export function nextHop(state, role, revision, schedule) {
 }
 
 /**
- * One-hop failover targets out of `current`, declared rules first and the
- * synthesized chain after. Preflight walks these so every runtime a run could
- * actually spend on is capability-checked before the first provider starts.
+ * The one-hop failover target out of `current`, if its runtime declares one.
+ * Preflight walks this so the runtime a run could actually spend on is
+ * capability-checked before the first provider starts — and only this one
+ * hop, never the fallback's own fallback, since a node can take only one hop.
  *
  * @param {ValidatedContract} contract
  * @param {{node: EdgeNode, role: "worker"|"judge", runtimeId: string}} current
  * @returns {RuntimeSnapshot[]}
  */
 export function failoverTargets(contract, current) {
-  /** @type {string[]} */
-  const targets = [];
-  for (const rule of contract.runtimeRules) {
-    const match = rule.match;
-    if (match.currentRuntime !== undefined && match.currentRuntime !== current.runtimeId) continue;
-    if (match.role !== undefined && match.role !== current.role) continue;
-    if (match.id !== undefined && match.id !== current.node.id) continue;
-    if (match.type !== undefined && match.type !== current.node.type) continue;
-    const declaredRuntime = current.role === "judge" ? current.node.gate.runtime : current.node.runtime;
-    if (match.runtime !== undefined && match.runtime !== declaredRuntime) continue;
-    targets.push(rule.runtime);
-  }
-  targets.push(...synthesizedChain(contract, current.role, current.runtimeId));
-  return targets.map((id) => runtimeSnapshot(contract, id));
+  return synthesizedChain(contract, current.role, current.runtimeId).map((id) => runtimeSnapshot(contract, id));
 }
 
 /**
- * Every worker edge the contract can take, for reporting and documentation.
- * A contract with declared rules reports exactly those; one without reports
- * the synthesized chain out of every runtime.
+ * Every declared fallback edge, for reporting and documentation.
  *
  * @param {ValidatedContract} contract
- * @returns {{from: string, to: string, source: "declared"|"synthesized", ruleIndex?: number}[]}
+ * @returns {{from: string, to: string, source: "declared"}[]}
  */
 export function failoverEdges(contract) {
-  if (!synthesisEnabled(contract)) {
-    return contract.runtimeRules.map((rule, ruleIndex) => ({
-      from: rule.match.currentRuntime ?? "*",
-      to: rule.runtime,
-      source: /** @type {"declared"} */ ("declared"),
-      ruleIndex,
-    }));
-  }
-  return rankedRuntimeIds(contract).flatMap((from) =>
-    synthesizedChain(contract, "worker", from).map((to) => ({
-      from,
-      to,
-      source: /** @type {"synthesized"} */ ("synthesized"),
-    })));
+  return rankedRuntimeIds(contract)
+    .filter((id) => contract.runtimes[id].fallback)
+    .map((id) => ({ from: id, to: /** @type {string} */ (contract.runtimes[id].fallback), source: /** @type {"declared"} */ ("declared") }));
 }
 
 /**
@@ -171,39 +133,8 @@ export function addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets)
 }
 
 /**
- * Reject runtime failover cycles when their current-runtime edges are known.
- *
- * @param {unknown[]} rules
- */
-export function assertNoFailoverCycles(rules) {
-  const edges = new Map();
-  for (const rule of rules) {
-    const record = /** @type {Record<string, unknown>} */ (rule);
-    const match = /** @type {Record<string, unknown>} */ (record.match);
-    if (match.currentRuntime === undefined) continue;
-    const current = /** @type {string} */ (match.currentRuntime);
-    const target = /** @type {string} */ (record.runtime);
-    const targets = edges.get(current) ?? [];
-    targets.push(target);
-    edges.set(current, targets);
-  }
-  const visiting = new Set();
-  const visited = new Set();
-  /** @param {string} runtime */
-  const visit = (runtime) => {
-    if (visiting.has(runtime)) throw new TypeError(`runtimeRules contain a cyclic failover at ${runtime}`);
-    if (visited.has(runtime)) return;
-    visiting.add(runtime);
-    for (const next of edges.get(runtime) ?? []) visit(next);
-    visiting.delete(runtime);
-    visited.add(runtime);
-  };
-  for (const runtime of edges.keys()) visit(runtime);
-}
-
-/**
  * Resolve one declared runtime id into the snapshot shape every routing
- * decision hands on, capabilities included.
+ * decision hands on, capabilities and vendor included.
  *
  * @param {ValidatedContract} contract
  * @param {string} id

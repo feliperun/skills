@@ -108,11 +108,10 @@ export function checkGit(cwd) {
   const label = String(version.stdout ?? "").trim() || "git";
   if (!existsSync(cwd)) return fail("git", `${label} · cwd does not exist: ${cwd}`);
   const inside = git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-  if (inside.status !== 0 || inside.stdout.trim() !== "true") return pass("git", `${label} · ${cwd} is not a git work tree`);
+  if (inside.status !== 0 || inside.stdout.trim() !== "true") return fail("git", `${label} · execution requires a git work tree with at least one commit`);
   const head = git(cwd, ["rev-parse", "HEAD"]);
-  // An unborn HEAD is a fresh repository, not a broken git: the run records a
-  // null gitHead for it and still dispatches.
-  return pass("git", `${label} · ${head.status === 0 ? `HEAD ${head.stdout.trim().slice(0, 12)}` : "no commit yet"}`);
+  if (head.status !== 0) return fail("git", `${label} · repository must have at least one commit before an isolated execution can start`);
+  return pass("git", `${label} · HEAD ${head.stdout.trim().slice(0, 12)}`);
 }
 
 /**
@@ -196,36 +195,35 @@ export function blockingChecks(report) {
 
 
 /**
- * Collect initial worker/judge runtimes and every runtime reachable through a
- * declared or synthesized failover edge, preserving each capability
- * requirement so a runtime a run might fall over to is checked before it runs.
+ * Collect initial worker/judge runtimes and every runtime reachable through
+ * the one declared fallback hop, preserving each capability requirement so a
+ * runtime a run might fall over to is checked before it runs.
+ *
+ * The enumeration is exactly the reachable-state set the run can actually
+ * occupy: a node's role starts on its assigned runtime, and — if that
+ * runtime declares a `fallback` — may take exactly one hop to it. It never
+ * re-derives `failoverTargets` from the hop target itself, so a chain like
+ * A.fallback=B, B.fallback=C never probes C for a node assigned A: that node
+ * can take only one hop, and its reachable set stops at B.
+ *
  * @param {ValidatedContract} contract
  * @returns {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./drivers/index.mjs").CapabilityRequirements[]}>}
  */
 export function reachableRuntimes(contract) {
   /** @type {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./drivers/index.mjs").CapabilityRequirements[]}>} */
   const runtimes = new Map();
-  const queue = [];
   for (const node of contract.nodes) {
     for (const role of /** @type {("worker"|"judge")[]} */ (["worker", ...(node.gate.enabled ? ["judge"] : [])])) {
       const runtime = routeRuntime(contract, node, role);
       const required = role === "judge"
         ? [runtime.requiredCapabilities, node.gate.requiredCapabilities, { structuredOutput: true }]
         : [runtime.requiredCapabilities, node.requiredCapabilities];
-      addRuntimeRequirement(runtimes, runtime, required.filter((item) => item !== undefined));
-      queue.push({ node, role, runtimeId: runtime.id, requiredCapabilitySets: required.filter((item) => item !== undefined) });
-    }
-  }
-  const visited = new Set();
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current) break;
-    const visitKey = `${current.node.id}:${current.role}:${current.runtimeId}`;
-    if (visited.has(visitKey)) continue;
-    visited.add(visitKey);
-    for (const runtime of failoverTargets(contract, current)) {
-      addRuntimeRequirement(runtimes, runtime, current.requiredCapabilitySets);
-      queue.push({ ...current, runtimeId: runtime.id });
+      const requiredCapabilitySets = required.filter((item) => item !== undefined);
+      addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets);
+      const current = { node, role, runtimeId: runtime.id };
+      for (const fallbackRuntime of failoverTargets(contract, current)) {
+        addRuntimeRequirement(runtimes, fallbackRuntime, requiredCapabilitySets);
+      }
     }
   }
   return runtimes;

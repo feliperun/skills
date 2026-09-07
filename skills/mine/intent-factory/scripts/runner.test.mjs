@@ -557,7 +557,6 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
     usagePolicy: false,
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
     runtimes: { wrapped: { driver: "exec-jsonl", model: "m", executable: "./my-worker.mjs" } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", phase: "doctor", dependsOn: [], taskPacket: packet(), gate: false }],
   })}\n`);
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory, contract], { encoding: "utf8" });
@@ -738,9 +737,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "jsonl-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1064,11 +1065,11 @@ test("a second unparseable worker result takes the failover edge before it block
   const path = writeContract(directory, fixture({
     id: "protocol-failover-run",
     pollIntervalMs: 10,
-    runtimeRules: [],
-    runtimeDefaults: { worker: "first", judge: "first" },
+    runtimeDefaults: { worker: "first", judge: "judge" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first, costRank: 1 },
-      second: { driver: "codex", model: "second", executable: second, costRank: 2 },
+      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
+      second: { driver: "codex", model: "second", executable: second },
+      judge: { driver: "codex", model: "judge", vendor: "openai-judge" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
   }));
@@ -1169,9 +1170,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "mechanical-gate-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1224,9 +1227,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "judgment-gate-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1275,9 +1280,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "mechanical-fail-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1335,9 +1342,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "judge-uncited-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1391,9 +1400,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "empty-dod-gate-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1453,9 +1464,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "judge-uncited-below-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1522,9 +1535,11 @@ process.stdin.on("end", () => {
   const path = writeContract(directory, fixture({
     id: "judge-uncited-mixed-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -1601,9 +1616,11 @@ process.stdin.on("end", () => {
     // Wide enough that the closed re-ask stays durable-but-unapplied for a
     // whole poll interval, the window the verdict-gap image is taken in.
     pollIntervalMs: 250,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: fake } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -3669,7 +3686,6 @@ test("preflight preserves conflicting runtime and node capability requirements",
       luna: { driver: "codex", model: "gpt-5.6-luna", requiredCapabilities: { sandbox: true } },
       sol: { driver: "codex", model: "gpt-5.6-sol" },
     },
-    runtimeRules: [],
     nodes: [{
       id: "build",
       type: "backend",
@@ -3693,7 +3709,6 @@ test("live preflight proves generation, redacts failures, and static mode stays 
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previous = process.env.INTENT_FACTORY_TEST_LIVE_SECRET;
@@ -3713,7 +3728,6 @@ test("live preflight proves generation, redacts failures, and static mode stays 
     writeFileSync(staticPath, `${JSON.stringify(fixture({
       runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
       runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: staticExecutable } },
-      runtimeRules: [],
       nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
     }), null, 2)}\n`);
     const staticChecks = await preflightContract(staticPath, { static: true });
@@ -3748,7 +3762,6 @@ if (process.argv.includes("--version")) {
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
@@ -3776,10 +3789,9 @@ test("preflight deduplicates initial runtimes and follows failover targets", asy
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "exec-jsonl", model: "primary", executable },
-      backup: { driver: "exec-jsonl", model: "backup", executable },
+      primary: { driver: "exec-jsonl", model: "primary", vendor: "primary-vendor", executable, fallback: "backup" },
+      backup: { driver: "exec-jsonl", model: "backup", vendor: "backup-vendor", executable },
     },
-    runtimeRules: [{ match: { currentRuntime: "primary", status: "failed" }, runtime: "backup" }],
     nodes: [
       { id: "first", type: "backend", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", taskPacket: packet(), gate: false },
@@ -3789,32 +3801,47 @@ test("preflight deduplicates initial runtimes and follows failover targets", asy
   assert.deepEqual(checks.map((check) => check.id), ["primary", "backup"]);
 });
 
-test("provider exhaustion follows multiple declared runtimes without consuming revisions", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-failover-multi-hop-"));
+test("provider exhaustion follows the declared one-hop fallback without consuming revisions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-failover-one-hop-"));
   const first = fakeCodex(directory, "exhausted");
-  const second = fakeCodex(directory, "exhausted");
-  const third = fakeCodex(directory, "pass");
+  const second = fakeCodex(directory, "pass");
   const path = writeContract(directory, fixture({
-    id: "failover-multi-hop-run",
+    id: "failover-one-hop-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first },
+      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
       second: { driver: "codex", model: "second", executable: second },
-      third: { driver: "codex", model: "third", executable: third },
     },
-    runtimeRules: [
-      { match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second" },
-      { match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "second" }, runtime: "third" },
-    ],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);
   const state = nodeState(result);
   assert.equal(state.status, "done");
   assert.equal(state.revisions, 0);
-  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second", "third"]);
-  assert.deepEqual((state.routing?.history ?? []).map((entry) => entry.nextRuntime), ["second", "third"]);
-  assert.deepEqual((state.routing?.history ?? []).map((entry) => entry.hop), [1, 2]);
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
+  assert.deepEqual((state.routing?.history ?? []).map((entry) => entry.nextRuntime), ["second"]);
+  assert.deepEqual((state.routing?.history ?? []).map((entry) => entry.hop), [1]);
+});
+
+test("a second exhaustion after the one declared hop blocks at the hop cap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-failover-hop-cap-"));
+  const first = fakeCodex(directory, "exhausted");
+  const second = fakeCodex(directory, "exhausted");
+  const third = fakeCodex(directory, "pass");
+  const path = writeContract(directory, fixture({
+    id: "failover-hop-cap-run",
+    runtimeDefaults: { worker: "first", judge: "first" },
+    runtimes: {
+      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
+      second: { driver: "codex", model: "second", executable: second, fallback: "third" },
+      third: { driver: "codex", model: "third", executable: third },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const state = nodeState(await runContract(path));
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.error?.code, "provider_failover_hop_cap");
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
 });
 
 test("provider exhaustion without a rule is terminal and cycles do not reuse a runtime", async () => {
@@ -3824,7 +3851,6 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
     id: "failover-no-rule-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: { first: { driver: "codex", model: "first", executable: exhausted } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const terminal = nodeState(await runContract(terminalPath));
@@ -3838,13 +3864,9 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
     id: "failover-cycle-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: cycleFirst },
-      second: { driver: "codex", model: "second", executable: cycleSecond },
+      first: { driver: "codex", model: "first", executable: cycleFirst, fallback: "second" },
+      second: { driver: "codex", model: "second", executable: cycleSecond, fallback: "first" },
     },
-    runtimeRules: [
-      { match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second" },
-      { match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "second" }, runtime: "first" },
-    ],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const cycle = nodeState(await runContract(cyclePath));
@@ -3853,7 +3875,7 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
   assert.deepEqual((cycle.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
 });
 
-test("provider failover persists and honors backoff before rescheduling", async () => {
+test("a declared fallback reschedules immediately with no backoff", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-backoff-"));
   const first = fakeCodex(directory, "exhausted");
   const second = fakeCodex(directory, "pass");
@@ -3861,18 +3883,15 @@ test("provider failover persists and honors backoff before rescheduling", async 
     id: "failover-backoff-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first },
+      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
       second: { driver: "codex", model: "second", executable: second },
     },
-    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second", backoffSec: 0.05 }],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const started = Date.now();
   const state = nodeState(await runContract(path));
   assert.equal(state.status, "done");
-  assert.equal(state.routing?.history?.[0]?.backoffSec, 0.05);
+  assert.equal(state.routing?.history?.[0]?.backoffSec, 0);
   assert.ok(Date.parse(state.routing?.history?.[0]?.backoffUntil ?? "") <= Date.now());
-  assert.ok(Date.now() - started >= 40);
 });
 
 test("recovered provider exhaustion does not charge persisted usage or cost twice", async () => {
@@ -3882,7 +3901,6 @@ test("recovered provider exhaustion does not charge persisted usage or cost twic
     id: "failover-no-double-charge-run",
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: { worker: { driver: "codex", model: "worker", executable } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const runDir = (await runContract(path)).runDir;
@@ -3934,10 +3952,9 @@ test("judge provider failover preserves the completed worker result", async () =
     runtimeDefaults: { worker: "worker", judge: "judge-first" },
     runtimes: {
       worker: { driver: "codex", model: "worker", executable: worker },
-      "judge-first": { driver: "codex", model: "judge-first", executable: judgeFirst },
-      "judge-second": { driver: "codex", model: "judge-second", executable: judgeSecond },
+      "judge-first": { driver: "codex", model: "judge-first", executable: judgeFirst, vendor: "openai-judge", fallback: "judge-second" },
+      "judge-second": { driver: "codex", model: "judge-second", executable: judgeSecond, vendor: "openai-judge" },
     },
-    runtimeRules: [{ match: { role: "judge", status: "exhausted", errorCode: "provider_error", currentRuntime: "judge-first" }, runtime: "judge-second" }],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
   const state = nodeState(await runContract(path));
@@ -3971,9 +3988,11 @@ test("persists and recovers cost exactly once and reports totals", async () => {
     id: "cost-recovery-run",
     pollIntervalMs: 10,
     usagePolicy: { epoch: "cost-recovery", maxInputTokens: 100, judgeReserveInputTokens: 10, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable },
+    },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
   }));
   const runDir = (await runContract(path)).runDir;
@@ -4011,7 +4030,6 @@ test("blocks new work at contract and node monetary budgets", async () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", taskPacket: packet(), gate: false },
@@ -4025,9 +4043,11 @@ test("blocks new work at contract and node monetary budgets", async () => {
   const nodeBudgetPath = writeContract(directory, fixture({
     id: "node-cost-budget-run",
     pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
-    runtimeRules: [],
+    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
+    runtimes: {
+      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
+      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable },
+    },
     nodes: [{ id: "build", type: "backend", maxCostUsd: 0.01, taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
   }));
   const nodeBudget = await runContract(nodeBudgetPath);
@@ -4367,10 +4387,9 @@ test("budget failover boundary D37 never routes a local budget stop", async () =
     timeoutSec: 5,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "codex", model: "primary" },
+      primary: { driver: "codex", model: "primary", fallback: "backup" },
       backup: { driver: "codex", model: "backup" },
     },
-    runtimeRules: [{ match: { currentRuntime: "primary", status: "exhausted" }, runtime: "backup" }],
     nodes: [{
       id: "build",
       type: "backend",
@@ -4396,72 +4415,49 @@ function failoverContract(prefix, overrides) {
   const path = writeContract(directory, fixture({
     id: `${prefix}contract`,
     runtimeDefaults: { worker: "mid", judge: "mid" },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", runtime: "mid", taskPacket: packet(), gate: false }],
     ...overrides,
   }));
   return validateContract(JSON.parse(readFileSync(path, "utf8")), path);
 }
 
-/** Three runtimes whose costRank deliberately disagrees with declaration order. @returns {Record<string, unknown>} */
-function rankedRuntimes() {
-  return {
-    mid: { driver: "codex", model: "mid", costRank: 2 },
-    dear: { driver: "codex", model: "dear", costRank: 9 },
-    cheap: { driver: "codex", model: "cheap", costRank: 1 },
-  };
-}
-
-test("synthesized failover edges follow costRank, not declaration order", () => {
-  const contract = failoverContract("runner-synth-failover-", { runtimes: rankedRuntimes() });
-  assert.deepEqual(
-    failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to),
-    ["cheap", "dear"],
-    "the cheapest healthy runtime is tried before the dear one",
-  );
-  assert.ok(failoverEdges(contract).every((edge) => edge.source === "synthesized"));
-  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "cheap");
-  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["cheap"]), "dear");
-  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["cheap", "dear"]), null, "a spent chain routes nowhere");
-  assert.equal(nextSynthesizedRuntime(contract, "judge", "mid"), null, "a judge stays on the runtime the contract named");
-});
-
-test("an unranked runtime sorts last in the synthesized failover chain", () => {
-  const contract = failoverContract("runner-unranked-failover-", {
+test("failoverEdges lists one declared edge per runtime, ordered by costRank", () => {
+  const contract = failoverContract("runner-declared-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", costRank: 2 },
-      unranked: { driver: "codex", model: "unranked" },
-      cheap: { driver: "codex", model: "cheap", costRank: 1 },
+      mid: { driver: "codex", model: "mid", costRank: 2, fallback: "dear" },
+      dear: { driver: "codex", model: "dear", costRank: 9 },
+      cheap: { driver: "codex", model: "cheap", costRank: 1, fallback: "dear" },
     },
   });
-  assert.deepEqual(failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to), ["cheap", "unranked"]);
+  assert.deepEqual(
+    failoverEdges(contract),
+    [
+      { from: "cheap", to: "dear", source: "declared" },
+      { from: "mid", to: "dear", source: "declared" },
+    ],
+    "edges are ordered by the declaring runtime's own costRank, cheapest first",
+  );
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "dear");
+  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["dear"]), null, "a spent hop routes nowhere");
+  assert.equal(nextSynthesizedRuntime(contract, "judge", "mid"), null, "failover is worker-only");
 });
 
-test("an unranked runtime sorts after even the most expensive costRank in the failover chain", () => {
+test("an unranked runtime's declared edge sorts after every ranked runtime", () => {
   // costRank only has to be a finite non-negative number, so a contract may
   // declare one at or past any sentinel a ranked-last encoding could pick.
-  const contract = failoverContract("runner-extreme-rank-failover-", {
+  const contract = failoverContract("runner-unranked-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", costRank: 2 },
-      unranked: { driver: "codex", model: "unranked" },
-      astronomical: { driver: "codex", model: "astronomical", costRank: Number.MAX_SAFE_INTEGER },
+      mid: { driver: "codex", model: "mid", costRank: 2, fallback: "target" },
+      unranked: { driver: "codex", model: "unranked", fallback: "target" },
+      astronomical: { driver: "codex", model: "astronomical", costRank: Number.MAX_SAFE_INTEGER, fallback: "target" },
+      target: { driver: "codex", model: "target" },
     },
   });
   assert.deepEqual(
-    failoverEdges(contract).filter((edge) => edge.from === "mid").map((edge) => edge.to),
-    ["astronomical", "unranked"],
-    "every ranked runtime is still cheaper than an unranked one",
+    failoverEdges(contract).map((edge) => edge.from),
+    ["mid", "astronomical", "unranked"],
+    "every ranked runtime, however costly, still sorts ahead of an unranked one",
   );
-  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "astronomical");
-});
-
-test("declared runtimeRules suppress failover synthesis entirely", () => {
-  const contract = failoverContract("runner-declared-failover-", {
-    runtimes: rankedRuntimes(),
-    runtimeRules: [{ match: { role: "worker", currentRuntime: "mid" }, runtime: "dear" }],
-  });
-  assert.deepEqual(failoverEdges(contract), [{ from: "mid", to: "dear", source: "declared", ruleIndex: 0 }]);
-  assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), null, "a declared rule set owns its routing outright");
 });
 
 // A fixed clock keeps these cases deterministic: the schedule is judged against
@@ -4628,7 +4624,6 @@ process.stdin.on("end", () => {
     id: "network-backoff-run",
     pollIntervalMs: 10,
     timeoutSec: 60,
-    runtimeRules: [],
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
       primary: { driver: "codex", model: "primary", executable: flaky, costRank: 1 },
@@ -4687,7 +4682,6 @@ process.stdin.on("end", () => {
     id: "judge-network-backoff-run",
     pollIntervalMs: 10,
     timeoutSec: 60,
-    runtimeRules: [],
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: { primary: { driver: "codex", model: "primary", executable: flaky } },
     nodes: [{
@@ -4710,29 +4704,23 @@ process.stdin.on("end", () => {
   assert.ok(!outbox.some((event) => event.type === "run.attention"), "a recovered socket raises no attention");
 });
 
-test("undeclared quota exhaustion takes the synthesized failover edge to the cheapest runtime", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-synth-quota-failover-"));
+test("quota exhaustion with no declared fallback leaves the node exhausted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-no-fallback-quota-"));
   const exhausted = fakeCodex(directory, "quota-429");
-  const cheap = fakeCodex(directory, "pass");
   const path = writeContract(directory, fixture({
-    id: "synth-failover-run",
+    id: "no-fallback-run",
     pollIntervalMs: 10,
     timeoutSec: 5,
-    runtimeRules: [],
     runtimeDefaults: { worker: "mid", judge: "mid" },
     runtimes: {
       mid: { driver: "codex", model: "mid", executable: exhausted, costRank: 2 },
-      dear: { driver: "codex", model: "dear", executable: exhausted, costRank: 9 },
-      cheap: { driver: "codex", model: "cheap", executable: cheap, costRank: 1 },
     },
     nodes: [{ id: "build", type: "backend", runtime: "mid", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);
   const state = nodeState(result);
-  assert.equal(state.status, "done", state.error?.message);
-  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["mid", "cheap"]);
-  assert.equal(state.routing?.history?.[0]?.nextRuntime, "cheap");
-  assert.equal(state.routing?.history?.[0]?.ruleIndex, undefined, "a synthesized edge cites no declared rule");
+  assert.equal(state.status, "exhausted", "a runtime with no declared fallback has nowhere to hop");
+  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["mid"]);
 });
 
 test("quota exhaustion routes through the declared failover edge", async () => {
@@ -4745,10 +4733,9 @@ test("quota exhaustion routes through the declared failover edge", async () => {
     timeoutSec: 5,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "codex", model: "primary", executable: primary },
+      primary: { driver: "codex", model: "primary", executable: primary, fallback: "backup" },
       backup: { driver: "codex", model: "backup", executable: backup },
     },
-    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "quota_exhausted", currentRuntime: "primary" }, runtime: "backup" }],
     nodes: [{ id: "build", type: "backend", runtime: "primary", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);
@@ -4804,7 +4791,6 @@ else {
     usagePolicy: { epoch: "invocation-limit", maxInputTokens: 10_000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 10_000, maxInvocationTokens, cacheReadWeight },
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: { primary: { driver: "codex", model: "primary", executable } },
-    runtimeRules: [],
     nodes: [{
       id: "build",
       type: "backend",
@@ -4901,7 +4887,6 @@ test("budget continuation D35 checkpoints and activates one predeclared segment 
     timeoutSec: 5,
     runtimes: { worker: { driver: "codex", model: "budget-test", executable: provider.executable } },
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimeRules: [],
     nodes: [{
       id: "build",
       type: "backend",
@@ -5040,7 +5025,6 @@ else {
     maxInputTokens: 1_000_000,
     runtimes: { worker: { driver: "codex", model: "mixed", executable } },
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimeRules: [],
     nodes: [
       { id: "noise", type: "backend", taskPacket: packet({ objective: "Noise flood" }), timeoutSec: 1, gate: false },
       { id: "build", type: "backend", taskPacket: packet({ objective: "Build quickly" }), gate: false },
@@ -5119,7 +5103,6 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
     timeoutSec: 5,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: { primary: { driver: "codex", model: "primary", executable: quotaPrimary } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const terminalResult = await runContract(terminalPath);
@@ -5188,7 +5171,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     usagePolicy: { epoch: "phase-reuse", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
@@ -5223,7 +5205,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     usagePolicy: { epoch: "phase-rotate", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
@@ -5258,7 +5239,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
       primary: { driver: "exec-jsonl", model: "same-model", executable },
       backup: { driver: "exec-jsonl", model: "same-model", executable },
     },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", phase: "implementation", runtime: "primary", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", runtime: "backup", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -5294,7 +5274,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     usagePolicy: { epoch: "phase-chronology", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
-    runtimeRules: [],
     nodes: [
       { id: "third", type: "backend", phase: "implementation", dependsOn: ["second"], taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -5315,7 +5294,6 @@ test("Claude phase reuse passes the first explicit session through --resume", as
     usagePolicy: false,
     runtimeDefaults: { worker: "provider", judge: "provider" },
     runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -5335,7 +5313,6 @@ test("a completed phase without a continuation ID remains a fresh invocation", a
     usagePolicy: false,
     runtimeDefaults: { worker: "provider", judge: "provider" },
     runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
-    runtimeRules: [],
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -5359,7 +5336,6 @@ test("a non-continuing runtime gets a deterministic fresh phase handoff", async 
       usagePolicy: false,
       runtimeDefaults: { worker: "provider", judge: "provider" },
       runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
-      runtimeRules: [],
       nodes: [
         { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
         { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -5385,7 +5361,6 @@ test("Claude and GLM receive the smallest positive remaining monetary allowance"
       usagePolicy: { epoch: `${driver}-cost-cap`, maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
       runtimeDefaults: { worker: "provider", judge: "provider" },
       runtimes: { provider: { driver, model: "test-model", executable: fake.executable } },
-      runtimeRules: [],
       nodes: [
         { id: "first", type: "backend", phase: "implementation", maxCostUsd: 0.6, taskPacket: packet(), gate: false },
         { id: "second", type: "backend", phase: "implementation", maxCostUsd: 2, dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -6148,7 +6123,6 @@ if (process.argv.includes("--version")) {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
-    runtimeRules: [],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);

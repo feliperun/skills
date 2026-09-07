@@ -28,8 +28,8 @@ test('every reference the router links to exists', () => {
   }
 });
 
-test('the router documents runtimeRules failover', () => {
+test('the router documents runtimes[].fallback and no longer runtimeRules', () => {
   const skill = readFileSync(skillPath, 'utf8');
-  assert.match(skill, /runtimeRules/);
-  assert.match(skill, /failover/i);
+  assert.match(skill, /fallback/);
+  assert.doesNotMatch(skill, /runtimeRules/);
 });

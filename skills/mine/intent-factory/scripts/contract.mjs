@@ -17,6 +17,7 @@ import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   driverCapabilities,
+  resolveVendor,
   validateCapabilityRequirements,
 } from "./drivers/index.mjs";
 
@@ -25,10 +26,9 @@ export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index
 const CONTRACT_FIELDS = new Set([
   "schemaVersion", "contractVersion", "id", "campaignId", "goal", "cwd", "sourceIdentity",
   "maxParallel", "pollIntervalMs", "stallTimeoutSec", "timeoutSec", "maxInputTokens", "maxCostUsd", "usagePolicy",
-  "runtimeDefaults", "runtimes", "runtimeRules", "nodes", "warnings", "finalVerification",
+  "runtimeDefaults", "runtimes", "nodes", "warnings", "finalVerification",
 ]);
 const DEFAULTS_FIELDS = new Set(["worker", "judge"]);
-const RULE_FIELDS = new Set(["match", "runtime", "backoffSec"]);
 const NODE_FIELDS = new Set([
   "id", "type", "phase", "runtime", "dependsOn", "taskPacket", "taskPacketFile", "prompt", "promptFile",
   "definitionOfDone", "gate", "timeoutSec", "maxInputTokens", "maxCostUsd", "progressPolicy",
@@ -38,11 +38,11 @@ const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
   "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
   "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities", "costRank",
+  "fallback", "vendor",
 ]);
 const GATE_FIELDS = new Set(["enabled", "runtime", "review", "failOn", "maxRevisions", "requiredCapabilities"]);
 const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
 const GATE_VERDICTS = new Set(["pass", "fail", "invalid_judge_output"]);
-const MATCH_FIELDS = new Set(["id", "type", "runtime", "role", "status", "errorCode", "currentRuntime"]);
 const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "glm", "exec-jsonl", "replay"]);
 const NODE_STATUSES = new Set(["pending", "running", "done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
 const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependency", "budget", "canceled"]);
@@ -69,11 +69,7 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{mode: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], readFiles: string[], writeFiles?: string[], writeRoots?: string[], symbols: string[], decisions: string[], nonGoals: string[], verification: VerificationCommand[]}} TaskPacket */
 
-/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number}} ValidatedRuntime */
-
-/** @typedef {{id?: string, type?: string, runtime?: string, role?: "worker"|"judge", status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RuntimeRuleMatch */
-
-/** @typedef {{match: RuntimeRuleMatch, runtime: string, backoffSec?: number}} ValidatedRuntimeRule */
+/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number, fallback?: string, vendor: string}} ValidatedRuntime */
 
 /** @typedef {{enabled: boolean, review?: ("none"|"advisory"|"blocking"), runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
@@ -81,7 +77,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
 /** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
 
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
 /** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
@@ -103,9 +99,9 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{at: string, role: "worker"|"judge", runtime: string, nextRuntime?: string, rule?: number, ruleIndex?: number, revision?: number, hop?: number, reason: string, backoffSec?: number, backoffUntil?: string, usage?: Usage, costUsd?: number|null}} RoutingOverride */
 /** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
-/** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null}} WorktreeState */
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
-/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[]}} RunMetadata */
+/** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null}} WorktreeState */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
+/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[]}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
 
 /**
@@ -146,11 +142,19 @@ export function validateContract(raw, contractPath, options = {}) {
     { kind: "contract", id: raw.id, campaignId: raw.campaignId },
   );
 
-  const runtimes = /** @type {Record<string, ValidatedRuntime>} */ (raw.runtimes);
-  if (!runtimes || typeof runtimes !== "object" || Array.isArray(runtimes)) {
+  const rawRuntimes = /** @type {Record<string, JsonObject>} */ (raw.runtimes);
+  if (!rawRuntimes || typeof rawRuntimes !== "object" || Array.isArray(rawRuntimes)) {
     throw new TypeError("contract.runtimes must be an object");
   }
-  for (const [id, runtime] of Object.entries(runtimes)) validateRuntime(id, runtime);
+  const runtimes = /** @type {Record<string, ValidatedRuntime>} */ ({});
+  for (const [id, runtime] of Object.entries(rawRuntimes)) runtimes[id] = validateRuntime(id, runtime);
+  // A runtime's fallback is validated against sibling runtimes once every
+  // runtime is known, so declaration order never matters.
+  for (const [id, runtime] of Object.entries(runtimes)) {
+    if (runtime.fallback === undefined) continue;
+    if (runtime.fallback === id) throw new TypeError(`runtime ${id}.fallback cannot name itself`);
+    requireRuntime(runtimes, runtime.fallback, `runtime ${id}.fallback`);
+  }
 
   const defaults = /** @type {JsonObject} */ (raw.runtimeDefaults);
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
@@ -159,11 +163,6 @@ export function validateContract(raw, contractPath, options = {}) {
   rejectUnknown(defaults, DEFAULTS_FIELDS, "contract.runtimeDefaults");
   requireRuntime(runtimes, defaults.worker, "runtimeDefaults.worker");
   requireRuntime(runtimes, defaults.judge, "runtimeDefaults.judge");
-
-  const rules = raw.runtimeRules ?? [];
-  if (!Array.isArray(rules)) throw new TypeError("contract.runtimeRules must be an array");
-  for (const [index, rule] of rules.entries()) validateRule(rule, runtimes, index);
-  // A declared failover cycle is caught at dispatch as provider_failover_cycle, never here: the run owes each hop one attempt before it stops.
 
   if (!Array.isArray(raw.nodes) || raw.nodes.length === 0) {
     throw new TypeError("contract.nodes must be a non-empty array");
@@ -265,6 +264,20 @@ export function validateContract(raw, contractPath, options = {}) {
   assertAcyclic(nodes);
   assertPhaseOrdering(nodes);
 
+  // A gated node whose worker and judge share a vendor cannot produce an
+  // independent review — the same vendor grading its own output is not a
+  // gate, so this is rejected outright rather than left to reach dispatch.
+  for (const [index, node] of nodes.entries()) {
+    if (!node.gate.enabled) continue;
+    const workerRuntimeId = /** @type {string} */ (node.runtime ?? defaults.worker);
+    const judgeRuntimeId = /** @type {string} */ (node.gate.runtime ?? defaults.judge);
+    const workerVendor = runtimes[workerRuntimeId].vendor;
+    const judgeVendor = runtimes[judgeRuntimeId].vendor;
+    if (workerVendor === judgeVendor) {
+      throw new TypeError(`nodes[${index}] worker runtime ${workerRuntimeId} and judge runtime ${judgeRuntimeId} share vendor ${workerVendor}`);
+    }
+  }
+
   const warnings = nodes.flatMap((node, index) => [...commandCoverageWarnings(node, index), ...unsnapshottedWriteWarnings(node, index, cwd)]);
   return /** @type {ValidatedContract} */ ({
     ...raw,
@@ -274,7 +287,6 @@ export function validateContract(raw, contractPath, options = {}) {
     cwd,
     runtimes,
     runtimeDefaults: /** @type {{worker: string, judge: string}} */ (defaults),
-    runtimeRules: rules,
     nodes,
     maxParallel: validateMaxParallel(raw.maxParallel ?? 1),
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
@@ -295,37 +307,22 @@ export function validateContract(raw, contractPath, options = {}) {
 
 /** @typedef {{id: string, type?: string, runtime?: string, gate: {runtime?: string}, status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RoutableNode */
 /** @typedef {{status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RoutingEvent */
-/** @param {ValidatedContract} contract @param {RoutableNode} node @param {"worker"|"judge"} role @param {RoutingEvent} event */
+/**
+ * Resolve which runtime is currently assigned to a role. There is no dynamic
+ * rerouting here — rerouting is owned entirely by `planRoute` (backoff.mjs),
+ * which walks the one declared `fallback` hop off the current runtime.
+ *
+ * @param {ValidatedContract} contract @param {RoutableNode} node @param {"worker"|"judge"} role @param {RoutingEvent} event
+ */
 export function routeRuntime(contract, node, role = "worker", event = {}) {
   if (role !== "worker" && role !== "judge") throw new TypeError("route role must be worker or judge");
   const initialRuntimeId = role === "judge"
     ? node.gate.runtime ?? contract.runtimeDefaults.judge
     : node.runtime ?? contract.runtimeDefaults.worker;
-  const currentRuntime = event.currentRuntime ?? node.currentRuntime ?? initialRuntimeId;
-  requireRuntime(contract.runtimes, currentRuntime, "routing current runtime");
-  const routeContext = /** @type {Record<string, unknown>} */ ({
-    ...node,
-    role,
-    status: event.status ?? node.status,
-    errorCode: event.errorCode ?? node.errorCode,
-    currentRuntime,
-  });
-  const hasExplicitRuntime = role === "judge" ? Boolean(node.gate.runtime) : Boolean(node.runtime);
-  const rule = contract.runtimeRules.find((candidate) => {
-    const matches = Object.entries(candidate.match).every(([key, value]) => routeContext[key] === value);
-    if (!matches) return false;
-    const eventAware = ["role", "status", "errorCode", "currentRuntime"].some((key) => Object.hasOwn(candidate.match, key));
-    return !hasExplicitRuntime || eventAware;
-  });
-  const runtimeId = rule?.runtime ?? currentRuntime;
+  const runtimeId = event.currentRuntime ?? node.currentRuntime ?? initialRuntimeId;
+  requireRuntime(contract.runtimes, runtimeId, "routing current runtime");
   const runtime = contract.runtimes[runtimeId];
-  return {
-    id: runtimeId,
-    ...runtime,
-    capabilities: driverCapabilities(runtime),
-    ...(rule ? { ruleIndex: contract.runtimeRules.indexOf(rule) } : {}),
-    ...(rule?.backoffSec === undefined ? {} : { backoffSec: rule.backoffSec }),
-  };
+  return { id: runtimeId, ...runtime, capabilities: driverCapabilities(runtime) };
 }
 
 /**
@@ -348,12 +345,13 @@ export function validateRunMetadata(value, options = {}) {
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "pid", "processStartToken", "startedAt", "sourceIdentity",
     "holderId", "leaseGeneration", "leaseAcquiredAt", "leaseRenewedAt", "leaseExpiresAt",
-    "budgetExtension", "identityWarnings",
+    "budgetExtension", "identityWarnings", "integrationRef",
   ]), "run metadata");
   validateMetadata(value, "run metadata");
   requireInteger(value.pid, "run metadata.pid");
   if (value.processStartToken !== undefined && value.processStartToken !== null) requireString(value.processStartToken, "run metadata.processStartToken");
   requireString(value.startedAt, "run metadata.startedAt");
+  if (value.integrationRef !== undefined) requireString(value.integrationRef, "run metadata.integrationRef");
   validateSourceIdentity(value.sourceIdentity, "run metadata.sourceIdentity", { kind: "run" });
   // An exhausted run budget is extended only explicitly, and the extension is
   // recorded on the run it raises the ceiling for (retry.mjs, rule 4).
@@ -394,7 +392,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
     "schemaVersion", "contractVersion", "id", "type", "sourceIdentity", "packetHash", "status", "phase",
     "attempt", "revisions", "judgeFailures", "runtime", "blockedBy", "startedAt", "updatedAt", "result", "gate", "error", "usage",
     "costUsd", "routing", "progress", "worktree", "invocations", "executionOverrides", "verification", "scope",
-    "scopeFindings", "budgetDecision", "budgetState", "review", "previousAttempt",
+    "scopeFindings", "budgetDecision", "budgetState", "review", "previousAttempt", "integratedHead",
   ]), "node snapshot");
   validateMetadata(value, "node snapshot");
   requireId(value.id, "node snapshot.id");
@@ -411,6 +409,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   }
   requirePacketHash(value.packetHash, "node snapshot.packetHash");
   validateSourceIdentity(value.sourceIdentity, "node snapshot.sourceIdentity", { kind: "node" });
+  if (value.integratedHead !== undefined && value.integratedHead !== null) boundedString(value.integratedHead, "node snapshot.integratedHead", 256);
   const sourceIdentity = /** @type {JsonObject} */ (value.sourceIdentity);
   requireId(sourceIdentity.contractId, "node snapshot.sourceIdentity.contractId");
   requireId(sourceIdentity.nodeId, "node snapshot.sourceIdentity.nodeId");
@@ -495,48 +494,18 @@ export function validateEvent(value) {
 }
 
 /**
- * @param {unknown} rule
- * @param {Record<string, ValidatedRuntime>} runtimes
- * @param {number} index
- */
-function validateRule(rule, runtimes, index) {
-  assertObject(rule, `runtimeRules[${index}]`);
-  rejectUnknown(rule, RULE_FIELDS, `runtimeRules[${index}]`);
-  const match = /** @type {Record<string, unknown>|undefined} */ (rule.match);
-  if (!match || typeof match !== "object" || Array.isArray(match)) {
-    throw new TypeError(`runtimeRules[${index}].match must be an object`);
-  }
-  if (!Object.keys(match).length) throw new TypeError(`runtimeRules[${index}].match cannot be empty`);
-  for (const key of Object.keys(match)) {
-    if (!MATCH_FIELDS.has(key)) throw new TypeError(`runtimeRules[${index}].match.${key} is unknown`);
-    if (key === "role") {
-      if (match[key] !== "worker" && match[key] !== "judge") throw new TypeError(`runtimeRules[${index}].match.role is invalid`);
-    } else if (key === "status") {
-      if (!NODE_STATUSES.has(/** @type {string} */ (match[key]))) throw new TypeError(`runtimeRules[${index}].match.status is invalid`);
-    } else if (key === "currentRuntime") {
-      requireRuntime(runtimes, match[key], `runtimeRules[${index}].match.currentRuntime`);
-    } else if (key === "runtime") {
-      requireRuntime(runtimes, match[key], `runtimeRules[${index}].match.runtime`);
-    } else {
-      requireString(match[key], `runtimeRules[${index}].match.${key}`);
-    }
-  }
-  requireRuntime(runtimes, rule.runtime, `runtimeRules[${index}].runtime`);
-  if (rule.backoffSec !== undefined) nonNegativeNumber(rule.backoffSec, `runtimeRules[${index}].backoffSec`);
-  if (match.currentRuntime === rule.runtime) {
-    throw new TypeError(`runtimeRules[${index}] is a self-looping failover rule`);
-  }
-}
-
-/**
  * @param {string} id
  * @param {unknown} runtime
+ * @returns {ValidatedRuntime}
  */
 function validateRuntime(id, runtime) {
   requireId(id, `runtime ${id}`);
   assertObject(runtime, `runtime ${id}`);
   rejectUnknown(runtime, RUNTIME_FIELDS, `runtime ${id}`);
   validateRuntimeValues(runtime, `runtime ${id}`, runtime.driver === "exec-jsonl");
+  const vendor = resolveVendor(/** @type {{driver: string, vendor?: string, config?: Record<string, unknown>}} */ (runtime));
+  if (!vendor) throw new TypeError(`runtime ${id} has no resolvable vendor`);
+  return /** @type {ValidatedRuntime} */ ({ ...runtime, vendor });
 }
 
 /**
@@ -563,6 +532,8 @@ function validateRuntimeValues(runtime, label, executableRequired) {
   if (runtime.versionArgs !== undefined) requireStringArray(runtime.versionArgs, `${label}.versionArgs`);
   if (runtime.maxArgvPromptBytes !== undefined) positiveInteger(runtime.maxArgvPromptBytes, `${label}.maxArgvPromptBytes`);
   if (runtime.costRank !== undefined) nonNegativeNumber(runtime.costRank, `${label}.costRank`);
+  if (runtime.fallback !== undefined) requireString(runtime.fallback, `${label}.fallback`);
+  if (runtime.vendor !== undefined) requireString(runtime.vendor, `${label}.vendor`);
   validateCapabilityRequirements(
     /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (runtime.requiredCapabilities),
     `${label}.requiredCapabilities`,
@@ -788,6 +759,7 @@ function validateInvocations(value, label) {
       "promptPath", "stdoutPath", "stderrPath", "startedAt", "updatedAt", "closedAt", "deadlineAt",
       "exitCode", "signal", "status", "executable", "usage", "usageEstimated", "costUsd", "snapshotPath", "revision",
       "runId", "campaignId", "planPhase", "role", "runtimeFingerprint", "model", "reasoning", "sandbox", "continuationId", "continuationMode",
+      "nodeId", "attempt", "workspace", "worktreeBranch", "worktreeBaseSha",
     ]);
     rejectUnknown(invocation, allowed, `${label}[${index}]`);
     requireString(invocation.id, `${label}[${index}].id`);
@@ -798,6 +770,11 @@ function validateInvocations(value, label) {
     requireString(invocation.phase, `${label}[${index}].phase`);
     requireId(invocation.runId, `${label}[${index}].runId`);
     requireId(invocation.campaignId, `${label}[${index}].campaignId`);
+    if (invocation.nodeId !== undefined) requireId(invocation.nodeId, `${label}[${index}].nodeId`);
+    if (invocation.attempt !== undefined) nonNegativeInteger(invocation.attempt, `${label}[${index}].attempt`);
+    if (invocation.workspace !== undefined) boundedString(invocation.workspace, `${label}[${index}].workspace`, 4096);
+    if (invocation.worktreeBranch !== undefined && invocation.worktreeBranch !== null) boundedString(invocation.worktreeBranch, `${label}[${index}].worktreeBranch`, 512);
+    if (invocation.worktreeBaseSha !== undefined && invocation.worktreeBaseSha !== null) boundedString(invocation.worktreeBaseSha, `${label}[${index}].worktreeBaseSha`, 256);
     boundedString(invocation.planPhase, `${label}[${index}].planPhase`, 128);
     if (invocation.role !== "worker" && invocation.role !== "judge") throw new TypeError(`${label}[${index}].role is invalid`);
     boundedString(invocation.runtimeFingerprint, `${label}[${index}].runtimeFingerprint`, 128);
@@ -1135,12 +1112,12 @@ function validateProgressState(value, label) {
  */
 function validateWorktreeState(value, label) {
   assertObject(value, label);
-  rejectUnknown(value, new Set(["status", "path", "branch", "commit"]), label);
+  rejectUnknown(value, new Set(["status", "path", "branch", "commit", "baseSha"]), label);
   if (!["unassigned", "provisioning", "ready", "failed", "removed"].includes(/** @type {string} */ (value.status))) {
     throw new TypeError(`${label}.status is invalid`);
   }
-  for (const [key, maxBytes] of /** @type {[string, number][]} */ ([['path', 4096], ['branch', 512], ['commit', 256]])) {
-    if (value[key] !== null) boundedString(value[key], `${label}.${key}`, maxBytes);
+  for (const [key, maxBytes] of /** @type {[string, number][]} */ ([['path', 4096], ['branch', 512], ['commit', 256], ['baseSha', 256]])) {
+    if (value[key] !== undefined && value[key] !== null) boundedString(value[key], `${label}.${key}`, maxBytes);
   }
 }
 
@@ -1693,7 +1670,7 @@ function boundedPositiveNumber(value, label, max) {
  * @returns {number}
  */
 function validateMaxParallel(value) {
-  const parallel = positiveInteger(value, "contract.maxParallel");
-  if (parallel > 1) throw new TypeError("contract.maxParallel must be 1 until filesystem isolation exists");
-  return parallel;
+  // Filesystem isolation (attempt worktrees) exists now, so nothing caps this
+  // beyond being a sane positive integer.
+  return positiveInteger(value, "contract.maxParallel");
 }

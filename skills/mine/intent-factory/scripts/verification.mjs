@@ -356,6 +356,25 @@ export function validateWorkspaceScopeBoundary(cwd, boundary, declared = {}) {
 function captureIgnoreSources(root) {
   /** @type {Set<string>} */
   const paths = new Set([".intentfactoryignore", ".gitignore", ".git/config"]);
+  /** @type {Map<string, string>} */
+  const gitPaths = new Map();
+  /** @param {string} name @param {string} logical @returns {string|null} */
+  const resolveGitPath = (name, logical) => {
+    try {
+      const value = execFileSync("git", ["-C", root, "rev-parse", "--git-path", name], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (!value) return null;
+      const actual = isAbsolute(value) ? value : resolve(root, value);
+      gitPaths.set(logical, actual);
+      return actual;
+    } catch {
+      return null;
+    }
+  };
+  resolveGitPath("config", ".git/config");
+  const excludePath = resolveGitPath("info/exclude", ".git/info/exclude");
   try {
     if (lstatSync(resolve(root, ".git")).isFile()) paths.add(".git");
   } catch (error) {
@@ -399,9 +418,8 @@ function captureIgnoreSources(root) {
   };
   walk(root);
 
-  const gitExclude = resolve(root, ".git", "info", "exclude");
   try {
-    if (lstatSync(gitExclude).isFile() || lstatSync(gitExclude).isSymbolicLink()) paths.add(relativeWorkspacePath(root, gitExclude));
+    if (excludePath && (lstatSync(excludePath).isFile() || lstatSync(excludePath).isSymbolicLink())) paths.add(".git/info/exclude");
   } catch (error) {
     if (errorCode(error) !== "ENOENT" && errorCode(error) !== "ENOTDIR") {
       throw fail("snapshot_read_error", `cannot inspect Git exclude source: ${error instanceof Error ? error.message : String(error)}`);
@@ -410,7 +428,8 @@ function captureIgnoreSources(root) {
 
   /** @param {string} path @returns {SnapshotEntry[]} */
   const capturePath = (path) => {
-    const child = resolve(root, path);
+    const child = gitPaths.get(path) ?? resolve(root, path);
+    const isEffectiveGitPath = gitPaths.has(path);
     let metadata;
     try {
       metadata = lstatSync(child);
@@ -427,7 +446,7 @@ function captureIgnoreSources(root) {
     } catch (error) {
       throw fail("snapshot_read_error", `cannot resolve ignore source ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (!isContained(root, sourceReal)) throw fail("snapshot_symlink_escape", `workspace symlink escapes workspace: ${path}`);
+    if (!isEffectiveGitPath && !isContained(root, sourceReal)) throw fail("snapshot_symlink_escape", `workspace symlink escapes workspace: ${path}`);
     if (metadata.isSymbolicLink()) {
       let target;
       let targetReal;
@@ -437,7 +456,7 @@ function captureIgnoreSources(root) {
       } catch (error) {
         throw fail("snapshot_read_error", `cannot resolve ignore source symlink ${path}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (!isContained(root, targetReal)) throw fail("snapshot_symlink_escape", `workspace symlink escapes workspace: ${path}`);
+      if (!isEffectiveGitPath && !isContained(root, targetReal)) throw fail("snapshot_symlink_escape", `workspace symlink escapes workspace: ${path}`);
       return [{ path, kind: "symlink", digest: `link:${target}:${targetReal}` }];
     }
     if (!metadata.isFile()) throw fail("snapshot_unsupported_entry", `unsupported ignore source: ${path}`);
