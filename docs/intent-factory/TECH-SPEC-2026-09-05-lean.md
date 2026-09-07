@@ -132,7 +132,7 @@ budget number, one page per run with steps and logs. v0.3 adopts it.
 
 ## 3. Target architecture
 
-Seven rules replace the eighteen.
+Eight rules replace the eighteen.
 
 1. **Whole repo, own branch and worktree per attempt.** Every attempt runs in
    `git worktree add .runs/worktrees/<run>/<node>.<attempt>` on branch
@@ -155,12 +155,23 @@ Seven rules replace the eighteen.
    is exhausted) or the operator reconciles explicitly. Blocking never
    degrades silently. `failOn` is a set today; validation requires `critical`
    whenever `major` is listed, and blocking review requires `major`.
-3. **One budget each.** `maxCostUsd` per node and per run, `timeoutSec` per
-   node. Cost comes from the provider when it reports it, else from usage
-   times the `pricing` table declared on the runtime (input, output, cache
-   read per million); an invocation with no usage is recorded as `unknown`
-   and counted separately. Nothing else is metered for control; usage is
-   recorded per attempt in `usage.jsonl` for reporting.
+3. **No spend ceiling; time and allowance are the limits.** `timeoutSec` per
+   node bounds an attempt, `stallTimeoutSec` bounds provider silence, and a
+   spent provider allowance is handled by discovery (rule 8) rather than by a
+   ceiling the operator had to guess. There is no `maxInputTokens`, no
+   `maxCostUsd`, no `usagePolicy`, no ledger epoch and no judge reserve.
+   Measured justification: two of this campaign's phase failures were
+   `budget_exceeded` and none was real overspend. Phase 1 was killed at 976 k
+   raw input tokens because a synthetic 0.1 weight on 44 M cache reads crossed
+   a 5 M ceiling — a unit nobody is billed in. Agentic cost is dominated by
+   cache reads, whose ratio to raw input ranged from 20x to 54,000x across
+   this campaign's own attempts, so the quantity was never estimable in
+   advance. Most operators buy a subscription with a fixed daily or weekly
+   allowance, not tokens or dollars, so the only ceiling that maps to what
+   they actually own is the provider's own, which the provider reports when it
+   is reached. Usage stays recorded per attempt in `usage.jsonl` for
+   **reporting**; nothing is metered for control.
+
 4. **Retry in place.** `resume <run-dir>` first adopts and re-judges completed
    work: orphaned running nodes as today, and also nodes whose worker result
    and verification are recorded but whose review is unresolved (`blocked`
@@ -204,6 +215,21 @@ Seven rules replace the eighteen.
 7. **Docs fit in one sitting.** `SKILL.md` ≤ 6 KB, `references/contract.md`
    ≤ 20 KB, `references/operations.md` ≤ 10 KB. History lives under
    `docs/intent-factory/`.
+
+8. **Discover the models, assign them by role.** The factory asks which
+   drivers are installed and which models answer, and normalizes each
+   provider's exhaustion signal into `{available, exhaustedUntil, reason}` —
+   Z.ai code 1310 carries its own reset timestamp. An operator who declares
+   `runtimes` and `runtimeDefaults` gets exactly those. When they are omitted,
+   the factory composes them from what is available: the cheapest runtime
+   executes, the strongest runtime of a *different vendor* judges and plans,
+   and a composition with no admissible cross-vendor judge fails by name
+   rather than pairing same-vendor. When an allowance is spent mid-run the
+   factory re-tiers — another runtime of the same tier whose vendor stays
+   admissible — instead of descending a cost-ordered list, and records the
+   substitution; with no candidate the node is `attention` carrying
+   `exhaustedUntil`, so status shows when the work can resume, not merely
+   that it stopped.
 
 **Integration transaction (rule 1 and 2 detail).** Integration is serialized
 by the controller, journalled before it moves anything, and never touches the
@@ -381,7 +407,8 @@ integration transaction are `blocking`.
 | 0 | `retry-in-place` | luna | `resume <run-dir> [--node <id>] [--reconcile <id>] [--max-input-tokens <n>]`: adopt and re-judge first, including `judge_unavailable` nodes, which are re-judged and never re-dispatched; then re-dispatch ordinary failures and `dependency_failed` nodes as attempt+1 with a bounded 'Previous attempt' section; `unknown_effect_reconciled` needs `--reconcile`; exhausted run budget is attention unless extended explicitly; a `gitHead` descendant is accepted and recorded, a non-descendant refused, a dirty-tree mismatch warns. `contract prune`/`targetedFix` removed. | targeted tests, `check`, `typecheck` |
 | 1 isolation | `attempt-worktrees` | luna | attempt branches and worktrees per rule 1; integration transaction per section 3 (candidate ref verified before the run branch moves, single state write carrying `integratedHead`, derived integration head, recovery of fast-forwarded-but-unwritten attempts), conflicts as attention. Chained after nothing; `parallel-and-fallback` depends on it. | two-node tests with disjoint and overlapping writes; failed-candidate-leaves-branch-unchanged, crash-after-fast-forward-before-write and repeated-integration tests on the replay driver |
 | 1 | `parallel-and-fallback` | sonnet | `maxParallel` > 1 accepted; ready nodes without edges run concurrently in their worktrees; `runtimes[].fallback` replaces `runtimeRules` for workers and judges with the vendor-split validation of section 5; capability preflight kept. | three independent replay nodes; fallback tests for worker and judge including a rejected same-vendor pair |
-| 2a budget | `budget-usd-schema3` | sonnet | schema 3: `maxCostUsd` per node and run, `pricing` per runtime, `usage.jsonl` per attempt with `unknown` usage counted; `usagePolicy`, `budgetProfile`, `progressPolicy`, ledger epochs, segments, continuations and `capsule.mjs` removed together with their tests; `metrics.mjs`, `dashboard.mjs`, `render.mjs` and `status` read the new records so the suite is green at phase end. | tests; full suite by the orchestrator |
+| 1 | `runtime-discovery` | luna | rule 8: `doctor --discover` normalizes each driver's exhaustion signal into `{available, exhaustedUntil, reason}`; runtimes carry a tier beside their vendor; a declared assignment is honoured untouched and an omitted one is composed (cheapest executes, strongest cross-vendor judges), failing by name when no cross-vendor judge exists; a spent allowance re-tiers within its tier and otherwise is `attention` with `exhaustedUntil`. | driver tests on recorded provider responses including the Z.ai 1310 payload; composition and re-tier tests on the replay driver |
+| 2a diet | `budget-removal-schema3` | sonnet | schema 3 deletes every spend ceiling — `maxInputTokens`, `maxCostUsd`, `usagePolicy`, `budgetProfile`, `budget.mjs`, ledger epochs, judge reserve, segments, continuations and `capsule.mjs` — with their tests, and deletes `progressPolicy` and the file-change watchdog it feeds; `usage.jsonl` per attempt stays for reporting only; `timeoutSec`, `stallTimeoutSec` and the allowance handling of rule 8 are the limits; `metrics.mjs`, `dashboard.mjs`, `render.mjs` and `status` read the new records so the suite is green at phase end. | tests; full suite by the orchestrator |
 | 2b process | `controller-lock` | luna | `lock.mjs` per rule 5: atomic acquisition, stale detection by pid and start time, takeover that terminates every recorded invocation process group before dispatching; `supervisor.mjs`, `lease-liveness.mjs`, supervisor lease and generations removed; stale controller visible in status; tests for two contenders, pid reuse (start-time mismatch) and an orphaned detached invocation reaped on takeover. | tests |
 | 2b | `status-and-notify` | sonnet | `status.json` per run and `.runs/status.json` written each tick; notify with receipts and bounded retry per rule 6 (`notify.jsonl`); heartbeat, liveness journal, outbox, cursors and projector removed after `metrics.mjs`, `dashboard.mjs` and the status line are switched to `status.json`, `usage.jsonl` and `notify.jsonl`; `campaign sync`/`ack` keyed by journal event ids; `campaign-autonomy.mjs` and `campaign start/supervise/configure/drain/watch` removed. | tests; full suite by the orchestrator |
 | 3 visibility | `dashboard-v2` | glm | page and server per section 4 over `status.json`, node JSON, `events.jsonl`, `usage.jsonl`, `notify.jsonl`. | server API tests and a DOM test on the rendered snapshot |
@@ -405,12 +432,19 @@ forbid the canonical result file the controller designates under
 
 - One contract per phase, authored in one turn, validated and preflighted
   before launch.
-- On the 0.2.0 runner (phases 0 to 2a) the contract `maxInputTokens` is
-  6 M weighted as a safety net only; from 2b the safety net is `maxCostUsd`.
-  `stallTimeoutSec` 900, `timeoutSec` 3600.
+- No contract declares a spend ceiling. `usagePolicy` is `false` and
+  `maxInputTokens` is set high enough that the 0.2.0 ledger cannot fire, until
+  phase 2a deletes both. Note that `usagePolicy: false` makes `cacheReadWeight`
+  1, not 0. `stallTimeoutSec` 2400 — a healthy provider went silent for 971 s
+  on a long context and 900 s killed it twice. `timeoutSec` 7200 per node, and
+  every node declares `progressPolicy` explicitly with `graceSec` at its
+  timeout: the inherited default of 300/120/3 counts only file changes, so a
+  worker reading code is 'stalled', and it killed take 1 of phase 0.
 - After each phase: orchestrator runs `npm test`, reviews the diff, commits
-  with Conventional Commits, records an outcome note (attempts, USD, wall
-  clock, first-attempt rate), refreshes the controller snapshot.
+  with Conventional Commits, pushes the campaign branch, records an outcome
+  note (attempts, wall clock, first-attempt rate), refreshes the controller
+  snapshot. The repository is public: scan any new range for secret patterns
+  before its first push.
 - The control session checks status at most once per wake and acts only on
   terminal states or attention. Progress reaches the human through the notify
   bin and the dashboard. The session keeps a persistent campaign watcher
