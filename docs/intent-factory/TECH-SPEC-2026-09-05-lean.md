@@ -206,28 +206,51 @@ Seven rules replace the eighteen.
    `docs/intent-factory/`.
 
 **Integration transaction (rule 1 and 2 detail).** Integration is serialized
-by the controller and never touches the run branch until the candidate is
-accepted. It builds the candidate commit `integration-head + attempt branch`
-(fast-forward or merge) on a separate candidate ref
-(`refs/intent-factory/<run>/candidate`) checked out in a scratch worktree,
-runs the node's `verification` there, and only on success fast-forwards the
-run branch to the candidate sha and performs exactly one state write: the
-node JSON becomes `done` carrying `integratedHead` (that sha). A failed
-candidate verification deletes the candidate ref and scratch worktree, leaves
-the run branch tip exactly where it was, keeps the attempt worktree for
-inspection and records the failure on the node. The integration head is never
-persisted separately; it is derived on read as the run branch tip, which must
-equal the newest `integratedHead` among done nodes, and dependents are
-scheduled only from done nodes. The single crash window is therefore
-"fast-forwarded but not written": on startup the controller detects a run
-branch tip that is not the `integratedHead` of any done node, finds the
-attempt branch it contains (`git merge-base --is-ancestor`) and performs the
-same write idempotently; the candidate was already verified before the
-fast-forward. A conflict marks the node `attention` with the conflicting
-paths and keeps the attempt worktree; nothing is auto-resolved. Tests cover a
-failed candidate verification leaving the run branch unchanged, a crash after
-the fast-forward and before the write, and a repeated integration producing
-no duplicate effect.
+by the controller, journalled before it moves anything, and never touches the
+run ref until the candidate is accepted. The integration head is the run ref
+`refs/intent-factory/<run>/run`, created at the run's recorded `gitHead`;
+attempt branches are cut from it. A completed attempt is *sealed* first: the
+controller commits the attempt worktree's diff onto the attempt branch, because
+the runner leaves a worker's edits uncommitted and the replay driver writes
+files without committing, so a branch alone carries nothing. The controller
+then writes the transaction record — node, attempt, attempt sha, previous run
+ref tip, candidate sha, verification evidence — builds the candidate commit
+`integration-head + attempt branch` (fast-forward or merge) on
+`refs/intent-factory/<run>/candidate` in a scratch worktree, runs the node's
+`verification` there, and only on success advances the run ref with a
+conditional update against the recorded previous tip, followed by exactly one
+state write: the node JSON becomes `done` carrying `integratedHead` (that sha).
+A failed candidate verification deletes the candidate ref and scratch worktree,
+leaves the run ref exactly where it was, keeps the attempt worktree for
+inspection and records the failure on the node. A conflict marks the node
+`attention` with the conflicting paths, cleans the scratch worktree so the next
+node can integrate, keeps the attempt worktree, and auto-resolves nothing.
+
+The invariant is that every accepted candidate sha recorded in the journal stays
+an *ancestor* of the run ref tip — not that the tip *equals* the newest
+`integratedHead` among done nodes. There is no done node at the start or after
+the first node fails, the orchestrator may legally commit between attempts
+(`resume` already accepts a descendant `HEAD`), and a handoff can reopen a done
+node; equality would be false in all three. Dependents are scheduled only from
+done nodes.
+
+Recovery replays the journal, never ancestry. Ancestry cannot identify which
+transaction to repair: several retained attempt branches can be ancestors of the
+tip, a failed attempt's branch never advanced past its base, an accepted
+no-change attempt leaves the tip unchanged so an ancestry probe misses it
+entirely, and an unrelated orchestrator commit satisfies the same predicate
+without any candidate having been verified. On startup the controller completes
+the one unfinished transaction record idempotently, including the unchanged-tip
+case. Fast-forwarded-but-unwritten is not the only boundary: a crash during
+candidate preparation or verification must leave no candidate ref or scratch
+worktree that blocks the next integration, and a crash between the state write
+and its side effects must still remove the done attempt's worktree and emit the
+terminal event, so those side effects are idempotent and re-driven on startup.
+Tests cover a failed candidate verification leaving the run ref unchanged, an
+interruption before the ref update, between the ref update and the state write,
+and after the state write, an accepted no-change attempt, a conflict followed by
+another node integrating, and a repeated integration producing no duplicate
+effect.
 
 **Verification once per attempt (error 11).** The worker is told to run the
 targeted checks it needs; the controller runs `verification` once on the
@@ -511,3 +534,24 @@ Phase 0 launched on the owner's instruction at `cbf3dfe` before this round
 closed; F18 concerns the phase-1 integration transaction only. The phase-1
 contract receives a targeted round 4 (F18 and the contract itself) before it
 launches.
+
+### Round 4 (2026-09-07, gpt-6-astra xhigh, read-only, at `b93e8b0`)
+
+Targeted at the phase-1 contract. Verdict `HOLD` with twelve findings, four
+blocking. All twelve accepted and folded into the contract and into section 3
+above; the contract was re-validated and its preflight is green.
+
+| Finding | Response |
+|---|---|
+| F19 nothing commits the worker's edits, so the attempt branch is empty | the controller seals the attempt diff into a commit before the candidate is built; a self-committing worker is accepted as it stands; an empty diff is recorded, not an error (3, phase 1) |
+| F20 the integration-head equality is not a valid invariant | the run ref is explicit and the invariant is ancestry of every accepted candidate sha; integration records are kept per attempt independently of node status (3, phase 1) |
+| F21 ancestry cannot identify the transaction to repair | the transaction is journalled before the ref moves and recovery replays that exact record, including the unchanged-tip case; the ref update is conditional on the recorded previous tip (3, phase 1) |
+| F22 fast-forward-before-write is not the only recovery boundary | restart-safe candidate cleanup, conflict cleanup before the next integration, idempotent post-write side effects; three interruption tests named (3, phase 1) |
+| F23 the cwd change omits other consumers of the attempt workspace | the whole attempt context moves — snapshot, scope, materialization, capsules, progress monitor, judge inspection, continuation identity — without mutating `contract.cwd` (phase 1) |
+| F24 linked worktrees weaken the ignore-integrity safeguard | the effective config and exclude paths are resolved through `git rev-parse --git-path` and fingerprinted; linked-worktree regression test (phase 1) |
+| F25 the canonical result path leaves a Codex worker's writable workspace | a narrowly scoped writable root for the results directory, or an attempt-local result the controller moves; tested from an isolated Codex worker (phase 1) |
+| F26 the execution fixtures have no commit to branch from | the fixtures get an initial commit and the production prerequisite is stated where preflight checks it (phase 1) |
+| F27 the empty routing table enables unsafe fallback on the launch runner | explicit `runtimeRules` suppress synthesis; the only declared edge is unreachable; both nodes are cross-vendor, verified statically before launch (5, phase 1) |
+| F28 "keep capability preflight exactly as it is" conflicts with single-hop reachability | one explicit enumeration of reachable states, bounded at one hop, drives routing, validation and preflight; a forbidden primary pair is a validation error, a same-vendor judge fallback is a runtime refusal (5, phase 1) |
+| F29 driver name is not a complete vendor identity | vendor becomes a resolved runtime property covering provider overrides and replay runtimes; an unresolvable vendor is a validation error (5, phase 1) |
+| F30 the file-progress watchdog still kills healthy work | both nodes declare `progressPolicy` explicitly with `graceSec` at the node timeout, instead of inheriting the 300/120/3 default that killed take 1 of phase 0 (phase 1) |
