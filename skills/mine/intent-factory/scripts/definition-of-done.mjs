@@ -1,21 +1,22 @@
 /**
  * Schema 2 Definition of Done items. Each item is an object that names an
  * observable outcome and declares how it is proven: mechanically through a
- * `proof` (a verification `command` or a workspace `path`) or by judge
- * `judgment`. The schema-1 string item is rejected; there is no converter
- * and no dual acceptance.
+ * `proof` (a verification `command`, a workspace `path`, or a `verification`
+ * entry reused by reference) or by judge `judgment`. The schema-1 string item
+ * is rejected; there is no converter and no dual acceptance.
  */
 
-/** @typedef {{kind: "command"|"path", ref: string}} DefinitionOfDoneProof */
+/** @typedef {{kind: "command"|"path"|"verification", ref: string}} DefinitionOfDoneProof */
 
 /** @typedef {{id: string, text: string, proof?: DefinitionOfDoneProof, judgment?: true}} DefinitionOfDoneItem */
 
 /**
  * @param {unknown} value
  * @param {string} label
+ * @param {{verificationCount?: number, recordableCount?: number}} [options]
  * @returns {DefinitionOfDoneItem[]}
  */
-export function validateDefinitionOfDone(value, label) {
+export function validateDefinitionOfDone(value, label, options = {}) {
   if (!Array.isArray(value)) throw new TypeError(`${label} must be an array of Definition of Done objects`);
   return value.map((item, index) => {
     const itemLabel = `${label}[${index}]`;
@@ -34,7 +35,7 @@ export function validateDefinitionOfDone(value, label) {
     }
     const proof = record.proof === undefined
       ? undefined
-      : validateProof(record.proof, `${itemLabel}.proof`);
+      : validateProof(record.proof, `${itemLabel}.proof`, options);
     if (proof === undefined && record.judgment !== true) {
       throw new TypeError(`${itemLabel} must declare proof or judgment: true`);
     }
@@ -50,20 +51,47 @@ export function validateDefinitionOfDone(value, label) {
 /**
  * @param {unknown} value
  * @param {string} label
+ * @param {{verificationCount?: number, recordableCount?: number}} options
  * @returns {DefinitionOfDoneProof}
  */
-function validateProof(value, label) {
+function validateProof(value, label, options) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object with kind and ref`);
   }
   const record = /** @type {Record<string, unknown>} */ (value);
   rejectUnknown(record, new Set(["kind", "ref"]), label);
-  requireString(record.ref, `${label}.ref`);
   const kind = record.kind;
-  if (kind !== "command" && kind !== "path") {
-    throw new TypeError(`${label}.kind must be "command" or "path"`);
+  if (kind !== "command" && kind !== "path" && kind !== "verification") {
+    throw new TypeError(`${label}.kind must be "command", "path", or "verification"`);
   }
+  if (kind === "verification") return { kind, ref: validateVerificationRef(record.ref, label, options) };
+  requireString(record.ref, `${label}.ref`);
   return { kind, ref: /** @type {string} */ (record.ref) };
+}
+
+/**
+ * A `verification` proof reuses a recorded controller verification result by
+ * position, never by comparing command strings: a joined argv loses argument
+ * boundaries and shell semantics, so the reference is the only sound name.
+ *
+ * @param {unknown} value
+ * @param {string} label
+ * @param {{verificationCount?: number, recordableCount?: number}} options
+ * @returns {string}
+ */
+function validateVerificationRef(value, label, options) {
+  const text = typeof value === "number" ? String(value) : value;
+  if (typeof text !== "string" || !/^\d+$/u.test(text.trim())) {
+    throw new TypeError(`${label}.ref must be the zero-based index of a verification command`);
+  }
+  const index = Number.parseInt(text, 10);
+  if (typeof options.verificationCount === "number" && index >= options.verificationCount) {
+    throw new TypeError(`${label}.ref ${index} names no verification command: the packet declares ${options.verificationCount}`);
+  }
+  if (typeof options.recordableCount === "number" && index >= options.recordableCount) {
+    throw new TypeError(`${label}.ref ${index} cannot be reused at gate time: only the first ${options.recordableCount} verification commands are recorded on the node`);
+  }
+  return String(index);
 }
 
 /**

@@ -1,21 +1,24 @@
 /**
  * Conditional judge gate for schema-2 Definition of Done items.
  *
- * Deterministic items carry a mechanical `proof` (a verification command or a
- * workspace path) and gate first: the controller runs them and no judge
- * invocation is spent until they pass. The judge arbitrates only `judgment`
- * items, and a gate-failing rejection whose findings cite no judgment item id
- * is a judge protocol failure — one bounded re-ask, then blocked attention —
- * that never consumes a worker revision.
+ * Deterministic items carry a mechanical `proof` (a verification command, a
+ * workspace path, or a `verification` entry reused by reference) and gate
+ * first: the controller settles them and no judge invocation is spent until
+ * they pass. The judge arbitrates only `judgment` items, and a gate-failing
+ * rejection whose findings cite no judgment item id is a judge protocol
+ * failure — one bounded re-ask, then blocked attention — that never consumes a
+ * worker revision.
  */
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { judgeReaskInstruction, reviewMode, UNCITED_REJECTION_REASON } from "./review-modes.mjs";
 
 /** @typedef {import("./definition-of-done.mjs").DefinitionOfDoneItem} DefinitionOfDoneItem */
 /** @typedef {import("./definition-of-done.mjs").DefinitionOfDoneProof} DefinitionOfDoneProof */
 /** @typedef {import("./contract.mjs").ExecutionOverride} ExecutionOverride */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
+/** @typedef {import("./contract.mjs").VerificationState} VerificationState */
 
 const MAX_PROOF_OUTPUT_BYTES = 4 * 1024;
 
@@ -55,29 +58,56 @@ export function judgmentItems(node) {
   return (node.definitionOfDone ?? []).filter((item) => item.judgment === true);
 }
 
-/** A gated node runs the judge only when a Definition of Done item carries judgment:true; an empty or purely deterministic checklist settles mechanically without spending a judge invocation. @param {{definitionOfDone?: DefinitionOfDoneItem[], gate?: {enabled?: boolean}}} node @returns {boolean} */
+/** A gated node runs the judge only when its review mode is not `none` and a Definition of Done item carries judgment:true; an empty, purely deterministic, or review-free checklist settles mechanically without spending a judge invocation. @param {{definitionOfDone?: DefinitionOfDoneItem[], gate?: {enabled?: boolean, review?: unknown}}} node @returns {boolean} */
 export function judgeRequired(node) {
-  return node.gate?.enabled === true
+  return reviewMode(node.gate) !== "none"
     && (node.definitionOfDone ?? []).some((item) => item.judgment === true);
 }
 
 /**
  * @param {DefinitionOfDoneItem[]} items
  * @param {string} cwd
- * @param {{timeoutMs?: number}} [options]
- * @returns {Promise<Array<{id: string, kind: "command"|"path", ref: string, pass: boolean, detail: string}>>}
+ * @param {{timeoutMs?: number, verification?: VerificationState|null}} [options]
+ * @returns {Promise<Array<{id: string, kind: "command"|"path"|"verification", ref: string, pass: boolean, detail: string}>>}
  */
 export async function runMechanicalProofs(items, cwd, options = {}) {
   const timeoutMs = options.timeoutMs ?? 60_000;
+  const recorded = options.verification?.commands ?? [];
   const results = [];
   for (const item of items) {
     const proof = item.proof;
     if (proof === undefined) continue;
     results.push(proof.kind === "path"
       ? await provePath(item.id, proof, cwd)
-      : await proveCommand(item.id, proof, cwd, timeoutMs));
+      : proof.kind === "verification"
+        ? proveVerification(item.id, proof, recorded)
+        : await proveCommand(item.id, proof, cwd, timeoutMs));
   }
   return results;
+}
+
+/**
+ * Reuse the recorded result of one controller verification entry: pass or fail
+ * and its bounded output, with nothing executed. The reference is positional,
+ * so the entry this attempt recorded is exactly the entry the packet named.
+ *
+ * @param {string} id
+ * @param {DefinitionOfDoneProof} proof
+ * @param {Array<{argv: string[], passed: boolean, attempts?: Array<{exitCode?: number|null, stdout?: string, stderr?: string}>}>} recorded
+ * @returns {{id: string, kind: "verification", ref: string, pass: boolean, detail: string}}
+ */
+export function proveVerification(id, proof, recorded) {
+  const index = Number.parseInt(proof.ref, 10);
+  const entry = Number.isInteger(index) ? recorded[index] : undefined;
+  if (!entry) {
+    return { id, kind: "verification", ref: proof.ref, pass: false, detail: `verification command ${proof.ref} has no recorded result for this attempt` };
+  }
+  const attempt = entry.attempts?.at(-1);
+  const output = [attempt?.stderr, attempt?.stdout].find((text) => typeof text === "string" && text.trim()) ?? "";
+  const detail = entry.passed
+    ? `reused recorded verification result: ${entry.argv.join(" ")} passed`
+    : boundedText(`reused recorded verification result: ${entry.argv.join(" ")} failed: ${output.trim()}`);
+  return { id, kind: "verification", ref: proof.ref, pass: entry.passed === true, detail };
 }
 
 /**
@@ -141,7 +171,7 @@ async function provePath(id, proof, cwd) {
  * Verdict a deterministic gate from its per-item mechanical results: pass only
  * when every proof passed.
  *
- * @param {Array<{id: string, kind: "command"|"path", ref: string, pass: boolean, detail: string}>} results
+ * @param {Array<{id: string, kind: "command"|"path"|"verification", ref: string, pass: boolean, detail: string}>} results
  * @returns {import("./lib.mjs").JudgeVerdict}
  */
 export function mechanicalVerdict(results) {
@@ -172,7 +202,7 @@ export function mechanicalVerdict(results) {
  * reports every deterministic item as proven without re-running any proof.
  *
  * @param {{definitionOfDone?: DefinitionOfDoneItem[]}} node
- * @returns {Array<{id: string, kind: "command"|"path", ref: string, pass: boolean, detail: string}>}
+ * @returns {Array<{id: string, kind: "command"|"path"|"verification", ref: string, pass: boolean, detail: string}>}
  */
 export function provenDeterministicResults(node) {
   return mechanicalItems(node).map((item) => {
@@ -183,20 +213,22 @@ export function provenDeterministicResults(node) {
 
 /**
  * Deterministic evidence of one gate round plus its mechanical verdict. The
- * first ask runs every mechanical proof; a judge protocol re-ask reuses the
- * round's proven items and never re-runs a proof, so a flaky second execution
- * cannot consume a worker revision on the protocol failure path.
+ * first ask settles every mechanical proof (a command proof executes; a
+ * verification proof reuses its recorded result); a judge protocol re-ask
+ * reuses the round's proven items and never re-runs a proof, so a flaky second
+ * execution cannot consume a worker revision on the protocol failure path.
  *
  * @param {{definitionOfDone?: DefinitionOfDoneItem[]}} node
  * @param {string} cwd
  * @param {boolean} reask
  * @param {number} timeoutMs
+ * @param {VerificationState|null} [verification] this attempt's recorded verification results
  * @returns {Promise<{verdict: import("./lib.mjs").JudgeVerdict, results: Array<{id: string, pass: boolean, detail: string}>}>}
  */
-export async function deterministicGate(node, cwd, reask, timeoutMs) {
+export async function deterministicGate(node, cwd, reask, timeoutMs, verification = null) {
   const results = reask
     ? provenDeterministicResults(node)
-    : await runMechanicalProofs(mechanicalItems(node), cwd, { timeoutMs });
+    : await runMechanicalProofs(mechanicalItems(node), cwd, { timeoutMs, verification });
   return { verdict: mechanicalVerdict(results), results };
 }
 
@@ -246,7 +278,7 @@ function citesItem(text, ids) {
  * @returns {string}
  */
 export function uncitedReaskSuffix() {
-  return "\n\nYour previous fail verdict cited no Definition of Done item id. Protocol: every finding of a fail verdict must cite the id of the judgment item it addresses. Deterministic items are already proven by the controller and must not be re-arbitrated. Re-issue the verdict JSON with every finding citing the judgment item id it addresses.";
+  return judgeReaskInstruction(UNCITED_REJECTION_REASON);
 }
 
 /**
@@ -262,6 +294,12 @@ function isJudgeReask(override) {
   return /** @type {Record<string, unknown>} */ (override).kind === JUDGE_REASK_KIND;
 }
 
+/** @param {NodeSnapshot} state @returns {Record<string, unknown>|null} */
+function judgeReaskRecord(state) {
+  const record = [...(state.executionOverrides ?? [])].reverse().find(isJudgeReask);
+  return record ? /** @type {Record<string, unknown>} */ (record) : null;
+}
+
 /**
  * Spend the one bounded re-ask of the current judge round on the node state
  * itself. The record is only mutated in memory: the caller's transition — the
@@ -271,21 +309,34 @@ function isJudgeReask(override) {
  * grant a second one.
  *
  * @param {NodeSnapshot} state
+ * @param {string} [reason] what the re-ask answers, which selects its instruction
  */
-export function markJudgeReask(state) {
+export function markJudgeReask(state, reason = UNCITED_REJECTION_REASON) {
   if (judgeReaskOutstanding(state)) return;
   const record = /** @type {ExecutionOverride} */ (/** @type {unknown} */ ({
     kind: JUDGE_REASK_KIND,
     at: new Date().toISOString(),
     phase: "judge",
-    reason: "uncited judge rejection spent its one bounded re-ask",
+    reason,
   }));
   state.executionOverrides = [...(state.executionOverrides ?? []), record];
 }
 
 /** Whether the current judge round already spent its one bounded re-ask. @param {NodeSnapshot} state @returns {boolean} */
 export function judgeReaskOutstanding(state) {
-  return (state.executionOverrides ?? []).some(isJudgeReask);
+  return judgeReaskRecord(state) !== null;
+}
+
+/**
+ * What the outstanding re-ask answers, so the re-dispatched prompt carries the
+ * instruction the defect calls for.
+ *
+ * @param {NodeSnapshot} state
+ * @returns {string|undefined}
+ */
+export function judgeReaskReason(state) {
+  const reason = judgeReaskRecord(state)?.reason;
+  return typeof reason === "string" ? reason : undefined;
 }
 
 /** Release the bound when a judge round settles on a verdict that is not a protocol failure, so the next round is asked afresh. @param {NodeSnapshot} state */

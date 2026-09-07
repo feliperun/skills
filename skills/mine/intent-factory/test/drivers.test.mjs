@@ -737,7 +737,52 @@ test("selects the last valid JSON block for a Codex judge", () => {
     { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
   ].map((event) => JSON.stringify(event)).join("\n");
   assert.equal(normalizeProviderResult("codex", stream, 0, null).result, "Temporary files are harmless.");
-  assert.equal(normalizeProviderResult("codex", stream, 0, null, { preferStructured: true }).result, verdict);
+  const envelope = normalizeProviderResult("codex", stream, 0, null, { preferStructured: true });
+  assert.equal(envelope.result, verdict);
+  assert.equal(envelope.judgeCandidates, 1, "prose around one verdict leaves the candidate count at one");
+});
+
+test("counts verdict-shaped codex agent messages at the provider boundary", () => {
+  /** @param {string} summary */
+  const verdict = (summary) => JSON.stringify({ verdict: "pass", maxSeverity: "none", summary, findings: [] });
+  const two = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: verdict("first verdict") } },
+    { type: "item.completed", item: { type: "agent_message", text: "Let me reconsider." } },
+    { type: "item.completed", item: { type: "agent_message", text: verdict("second verdict") } },
+    { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const twoEnvelope = normalizeProviderResult("codex", two, 0, null, { preferStructured: true });
+  assert.equal(twoEnvelope.judgeCandidates, 2, "two agent messages each carrying a verdict are two candidates");
+  assert.equal(twoEnvelope.status, "done", "multiplicity is a review-protocol defect, not a provider failure");
+  assert.ok(typeof twoEnvelope.result === "string");
+  assert.equal(JSON.parse(twoEnvelope.result).summary, "second verdict", "the last candidate is still the selected one");
+
+  const single = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: "Notes on the diff." } },
+    { type: "item.completed", item: { type: "agent_message", text: verdict("clean") } },
+    { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const singleEnvelope = normalizeProviderResult("codex", single, 0, null, { preferStructured: true });
+  assert.equal(singleEnvelope.judgeCandidates, 1, "prose messages are not verdict candidates");
+
+  const nearMiss = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ verdict: "PASS", summary: "shouty" }) } },
+    { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const nearMissEnvelope = normalizeProviderResult("codex", nearMiss, 0, null, { preferStructured: true });
+  assert.equal(nearMissEnvelope.judgeCandidates, 0, "an object without a pass-or-fail verdict is not a candidate");
+  assert.equal(nearMissEnvelope.status, "done", "the turn finished; the candidate count is what the review protocol reads");
+
+  const worker = [
+    { type: "thread.started", thread_id: "thread" },
+    { type: "item.completed", item: { type: "agent_message", text: verdict("clean") } },
+    { type: "item.completed", item: { type: "agent_message", text: verdict("again") } },
+    { type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  assert.equal(normalizeProviderResult("codex", worker, 0, null).judgeCandidates, undefined, "only judge rounds are counted");
 });
 
 test("normalizes Codex cached token naming", () => {

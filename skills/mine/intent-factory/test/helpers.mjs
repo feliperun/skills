@@ -192,7 +192,7 @@ export function initializeGit(directory, { commit = true } = {}) {
 export function fakeCodex(directory, mode = "pass") {
   const path = join(mkdtempSync(join(tmpdir(), "runner-fake-codex-")), `fake-codex-${mode}.mjs`);
   writeFileSync(path, `#!${process.execPath}
-import { appendFileSync, existsSync, readFileSync, symlinkSync, unlinkSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 const mode = ${JSON.stringify(mode)};
 if (process.argv.includes("--version")) {
   if (mode === "version-fail") {
@@ -208,6 +208,16 @@ if (process.argv.includes("--version")) {
   process.stdin.on("end", () => {
     const prompt = input || process.argv.at(-1) || "";
     const judge = prompt.startsWith("Review node");
+    const canonicalResultPath = /canonical result file: (\\S+\\.json)/.exec(prompt)?.[1] ?? null;
+    // A protocol-compliant worker writes the canonical result file its prompt
+    // designates: the scope gate reads only that file to decide whether the
+    // attempt is completed work. Modes listed here are compliant; a mode left
+    // out delivers its result in the final message alone.
+    const protocolResult = (text) => {
+      if (canonicalResultPath) writeFileSync(canonicalResultPath, text);
+      return text;
+    };
+    const protocolModes = new Set(["write-unexpected", "write-unexpected-judge-prompt", "write-unexpected-long-review", "new-symlink-escape", "retargeted-symlink-escape", "write-outside-file-root", "write-under-file-root"]);
     if (mode !== "exhausted") console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
     if (mode === "thread-large-timeout" && process.argv.includes("resume")) {
       appendFileSync(${JSON.stringify(join(directory, ".runs", "resume-continuation.txt"))}, process.argv.join(" ") + "\\n");
@@ -227,6 +237,60 @@ if (process.argv.includes("--version")) {
       writeFileSync("alias.txt", "unauthorized target\\n");
     }
     if (mode === "contained-alias" && !judge) writeFileSync("alias.txt", "authorized target\\n");
+    if (mode === "write-file-root" && !judge) writeFileSync("notes.md", "in the file root\\n");
+    if (mode === "write-outside-file-root" && !judge) writeFileSync("sibling.md", "outside the file root\\n");
+    if (mode === "write-under-file-root" && !judge) {
+      unlinkSync("notes.md");
+      mkdirSync("notes.md");
+      writeFileSync("notes.md/nested.txt", "under the file root\\n");
+    }
+    if (mode === "write-unexpected-judge-prompt" && !judge) writeFileSync("unexpected.txt", "out of scope\\n");
+    if (mode === "write-unexpected-long-review" && !judge) writeFileSync("unexpected.txt", "out of scope\\n");
+    if (mode === "write-unexpected-judge-prompt" && judge) appendFileSync(${JSON.stringify(join(directory, ".runs", "judge-prompt.txt"))}, prompt);
+    if (mode === "write-unexpected-long-review" && judge) {
+      // A summary far longer than any status cell can hold: the note that
+      // carries it has to be bounded the same way on every surface.
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({verdict:"fail",maxSeverity:"minor",summary:"the review could not verify the declared behavior from the recorded evidence alone, so it flags the checklist item for a human pass",findings:[{severity:"minor",description:"style [works]",evidence:"line 1"}]})}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      return;
+    }
+    if (mode === "write-unexpected-failed" && !judge) {
+      writeFileSync("unexpected.txt", "out of scope\\n");
+      console.log(JSON.stringify({type:"turn.failed",error:{message:"deliberate failure"},usage:{input_tokens:7,output_tokens:3}}));
+      return;
+    }
+    if (mode === "write-unexpected-message-only" && !judge) {
+      // A done result that never reached the canonical file: the final message
+      // alone is not accepted work, so the scope gate must not defer to it.
+      writeFileSync("unexpected.txt", "out of scope\\n");
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      return;
+    }
+    if (mode === "write-unexpected-blocked-context" && !judge) {
+      writeFileSync("unexpected.txt", "out of scope\\n");
+      const text = protocolResult(JSON.stringify({ status: "blocked_context", summary: "missing context", changedFiles: [], verification: [], artifacts: [], missingContext: ["missing.txt"] }));
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      return;
+    }
+    if (mode === "write-unexpected-invalid-result" && !judge) {
+      writeFileSync("unexpected.txt", "out of scope\\n");
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"I could not finish: the task packet is ambiguous."}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      return;
+    }
+    if (mode === "write-unexpected-revision" && !judge) {
+      const counterPath = ${JSON.stringify(join(directory, ".runs", "scope-revision-workers"))};
+      appendFileSync(counterPath, "x\\n");
+      const run = readFileSync(counterPath, "utf8").trim().split("\\n").length;
+      writeFileSync(\`unexpected-\${run}.txt\`, "out of scope\\n");
+      if (prompt.includes("quality gate rejected")) appendFileSync(${JSON.stringify(join(directory, ".runs", "scope-retry-prompt.txt"))}, prompt);
+      const text = protocolResult(JSON.stringify({ status: "done", summary: \`worker attempt \${run}\`, changedFiles: [], verification: [], artifacts: [], missingContext: [] }));
+      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
+      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
+      return;
+    }
     if (mode === "alias-heartbeat" && !judge) {
       const statePath = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes", "build.json"))};
       let observedHeartbeat = 0;
@@ -357,13 +421,14 @@ if (process.argv.includes("--version")) {
     } else if (prompt.includes("FAIL_WORKER") || (mode === "worker-fail" && !prompt.startsWith("Review node")) || (mode === "judge-fail" && prompt.startsWith("Review node")) || mode === "failure-with-usage") {
       console.log(JSON.stringify({type:"turn.failed",error:{message:"deliberate failure",usage: mode === "failure-with-usage" ? {input_tokens:7,output_tokens:3,cached_input_tokens:2} : undefined}}));
     } else {
-      const text = judge
+      const emitted = judge
         ? mode === "critical"
           ? JSON.stringify({verdict:"fail",maxSeverity:"critical",summary:"critical defect",findings:[{severity:"critical",description:"broken [works]",evidence:"test failed"}]})
           : JSON.stringify({verdict:"fail",maxSeverity:"minor",summary:"minor advisory",findings:[{severity:"minor",description:"style [works]",evidence:"line 1"}]})
         : mode === "blocked-context"
           ? JSON.stringify({ status: "blocked_context", summary: "missing context", changedFiles: [], verification: [], artifacts: [], missingContext: ["missing.txt"] })
           : JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+      const text = !judge && protocolModes.has(mode) ? protocolResult(emitted) : emitted;
       console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
       console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
     }

@@ -144,7 +144,7 @@ test("an intent withheld from settlement classifies unknown_effect and resolves 
   assert.deepEqual(Object.keys(reread).sort(), [...recorded].sort());
 });
 
-test("the first terminal settlement from a scope failure persists provider receipts", async () => {
+test("the terminal settlement of an attempt with an advisory scope finding persists provider receipts", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-scope-receipts-"));
   const path = writeContract(directory, fixture({
     id: "intent-scope-receipts-run",
@@ -152,6 +152,33 @@ test("the first terminal settlement from a scope failure persists provider recei
     nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), gate: false }],
   }));
   const first = await withFakeCodex(directory, "write-unexpected", async () => runContract(path));
+  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const state = nodeState(first);
+  // A completed attempt with green verification is advisory, not terminal.
+  assert.equal(state.status, "done");
+  assert.equal(state.error ?? null, null);
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["unexpected.txt"]);
+  const invocationId = state.invocations?.at(-1)?.id;
+  assert.ok(invocationId);
+  const settlement = JSON.parse(readFileSync(join(runDir, "operations", `${invocationId}.settlement.json`), "utf8"));
+  assert.equal(settlement.status, "done");
+  assert.ok(
+    settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "provider" && receipt.ref === "fake-thread"),
+    "the completed-attempt settlement must persist the provider receipt from the close path",
+  );
+  assert.ok(settlement.receipts.some((/** @type {{kind: string, ref: string}} */ receipt) => receipt.kind === "stdout"));
+});
+
+test("the first terminal settlement from a scope failure persists provider receipts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-intent-scope-failure-receipts-"));
+  const path = writeContract(directory, fixture({
+    id: "intent-scope-failure-receipts-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), gate: false }],
+  }));
+  // An incomplete worker (a failed turn) that wrote outside its scope keeps
+  // the terminal verdict: only a completed attempt is advisory.
+  const first = await withFakeCodex(directory, "write-unexpected-failed", async () => runContract(path));
   const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
   const state = nodeState(first);
   assert.equal(state.status, "failed");

@@ -16,7 +16,7 @@ actionable verdicts into the session.
 | Contract, packets, results, capsule, driver protocol, states, resume | [contract.md](references/contract.md) |
 | Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
 | Campaign plan, transition table, authority, failover routes, commands | [campaign-autonomy.md](references/campaign-autonomy.md) |
-| Heartbeat, outbox, sync/ack, judge gate, prune, metrics, resilience | [release-1.md](references/release-1.md) |
+| Heartbeat, outbox, sync/ack, judge gate, metrics, resilience | [release-1.md](references/release-1.md) |
 | Budget profiles, `budgetDecision`/`budgetState` schemas | [budget-governance.md](references/budget-governance.md) |
 | Status line, notifications, notify transport | [feedback.md](references/feedback.md) |
 | Harness-side ambient rendering | [harness-feedback.md](references/harness-feedback.md) |
@@ -32,7 +32,6 @@ Everything else runs detached.
 | Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
 | Advance that cursor past an event | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |
 | Read the campaign indicators | `metrics <campaign-id> [--cwd <dir>] [--json]` |
-| Continue a partly finished run | `contract prune <run-dir> --out <file> [--targeted-fix]` |
 
 ## Load-bearing rules
 

@@ -11,7 +11,9 @@ import {
   hashPacket,
   routeRuntime,
   validateContract,
+  validateEvent,
   validateNodeSnapshot,
+  validateRunMetadata,
 } from "../scripts/contract.mjs";
 import { SIGNAL_END, SIGNAL_START } from "../scripts/signal-block.mjs";
 import { judgePrompt } from "../scripts/lib.mjs";
@@ -211,6 +213,74 @@ test("validation rejects unsupported protocol versions and stale packet hashes",
   assert.throws(() => validateContract(JSON.parse(readFileSync(stale.path, "utf8")), stale.path), /packetHash does not match/u);
 });
 
+test("gate review defaults to advisory and accepts none, advisory, and blocking", () => {
+  const omitted = writeFixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  const omittedContract = validateContract(JSON.parse(readFileSync(omitted.path, "utf8")), omitted.path);
+  assert.equal(omittedContract.nodes[0].gate.review, "advisory", "an omitted review mode reviews advisorially");
+  for (const review of ["none", "advisory", "blocking"]) {
+    const written = writeFixture({
+      nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review, failOn: ["major", "critical"] } }],
+    });
+    const contract = validateContract(JSON.parse(readFileSync(written.path, "utf8")), written.path);
+    assert.equal(contract.nodes[0].gate.review, review);
+  }
+  const invalid = writeFixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "optional" } }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path),
+    /gate\.review must be none, advisory, or blocking/u,
+  );
+});
+
+test("validation rejects blocking review without major and major without critical", () => {
+  const cases = [
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking" } }] },
+      /nodes\[0\] \(build\): gate\.review blocking requires major in gate\.failOn \(TECH-SPEC lean, rule 2\)/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["critical"] } }] },
+      /nodes\[0\] \(build\): gate\.review blocking requires major in gate\.failOn/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { review: "blocking", failOn: ["major"] } }] },
+      /gate\.failOn lists major without critical/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["minor", "major"] } }] },
+      /gate\.failOn lists major without critical/u],
+  ];
+  for (const [override, expected] of cases) {
+    const { path } = writeFixture(override);
+    assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), expected);
+  }
+  // Advisory review ignores failOn entirely, so only the set's own shape is checked.
+  const advisory = writeFixture({
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["minor"] } }],
+  });
+  const advisoryContract = validateContract(JSON.parse(readFileSync(advisory.path, "utf8")), advisory.path);
+  assert.deepEqual(advisoryContract.nodes[0].gate.failOn, ["minor"]);
+});
+
+test("a verification proof must name a declared verification command", () => {
+  /** @param {{kind: "verification", ref: number|string}} proof */
+  const node = (proof) => ({ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [
+    { id: "verified", text: "the controller verification passed", proof },
+  ], gate: false });
+  const reused = writeFixture({ nodes: [node({ kind: "verification", ref: 0 })] });
+  const reusedContract = validateContract(JSON.parse(readFileSync(reused.path, "utf8")), reused.path);
+  assert.deepEqual(reusedContract.nodes[0].definitionOfDone[0].proof, { kind: "verification", ref: "0" });
+  const asString = writeFixture({ nodes: [node({ kind: "verification", ref: "0" })] });
+  const asStringContract = validateContract(JSON.parse(readFileSync(asString.path, "utf8")), asString.path);
+  assert.deepEqual(asStringContract.nodes[0].definitionOfDone[0].proof, { kind: "verification", ref: "0" }, "a decimal string ref is the same reference");
+
+  const cases = [
+    [node({ kind: "verification", ref: 1 }), /proof\.ref 1 names no verification command: the packet declares 1/u],
+    [node({ kind: "verification", ref: "zero" }), /proof\.ref must be the zero-based index of a verification command/u],
+    [node({ kind: "verification", ref: -1 }), /proof\.ref must be the zero-based index/u],
+  ];
+  for (const [nodeOverride, expected] of cases) {
+    const { path } = writeFixture({ nodes: [nodeOverride] });
+    assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), expected);
+  }
+});
+
 function snapshot(overrides = {}) {
   return {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -248,10 +318,96 @@ test("node snapshots reject misspelled enums and invalid nested shapes", () => {
     [{ gate: { verdict: "pass", maxSeverity: "none", summary: "ok", findings: [{}] } }, /findings\[0\]/u],
     [{ error: { code: "bad" } }, /node snapshot\.error\.message/u],
     [{ usage: { inputTokens: "10", outputTokens: 0, cacheReadInputTokens: 0 } }, /usage\.inputTokens/u],
+    [{ scopeFindings: { unexpectedPaths: [7] } }, /scopeFindings\.unexpectedPaths/u],
+    [{ scopeFindings: { unexpectedPaths: [], typo: true } }, /scopeFindings has unexpected field typo/u],
+    [{ review: "optional" }, /node snapshot\.review is invalid/u],
   ];
   for (const [override, expected] of cases) {
     assert.throws(() => validateNodeSnapshot(snapshot(override)), expected);
   }
+});
+
+test("node snapshots accept the review mode and an invalid-judge-output gate record", () => {
+  assert.doesNotThrow(() => validateNodeSnapshot(snapshot({ review: "advisory" })));
+  for (const review of ["none", "blocking"]) {
+    assert.doesNotThrow(() => validateNodeSnapshot(snapshot({ review })));
+  }
+  const invalidVerdict = validateNodeSnapshot(snapshot({
+    review: "advisory",
+    status: "done",
+    gate: {
+      verdict: "invalid_judge_output",
+      maxSeverity: "none",
+      summary: "judge produced no usable verdict: the judge returned 2 separate verdicts",
+      findings: [],
+    },
+  }));
+  assert.equal(invalidVerdict.gate?.verdict, "invalid_judge_output");
+  assert.throws(
+    () => validateNodeSnapshot(snapshot({
+      gate: { verdict: "invalid_judge_output", maxSeverity: "major", summary: "carry findings", findings: [] },
+    })),
+    /invalid_judge_output records no findings/u,
+  );
+});
+
+test("node snapshots accept an advisory scope finding bounded to 64 paths", () => {
+  const withFinding = snapshot({ scopeFindings: { unexpectedPaths: ["a.txt", "b.txt"] } });
+  assert.deepEqual(validateNodeSnapshot(withFinding).scopeFindings, { unexpectedPaths: ["a.txt", "b.txt"] });
+  assert.throws(
+    () => validateNodeSnapshot(snapshot({ scopeFindings: { unexpectedPaths: Array.from({ length: 65 }, (_, i) => `${i}.txt`) } })),
+    /scopeFindings\.unexpectedPaths/u,
+  );
+});
+
+test("persisted scope boundaries name the roots that authorized a regular file", () => {
+  const boundary = {
+    schemaVersion: 1,
+    files: [],
+    roots: ["docs/NOTES.md", "src"],
+    fileRoots: ["docs/NOTES.md"],
+    fileOrigins: [],
+    rootOrigins: [
+      { literal: "docs/NOTES.md", paths: ["docs/NOTES.md"] },
+      { literal: "src", paths: ["src"] },
+    ],
+  };
+  const scope = { changedPaths: [], unexpectedPaths: [], changedPathCount: 0, unexpectedPathCount: 0, truncated: false, boundary };
+  assert.deepEqual(validateNodeSnapshot(snapshot({ scope })).scope?.boundary?.fileRoots, ["docs/NOTES.md"]);
+  const cases = [
+    { ...scope, boundary: { ...boundary, fileRoots: ["elsewhere.txt"] } },
+    { ...scope, boundary: { ...boundary, fileRoots: "docs/NOTES.md" } },
+    { ...scope, boundary: { ...boundary, typo: true } },
+  ];
+  for (const invalid of cases) {
+    assert.throws(() => validateNodeSnapshot(snapshot({ scope: invalid })), /node snapshot\.scope\.boundary/u);
+  }
+});
+
+/** @param {Record<string, unknown>} [overrides] */
+function event(overrides = {}) {
+  return {
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
+    at: "2026-01-01T00:00:00.000Z",
+    node: "build",
+    to: "running",
+    sourceIdentity: { kind: "node", contractId: "contract-test", nodeId: "build" },
+    packetHash: "a".repeat(64),
+    ...overrides,
+  };
+}
+
+test("events accept an advisory scope.finding type alongside the bounded unexpected paths", () => {
+  const finding = validateEvent(event({
+    type: "scope.finding",
+    from: "running",
+    unexpectedPaths: ["a.txt"],
+    unexpectedPathCount: 1,
+  }));
+  assert.equal(finding.type, "scope.finding");
+  assert.throws(() => validateEvent(event({ type: 7 })), /event\.type/u);
+  assert.throws(() => validateEvent(event({ typo: true })), /event has unexpected field typo/u);
 });
 
 test("node snapshots must match the validated contract node identity and hash", () => {
@@ -347,17 +503,16 @@ test("validate warns when a task packet verification command is absent from the 
   cleanNodes[0].definitionOfDone = [{ id: "y-test", text: "tests/fixtures/y.test.ts passes", proof: { kind: "command", ref: "pnpm exec vitest run tests/fixtures/y.test.ts" } }];
   const cleanPath = helpers.writeContract(directory, clean);
   const cleanWarnings = validateContract(JSON.parse(readFileSync(cleanPath, "utf8")), cleanPath).warnings;
-  assert.equal(cleanWarnings.length, 1, "only the single-node warning remains; no command-target warning");
-  assert.match(cleanWarnings[0], /^single-node contract/u);
+  assert.deepEqual(cleanWarnings, [], "no command-target warning and no single-node warning");
 });
 
-test("validate warns on a single-node contract and not on a batched DAG", () => {
+test("validate rejects neither a single-node contract nor a batched DAG", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-single-node-warn-"));
   const singlePath = helpers.writeContract(directory, helpers.fixture({
     nodes: [{ id: "build", type: "backend", taskPacket: helpers.packet(), gate: false }],
   }));
   const single = validateContract(JSON.parse(readFileSync(singlePath, "utf8")), singlePath);
-  assert.ok(single.warnings.some((warning) => warning.startsWith("single-node contract")));
+  assert.deepEqual(single.warnings, [], "a single-node contract is simply valid");
 
   const batchedPath = helpers.writeContract(directory, helpers.fixture({
     id: "batched-run",
@@ -367,7 +522,7 @@ test("validate warns on a single-node contract and not on a batched DAG", () => 
     ],
   }));
   const batched = validateContract(JSON.parse(readFileSync(batchedPath, "utf8")), batchedPath);
-  assert.ok(!batched.warnings.some((warning) => warning.startsWith("single-node contract")));
+  assert.deepEqual(batched.warnings, []);
 });
 
 test("validate warns when writeFiles land outside the workspace snapshot", () => {
@@ -645,6 +800,21 @@ test("judge prompt exposes only the write-file evidence boundary", () => {
   assert.doesNotMatch(prompt, /contract\.json/u);
 });
 
+test("judge prompt lists scope findings only when the node carries an advisory finding", () => {
+  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
+    id: "build",
+    type: "backend",
+    taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
+    definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+  });
+  const clean = judgePrompt(node, "worker complete");
+  assert.doesNotMatch(clean, /Scope findings/u);
+
+  const flagged = judgePrompt(node, "worker complete", { scopeFindings: { unexpectedPaths: ["outside.txt"] } });
+  assert.match(flagged, /Scope findings/u);
+  assert.match(flagged, /- outside\.txt/u);
+});
+
 test("discovery packets render as read-only discovery work", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-discovery-packet-"));
   const value = helpers.fixture({
@@ -778,6 +948,31 @@ test("autonomous write roots reject symlinks resolving to cwd but allow nested s
   symlinkSync("src", join(nested.directory, "alias"));
   const contract = validateContract(JSON.parse(readFileSync(nested.path, "utf8")), nested.path);
   assert.deepEqual(contract.nodes[0].taskPacket.writeRoots, ["alias"]);
+});
+
+test("an autonomous write root may name an existing regular file", () => {
+  const { directory, path } = writeFixture({
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: {
+        mode: "autonomous",
+        objective: "Implement it",
+        instructions: ["Inspect as needed and make the change"],
+        readFiles: [],
+        writeRoots: ["docs/NOTES.md"],
+        symbols: [],
+        decisions: [],
+        nonGoals: [],
+        verification: [],
+      },
+      gate: false,
+    }],
+  });
+  mkdirSync(join(directory, "docs"));
+  writeFileSync(join(directory, "docs", "NOTES.md"), "notes\n");
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.deepEqual(contract.nodes[0].taskPacket.writeRoots, ["docs/NOTES.md"]);
 });
 
 test("validates node budgets and bounded progress policy", () => {
@@ -969,17 +1164,64 @@ test("finalVerification accepts the verification-command schema and rejects unkn
   }
 });
 
-test("targetedFix is a declared node field and only accepts a boolean", () => {
+test("a single-node contract validates without warning and targetedFix is not a node field", () => {
   const { path } = writeFixture({
-    nodes: [{ id: "build", type: "backend", targetedFix: true, taskPacket: packet(), gate: false }],
+    id: "single-node-contract",
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   });
-  assert.equal(validateContract(JSON.parse(readFileSync(path, "utf8")), path).nodes[0].targetedFix, true);
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.deepEqual(contract.warnings, [], "a single-node contract is simply valid");
 
   const invalid = writeFixture({
-    nodes: [{ id: "build", type: "backend", targetedFix: "yes", taskPacket: packet(), gate: false }],
+    id: "targeted-fix-field",
+    nodes: [{ id: "build", type: "backend", targetedFix: true, taskPacket: packet(), gate: false }],
   });
   assert.throws(
     () => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path),
-    /targetedFix must be a boolean/u,
+    /nodes\[0\] has unexpected field targetedFix/u,
+  );
+});
+
+test("a node snapshot accepts a bounded previousAttempt section and rejects an oversized one", () => {
+  const accepted = validateNodeSnapshot(snapshot({
+    previousAttempt: "## Previous attempt\n\nAttempt 1 failed; this is attempt 2.",
+  }));
+  assert.match(/** @type {string} */ (accepted.previousAttempt), /Attempt 1 failed/u);
+
+  assert.throws(
+    () => validateNodeSnapshot(snapshot({ previousAttempt: "x".repeat(9 * 1024) })),
+    /previousAttempt exceeds 8192 bytes/u,
+  );
+  assert.throws(
+    () => validateNodeSnapshot(snapshot({ previousAttempt: "   " })),
+    /previousAttempt must be a non-empty string/u,
+  );
+});
+
+test("run metadata records a budget extension and identity warnings", () => {
+  const metadata = {
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
+    contractVersion: INTENT_FACTORY_VERSION,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    sourceIdentity: { kind: "run", id: "run" },
+  };
+  assert.equal(validateRunMetadata(metadata).budgetExtension, undefined);
+
+  const extended = validateRunMetadata({
+    ...metadata,
+    budgetExtension: { previous: 1000, maxInputTokens: 5000, at: new Date().toISOString() },
+    identityWarnings: ["source tree fingerprint changed since the run started"],
+  });
+  assert.equal(extended.budgetExtension?.maxInputTokens, 5000);
+  assert.deepEqual(extended.identityWarnings, ["source tree fingerprint changed since the run started"]);
+
+  assert.throws(
+    () => validateRunMetadata({ ...metadata, budgetExtension: { previous: 5000, maxInputTokens: 1000, at: new Date().toISOString() } }),
+    /maxInputTokens must exceed previous/u,
+  );
+  assert.throws(
+    () => validateRunMetadata({ ...metadata, identityWarnings: [42] }),
+    /identityWarnings\[0\] must be a string/u,
   );
 });

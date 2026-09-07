@@ -4,10 +4,9 @@
  *
  * `contract.finalVerification` is the contract-wide proof that the phase as a
  * whole closes: the controller runs it before the judge on the phase-terminal
- * node (the node no other node depends on) and on any targeted-fix node, so no
- * final checkpoint is ever approved on partial verification. The persisted
- * node-snapshot shape for verification evidence lives here too, next to the
- * schema it records.
+ * node (the node no other node depends on), so no final checkpoint is ever
+ * approved on partial verification. The persisted node-snapshot shape for
+ * verification evidence lives here too, next to the schema it records.
  */
 
 import { Buffer } from "node:buffer";
@@ -32,17 +31,15 @@ export function validateFinalVerification(value, label = "contract.finalVerifica
 /**
  * The contract's `finalVerification` commands when this node is the one that
  * closes the phase, otherwise none. A node is phase-terminal when no other
- * node in the contract depends on it; a targeted-fix node always qualifies
- * because it is the whole of its own contract's work.
+ * node in the contract depends on it.
  *
  * @param {{finalVerification?: VerificationCommand[], nodes: {id: string, dependsOn: string[]}[]}} contract
- * @param {{id: string, targetedFix?: boolean}} node
+ * @param {{id: string}} node
  * @returns {VerificationCommand[]}
  */
 export function finalVerificationCommands(contract, node) {
   const commands = contract.finalVerification ?? [];
   if (commands.length === 0) return [];
-  if (node.targetedFix === true) return commands;
   const hasDependant = contract.nodes.some((candidate) => candidate.dependsOn.includes(node.id));
   return hasDependant ? [] : commands;
 }

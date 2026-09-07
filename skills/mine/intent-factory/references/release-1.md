@@ -60,23 +60,8 @@ consumes a worker revision.
 `contract.finalVerification` (`scripts/final-verification.mjs`) carries the
 full verification-command schema and is the proof that the phase as a whole
 closes. The controller runs it before the judge on the phase-terminal node —
-the node no other node depends on — and on any `targetedFix` node, so no final
-checkpoint is approved on partial verification.
-
-## contract prune
-
-```bash
-node <skill-dir>/scripts/runner.mjs contract prune <run-dir> --out <file> [--id <contract-id>] [--targeted-fix]
-node <skill-dir>/scripts/runner.mjs contract validate <contract.json>
-```
-
-`prune` turns a partially finished run into the contract for what is left of
-it: drop the settled nodes (`done` and `no-op`), keep the rest with their
-`dependsOn` rewritten to the survivors, and seed every survivor with the
-portable capsule its last attempt left behind. A pruned contract with one node
-left is by definition a targeted fix, so it is written only with
-`--targeted-fix` and stamped `targetedFix: true`; `validate` refuses any other
-single-node contract.
+the node no other node depends on — so no final checkpoint is approved on
+partial verification.
 
 ## Deterministic resilience
 

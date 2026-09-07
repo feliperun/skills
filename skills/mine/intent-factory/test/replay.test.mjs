@@ -489,7 +489,7 @@ test("D25: a gate rejection citing no Definition of Done item is invalid", async
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "reviewed", text: "A judge is convinced by the change", judgment: true }],
-      gate: { failOn: ["critical"] },
+      gate: { review: "blocking", failOn: ["major", "critical"] },
     }],
   });
   const state = replayed.outcome.states.get("build");

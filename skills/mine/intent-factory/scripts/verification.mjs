@@ -94,7 +94,7 @@ const VERIFICATION_ENV_BASE_NAMES = Object.freeze([
 /** @typedef {{entries: SnapshotEntry[], ignoreSources: SnapshotEntry[], truncated: boolean}} WorkspaceSnapshot */
 
 /** @typedef {{literal: string, paths: string[]}} WorkspaceScopeOrigin */
-/** @typedef {{schemaVersion: 1, files: string[], roots: string[], fileOrigins: WorkspaceScopeOrigin[], rootOrigins: WorkspaceScopeOrigin[]}} WorkspaceScopeBoundary */
+/** @typedef {{schemaVersion: 1, files: string[], roots: string[], fileRoots?: string[], fileOrigins: WorkspaceScopeOrigin[], rootOrigins: WorkspaceScopeOrigin[]}} WorkspaceScopeBoundary */
 /** @typedef {{files?: string[], roots?: string[], boundary?: WorkspaceScopeBoundary}} WorkspaceScope */
 
 /**
@@ -193,12 +193,12 @@ export function compareWorkspaceSnapshot(before, cwd, scope = {}) {
     throw fail("scope_invalid", "workspace scope must be an object");
   }
   const root = realpathSync(cwd);
-  const allowed = scope.boundary
+  const allowed = /** @type {WorkspaceScopeBoundary} */ (scope.boundary
     ? validateWorkspaceScopeBoundary(root, scope.boundary, scope)
     : {
       files: expandScopePaths(root, normalizeScopePaths(scope.files ?? [], "files")),
       roots: expandScopePaths(root, normalizeScopePaths(scope.roots ?? [], "roots")),
-    };
+    });
   const after = captureWorkspaceSnapshot(cwd, before.ignoreSources);
   if (!sameSnapshotEntries(before.ignoreSources, after.ignoreSources)) {
     throw fail("snapshot_ignore_changed", "workspace ignore sources changed during worker execution");
@@ -210,7 +210,14 @@ export function compareWorkspaceSnapshot(before, cwd, scope = {}) {
     if (prior.get(path) !== current.get(path)) changed.add(path);
   }
   const changedPaths = [...changed].sort();
-  const unexpectedPaths = changedPaths.filter((path) => !allowed.files.includes(path) && !allowed.roots.some((scopeRoot) => path === scopeRoot || path.startsWith(`${scopeRoot}/`)));
+  // A root that names a regular file authorizes exactly that path; only a
+  // directory root covers what is beneath it (TECH-SPEC lean, rule 1).
+  const fileRoots = new Set(allowed.fileRoots ?? []);
+  const directoryRoots = allowed.roots.filter((scopeRoot) => !fileRoots.has(scopeRoot));
+  const unexpectedPaths = changedPaths.filter((path) =>
+    !allowed.files.includes(path) &&
+    !fileRoots.has(path) &&
+    !directoryRoots.some((scopeRoot) => path === scopeRoot || path.startsWith(`${scopeRoot}/`)));
   return { after, changedPaths, unexpectedPaths };
 }
 
@@ -229,13 +236,33 @@ export function captureWorkspaceScope(cwd, scope = {}) {
   const declaredRoots = normalizeScopePaths(scope.roots ?? [], "roots");
   const fileOrigins = declaredFiles.map((literal) => ({ literal, paths: expandScopePaths(root, [literal]) }));
   const rootOrigins = declaredRoots.map((literal) => ({ literal, paths: expandScopePaths(root, [literal]) }));
+  const rootPaths = [...new Set(rootOrigins.flatMap((origin) => origin.paths))];
   return validateWorkspaceScopeBoundary(cwd, {
     schemaVersion: 1,
     files: [...new Set(fileOrigins.flatMap((origin) => origin.paths))],
-    roots: [...new Set(rootOrigins.flatMap((origin) => origin.paths))],
+    roots: rootPaths,
+    fileRoots: rootPaths.filter((path) => isRegularWorkspaceFile(root, path)),
     fileOrigins,
     rootOrigins,
   }, { files: declaredFiles, roots: declaredRoots });
+}
+
+/**
+ * Whether a declared scope root is an existing regular file. Decided once at
+ * capture time and carried in the persisted boundary: a worker that later
+ * replaces the file with a same-named directory must not win directory
+ * authority over the path.
+ *
+ * @param {string} root
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isRegularWorkspaceFile(root, path) {
+  try {
+    return statSync(resolve(root, path)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -258,8 +285,12 @@ export function validateWorkspaceScopeBoundary(cwd, boundary, declared = {}) {
   const root = realpathSync(cwd);
   const files = normalizeScopePaths(value.files, "boundary.files");
   const roots = normalizeScopePaths(value.roots, "boundary.roots");
-  if (files.length + roots.length + value.fileOrigins.length + value.rootOrigins.length > VERIFICATION_LIMITS.snapshotEntries) {
+  const fileRoots = value.fileRoots === undefined ? [] : normalizeScopePaths(value.fileRoots, "boundary.fileRoots");
+  if (files.length + roots.length + fileRoots.length + value.fileOrigins.length + value.rootOrigins.length > VERIFICATION_LIMITS.snapshotEntries) {
     throw fail("scope_boundary_too_large", "persisted worker scope boundary is too large");
+  }
+  if (fileRoots.some((path) => !roots.includes(path))) {
+    throw fail("scope_boundary_invalid", "persisted worker scope file roots must be declared roots");
   }
   const declaredFiles = normalizeScopePaths(declared.files ?? [], "files");
   const declaredRoots = normalizeScopePaths(declared.roots ?? [], "roots");
@@ -307,6 +338,7 @@ export function validateWorkspaceScopeBoundary(cwd, boundary, declared = {}) {
     schemaVersion: 1,
     files: [...new Set(files)],
     roots: [...new Set(roots)],
+    fileRoots: [...new Set(fileRoots)],
     fileOrigins,
     rootOrigins,
   };

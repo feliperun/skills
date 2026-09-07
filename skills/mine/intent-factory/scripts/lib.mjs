@@ -1,13 +1,14 @@
 import { validateContract, routeRuntime } from "./contract.mjs";
 import { normalizeProviderResult, providerCommand } from "./drivers/index.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
+import { scopeFindingsPromptSection } from "./scope-findings.mjs";
 export { runProcessAlive } from "./supervisor.mjs";
 
 export { validateContract, routeRuntime, normalizeProviderResult, providerCommand };
 export { renderStatus, renderReport, renderFindings } from "./render.mjs";
 
 /** @typedef {{id: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], taskPacket: {mode?: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], writeFiles?: string[], writeRoots?: string[], verification: {argv: string[]}[]}}} JudgeNode */
-/** @typedef {{verdict: "pass"|"fail", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: {severity: "minor"|"major"|"critical", description: string, evidence: string}[]}} JudgeVerdict */
+/** @typedef {{verdict: "pass"|"fail"|"invalid_judge_output", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: {severity: "minor"|"major"|"critical", description: string, evidence: string}[]}} JudgeVerdict */
 
 export const TERMINAL = new Set([
   "done",
@@ -99,7 +100,7 @@ export function parseJudge(result) {
 /**
  * @param {JudgeNode} node
  * @param {unknown} workerResult
- * @param {{diff?: unknown[], verification?: unknown, deterministic?: unknown}} context
+ * @param {{diff?: unknown[], verification?: unknown, deterministic?: unknown, scopeFindings?: {unexpectedPaths: string[]}|null, previousAttempt?: string}} context
  * @returns {string}
  */
 export function judgePrompt(node, workerResult, context = {}) {
@@ -126,12 +127,15 @@ export function judgePrompt(node, workerResult, context = {}) {
   }
   const diff = Array.isArray(context.diff) ? /** @type {unknown[]} */ (context.diff).slice(0, 64) : [];
   const verificationResult = context.verification ?? { passed: false, commands: [] };
+  const scopeSection = scopeFindingsPromptSection(context.scopeFindings);
   return `Review node ${node.id} independently. The review context is closed: inspect only the ${node.taskPacket.mode === "autonomous" ? "write roots" : "write files"} below and do not perform repository-wide discovery. Do not re-run the verification commands — the controller already executed them and attached the results; re-running suites duplicates cost without adding evidence.\n\n` +
     `${writeBoundaryLabel}:\n${writeFiles}\n\nVerification commands (already executed by the controller):\n${verification}\n\n` +
     `Task brief:\n${node.taskPacket.objective}\n\nInstructions:\n${taskInstructions}\n\nDefinition of Done:\n${criteria}\n\n` +
     `Worker result (structured):\n${structured ? JSON.stringify(structured) : "(invalid worker result withheld)"}\n\n` +
     `Controller diff paths:\n${diff.length ? diff.map((path) => `- ${path}`).join("\n") : "- (none)"}\n\n` +
     `Controller verification:\n${JSON.stringify(verificationResult)}\n\n` +
+    (scopeSection ? `${scopeSection}\n\n` : "") +
+    (context.previousAttempt ? `${context.previousAttempt}\n\n` : "") +
     "Return only the JSON object required by the output schema. Evidence must be concrete. " +
     "Use verdict pass only when findings is empty and maxSeverity is none. " +
     "Use verdict fail whenever findings is non-empty, including advisory findings below failOn. " +

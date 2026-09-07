@@ -38,13 +38,21 @@ import {
   clearJudgeReask,
   deterministicGate,
   judgeReaskOutstanding,
+  judgeReaskReason,
   judgeRequired,
   markJudgeReask,
   resetPhaseRouting,
-  uncitedReaskSuffix,
   uncitedRejection,
   verificationFailureVerdict,
 } from "./judge-gate.mjs";
+import {
+  JUDGE_UNAVAILABLE_CODE,
+  UNCITED_REJECTION_REASON,
+  invalidJudgeVerdict,
+  judgeReaskInstruction,
+  judgeVerdictEvidence,
+  reviewMode,
+} from "./review-modes.mjs";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
@@ -75,7 +83,7 @@ import {
   environmentPreflight,
   reachableRuntimes,
 } from "./env-preflight.mjs";
-import { renderReportJson, renderStatusJson } from "./render.mjs";
+import { renderReportJson, renderStatusJson, statusNote } from "./render.mjs";
 import {
   captureSourceIdentity,
   validateEvent,
@@ -119,12 +127,19 @@ import {
   runVerification,
   validateWorkspaceScopeBoundary,
 } from "./verification.mjs";
+import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "./scope-findings.mjs";
 import { finalVerificationCommands } from "./final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
 import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
-import { contractCli, validateContractFile } from "./contract-prune.mjs";
+import { contractCli, validateContractFile } from "./contract-cli.mjs";
+import {
+  appendPreviousAttempt,
+  isUnknownEffectStop,
+  planResumeRetry,
+  renderPreviousAttemptSection,
+} from "./retry.mjs";
 import { LIVENESS_STALE_SEC, campaignIdOf, checkRunLiveness } from "./campaign-autonomy.mjs";
 import { bootstrapFailureMatchesChild, bootstrapMatchesChild, leaseAdoption, sameProcessStartToken, validBootstrapNonce } from "./lease-liveness.mjs";
 import {
@@ -502,9 +517,13 @@ export async function runContract(contractPath) {
 
 /**
  * @param {string} runDirPath
+ * @param {{node?: string, reconcile?: string, maxInputTokens?: number}} [options] `node`
+ *   limits the retry in place to one node and its dependants, `reconcile`
+ *   acknowledges a node stopped as `unknown_effect_reconciled`, and
+ *   `maxInputTokens` raises the run's exhausted budget ceiling
  * @returns {Promise<RunOutcome>}
  */
-export async function resumeRun(runDirPath) {
+export async function resumeRun(runDirPath, options = {}) {
   const runDir = resolve(runDirPath);
   assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
@@ -518,23 +537,70 @@ export async function resumeRun(runDirPath) {
   try {
     const storedMetadata = validateRunMetadata(readJson(join(runDir, "run.json")), { requireSourceIdentity: true });
     const states = new Map(readRunNodes(runDir, contract).map((state) => [state.id, state]));
+    for (const state of states.values()) {
+      state.usage = invocationUsage(state);
+      state.costUsd = invocationCost(state);
+    }
     const scopeBoundaries = new Map(contract.nodes.map((node) => [
       node.id,
       persistedScopeBoundary(contract, node, states.get(node.id)),
     ]));
     const sourceIdentity = await captureRunIdentity(contract, scopeBoundaries);
-    assertSourceUnchanged(storedMetadata.sourceIdentity, sourceIdentity);
+    const identity = assertSourceUnchanged(storedMetadata.sourceIdentity, sourceIdentity);
+    // A resume is an explicit instruction to continue the run: it consumes a
+    // stale cancel request instead of letting it re-cancel the retried nodes.
+    if (existsSync(join(runDir, "cancel.request.json"))) {
+      unlinkSync(join(runDir, "cancel.request.json"));
+      process.stdout.write(`[resume] ${contract.id} · consumed cancel request\n`);
+    }
     const runsDir = join(runDir, "..");
     const campaign = resolveCampaign(runsDir, contract.campaignId);
     registerRun(campaign.path, contract.id);
     ensureCampaignUsageLedger(campaign.path, contract.usagePolicy);
     await synchronizeCampaignUsage(campaign.path, contract.usagePolicy, states);
+    // An exhausted run budget is a stop boundary: attention, and no further
+    // dispatch, until the operator raises the ceiling explicitly. The extension
+    // is recorded on the run; the contract file itself stays frozen.
+    const budgetExtension = extendRunBudget(contract, states, options.maxInputTokens);
+    if (budgetExtension === null) {
+      const spend = runWeightedInputTokens(contract, states);
+      writeFindingsArtifact(runDir, contract, states);
+      process.stdout.write(`[run] ${contract.id} attention · run input-token budget exhausted (${spend} of ${contract.maxInputTokens}) · resume with --max-input-tokens <n> to extend it\n`);
+      lease.release();
+      return { runDir, states, ok: false };
+    }
+    const plan = planResumeRetry(contract, states, { node: options.node, reconcile: options.reconcile });
+    for (const item of plan.attention) {
+      process.stdout.write(`[run] ${contract.id} attention · ${item.id} · ${item.reason}\n`);
+    }
+    const resumeMetadata = {
+      ...(budgetExtension ? { budgetExtension } : {}),
+      ...(identity.warnings.length ? { identityWarnings: identity.warnings } : {}),
+    };
     for (const node of contract.nodes) {
       const state = states.get(node.id);
       if (!state) continue;
-      state.usage = invocationUsage(state);
-      state.costUsd = invocationCost(state);
-      if (state.status === "done" || state.status === "canceled" || isBlockedContextTerminal(state) || isUnknownEffectTerminal(state)) continue;
+      if (state.status === "done" || isBlockedContextTerminal(state)) continue;
+      const action = plan.actions.get(node.id) ?? "recover";
+      // Adoption before retry: an unresolved blocking review is re-judged from
+      // the preserved worker result, never reset to a fresh worker attempt.
+      if (action === "rejudge") {
+        transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
+        continue;
+      }
+      if (action === "hold") continue;
+      if (action === "retry") {
+        if (isUnknownEffectStop(state)) {
+          recordExecutionOverride(runDir, state, {
+            kind: "recovery",
+            decision: "reconcile_acknowledged",
+            reason: `unknown_effect_reconciled acknowledged by --reconcile; node ${node.id} is re-dispatched`,
+          }, lease);
+        }
+        state.previousAttempt = renderPreviousAttemptSection(state) ?? state.previousAttempt;
+        transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
+        continue;
+      }
       const lastInvocation = state.invocations?.at(-1);
       await recoverVerificationAttempts(runDir, state, lease);
       const pendingStart = state.status === "pending" && (state.phase === "worker" || state.phase === "judge") && lastInvocation?.status === "active";
@@ -907,7 +973,7 @@ export async function resumeRun(runDirPath) {
       }
       transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] }, lease);
     }
-    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity, resumeMetadata);
     syncAgentSignal(runsDir);
     return outcome;
   } catch (error) {
@@ -943,16 +1009,17 @@ function isUnknownEffectTerminal(state) {
  * @param {CampaignRef} campaign
  * @param {LeaseHandle} lease
  * @param {SourceIdentity} sourceIdentity
+ * @param {{budgetExtension?: import("./contract.mjs").RunMetadata["budgetExtension"], identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
  * @returns {Promise<RunOutcome>}
  */
-export async function driveRun(contract, runDir, states, campaign, lease, sourceIdentity) {
+export async function driveRun(contract, runDir, states, campaign, lease, sourceIdentity, resume = {}) {
   lease.assert();
   assertEnvironmentReady(contract, runDir, sourceIdentity);
   const runsDir = join(contract.cwd, ".runs");
   const currentLease = lease.current;
   const bootstrapNonce = bootstrapNonceForProcess();
   const detachedBootstrap = hasDetachedBootstrapNonce();
-  const runMetadata = createRunMetadata(lease, sourceIdentity);
+  const runMetadata = createRunMetadata(lease, sourceIdentity, resume);
   writeJsonAtomic(join(runDir, "run.json"), runMetadata);
   /** @type {Error|null} */
   let leaseLost = null;
@@ -1161,6 +1228,13 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
           error,
           nextState: operationNextState(job.state),
         });
+        // A judge killed on its own wall clock produced no verdict. That is a
+        // judge protocol defect, not a node outcome: it earns the one bounded
+        // re-ask, and only then the review mode settles the node.
+        if (job.phase === "judge" && error.code === "wall_clock_timeout") {
+          await applyJudgeProtocolFailure(contract, job.node, job.state, runDir, running, lease, states, campaign.path, error.message);
+          return;
+        }
         transition(runDir, job.state, status, { phase: job.phase, error }, lease);
       }, async (job) => {
         writeNode(runDir, job.state, lease);
@@ -1253,9 +1327,10 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
 /**
  * @param {LeaseHandle} lease
  * @param {SourceIdentity} sourceIdentity
+ * @param {{budgetExtension?: import("./contract.mjs").RunMetadata["budgetExtension"], identityWarnings?: string[]}} [resume]
  * @returns {RunMetadata}
  */
-function createRunMetadata(lease, sourceIdentity) {
+function createRunMetadata(lease, sourceIdentity, resume = {}) {
   const current = lease.current;
   const metadata = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -1269,6 +1344,8 @@ function createRunMetadata(lease, sourceIdentity) {
     leaseRenewedAt: current.renewedAt,
     leaseExpiresAt: current.expiresAt,
     sourceIdentity,
+    ...(resume.budgetExtension ? { budgetExtension: resume.budgetExtension } : {}),
+    ...(resume.identityWarnings?.length ? { identityWarnings: resume.identityWarnings } : {}),
   };
   return validateRunMetadata(metadata, { requireLease: true });
 }
@@ -1817,6 +1894,11 @@ function invocationBudgetLimit(contract, state) {
 function startWorker(contract, node, state, runDir, running, prompt, lease, states, campaignPath) {
   const runtime = routeRuntimeForState(contract, node, state, "worker");
   const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "worker", prompt);
+  // Whichever prompt-building strategy phaseInvocationPlan chose — reuse,
+  // rotate, or a capsule handoff — the previous-attempt section still has to
+  // survive on a retried attempt, so it is appended to the resolved prompt
+  // rather than the candidate handed to phaseInvocationPlan.
+  phasePlan.prompt = appendPreviousAttempt(phasePlan.prompt, state.previousAttempt);
   // The worker prompt directs the provider to write the canonical result file;
   // make sure the directory exists before the provider is asked to.
   mkdirSync(dirname(workerResultPath(runDir, node.id)), { recursive: true });
@@ -2117,10 +2199,18 @@ function finishRotationHandoff(contract, node, state, runDir, job, lease, envelo
   process.stdout.write(`[node] ${node.id} rotation handoff materialized · ${Buffer.byteLength(handoff, "utf8")} bytes · fresh session next\n`);
 }
 
-/** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when none exist. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+/** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when the review mode is `none` or no judgment item exists. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
 async function startJudge(contract, node, state, runDir, running, workerResult, lease, states, campaignPath) {
-  const reask = judgeReaskOutstanding(state);
-  const { verdict, results } = await deterministicGate(node, contract.cwd, reask, Math.max(1_000, Math.min((node.timeoutSec ?? contract.timeoutSec ?? 60) * 1000, 120_000)));
+  const reaskReason = judgeReaskReason(state);
+  const reask = reaskReason !== undefined;
+  const { verdict, results } = await deterministicGate(
+    node,
+    contract.cwd,
+    reask,
+    Math.max(1_000, Math.min((node.timeoutSec ?? contract.timeoutSec ?? 60) * 1000, 120_000)),
+    /** @type {import("./contract.mjs").VerificationState|null} */ (state.verification),
+  );
+  state.review = reviewMode(node.gate);
   if (verdict.verdict === "fail") {
     applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
       code: "mechanical_gate_failed",
@@ -2145,8 +2235,14 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
       diff: state.scope?.changedPaths,
       verification: state.verification,
       deterministic: results,
-    })}${reask ? uncitedReaskSuffix() : ""}`;
+      scopeFindings: state.scopeFindings,
+      previousAttempt: state.previousAttempt,
+    })}${reask ? judgeReaskInstruction(reaskReason) : ""}`;
     const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "judge", prompt);
+    // judgePrompt already carries the section when phaseInvocationPlan reuses
+    // that candidate; appendPreviousAttempt is a no-op then and only adds it
+    // when a rotate/handoff prompt replaced the candidate outright.
+    phasePlan.prompt = appendPreviousAttempt(phasePlan.prompt, state.previousAttempt);
     if (Buffer.byteLength(phasePlan.prompt, "utf8") > 64 * 1024) {
       const error = /** @type {Error & {code: string}} */ (new Error("judge prompt exceeds 65536 bytes"));
       error.code = "judge_prompt_too_large";
@@ -2895,9 +2991,10 @@ async function recoverVerificationAttempts(runDir, state, lease) {
  * @param {string} runDir
  * @param {Job} job
  * @param {LeaseHandle} lease
+ * @param {{deferViolation?: boolean}} [options]
  * @returns {boolean}
  */
-function checkWorkerScope(contract, runDir, job, lease) {
+function checkWorkerScope(contract, runDir, job, lease, options = {}) {
   if (job.scopeChecked) return !job.scopeViolation;
   job.scopeChecked = true;
   const state = job.state;
@@ -2910,6 +3007,10 @@ function checkWorkerScope(contract, runDir, job, lease) {
     state.scope = bounded;
     if (!scope.unexpectedPaths.length) return true;
     job.scopeViolation = true;
+    // A completed attempt whose controller verification passes never fails
+    // on scope alone (TECH-SPEC lean, rule 1): the caller defers the verdict
+    // until verification has run and records an advisory finding instead.
+    if (options.deferViolation) return true;
     const shown = bounded.unexpectedPaths.slice(0, 8).join(", ");
     const message = `unexpected paths changed (${scope.unexpectedPaths.length}): ${shown}`;
     if (!TERMINAL.has(state.status)) {
@@ -3118,6 +3219,26 @@ function checkPersistedWorkerScope(contract, runDir, state, node, invocation, le
 }
 
 /**
+ * Record a deferred scope violation as an advisory finding on a node whose
+ * controller verification passed: the node proceeds into the gate exactly as
+ * a clean node would (TECH-SPEC lean, rule 1).
+ *
+ * @param {string} runDir
+ * @param {NodeSnapshot} state
+ * @param {LeaseHandle} lease
+ */
+function recordScopeFinding(runDir, state, lease) {
+  if (!state.scope?.unexpectedPaths?.length) return;
+  state.scopeFindings = scopeFindingFromScope(state.scope);
+  writeNode(runDir, state, lease);
+  appendTransitionEvent(runDir, state, state.status, state.status, {
+    type: "scope.finding",
+    unexpectedPaths: state.scopeFindings.unexpectedPaths,
+    unexpectedPathCount: state.scope.unexpectedPathCount,
+  }, lease);
+}
+
+/**
  * Resolve an unknown_effect window (intent without settlement) per the node's
  * replayPolicy. Adoption proof was already applied by recoverOrphan when it
  * applied; what remains is the scoped safe-replay or a durable reconcile.
@@ -3197,12 +3318,36 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       ...envelope,
       usage: usageWithBudgetFallback(envelope.usage, envelope.error?.message, contract.usagePolicy) ?? envelope.usage,
     };
+    // Whether this is a completed attempt is decided before the scope gate:
+    // only a completed attempt may defer its scope verdict to after controller
+    // verification (TECH-SPEC lean, rule 1). Completed is exactly what the
+    // canonical result file says: a done envelope without that file, with a
+    // non-done result in it, or with an unparseable file is not accepted work,
+    // so it keeps the terminal unexpected_write it always had instead of
+    // deferring a verdict nothing will settle. The envelope's own result is
+    // materialized into the canonical file only after this gate.
+    /** @type {import("./worker-result.mjs").WorkerResult|null} */
+    let adoptedWorkerResult = null;
+    /** @type {Error|undefined} */
+    let workerResultError;
+    if (job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization) {
+      try {
+        adoptedWorkerResult = readWorkerResultFile(runDir, job.node.id);
+      } catch (error) {
+        // A present-but-invalid canonical file is not completed work: the
+        // invalid-result branch below decides, exactly as it did before the
+        // advisory scope verdict existed.
+        workerResultError = /** @type {Error} */ (error);
+      }
+    }
+    const completedAttempt = job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization
+      && adoptedWorkerResult?.status === "done";
     if (job.phase === "worker") {
       const scopeOk = job.resultMaterialization
         ? checkResultMaterializationScope(contract, runDir, job, lease)
         : job.rotationHandoff
           ? checkResultMaterializationScope(contract, runDir, job, lease, "rotation handoff")
-          : checkWorkerScope(contract, runDir, job, lease);
+          : checkWorkerScope(contract, runDir, job, lease, { deferViolation: completedAttempt });
       if (!scopeOk) {
         settleInvocation(runDir, job.invocation, {
           status: "failed",
@@ -3250,27 +3395,18 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     state.costUsd = invocationCost(state);
     // A closed worker whose canonical result file is valid and whose scope
     // passed is completed work, no matter what the provider envelope or the
-    // exit code said. The durable file is adopted before the rotation-handoff,
-    // budget-continuation, exhaustion and failure branches and enters the
-    // normal verification/gate flow with that result; a present-but-invalid
-    // file still fails exactly as the done path fails it today.
-    /** @type {import("./worker-result.mjs").WorkerResult|null} */
-    let adoptedWorkerResult = null;
-    if (job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization) {
-      try {
-        adoptedWorkerResult = readWorkerResultFile(runDir, job.node.id);
-      } catch (error) {
-        // A present-but-invalid canonical file fails exactly as the done path
-        // fails it today, but only when the worker actually finished: a
-        // rotated, killed, budget-stopped, or exhausted invocation never
-        // treats a torn file as delivered work, so the rotation-handoff,
-        // budget-continuation, exhaustion, and failure branches below decide.
-        if (!job.rotationReason && envelope.status === "done") {
-          await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
-          continue;
-        }
-        adoptedWorkerResult = null;
+    // exit code said. The durable file was read above, before the scope gate,
+    // so the gate knows whether this attempt may defer its verdict; the file
+    // is adopted before the rotation-handoff, budget-continuation, exhaustion
+    // and failure branches and enters the normal verification/gate flow with
+    // that result. A present-but-invalid file still fails exactly as the done
+    // path fails it today.
+    if (workerResultError) {
+      if (!job.rotationReason && envelope.status === "done") {
+        await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(workerResultError), states, campaignPath);
+        continue;
       }
+      adoptedWorkerResult = null;
     }
     if (adoptedWorkerResult) {
       settleInvocation(runDir, job.invocation, {
@@ -3328,31 +3464,52 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease, states, campaignPath);
       continue;
     }
-    // A failed judge envelope (status failed, any code) is a provider failure,
-    // never a verdict: the gate cannot adopt a result the judge could not
-    // ground in inspection. Re-dispatch the judge once on the same routing,
-    // then block the node as judge_unavailable and raise attention so a judge
-    // failure is surfaced, never silently settled.
-    if (!job.budgetStop && job.phase === "judge" && envelope.status === "failed") {
+    // A judge provider that failed outright (its turn died, its tool host was
+    // gone) is a provider failure, never a verdict: the gate cannot adopt a
+    // result the judge could not ground in inspection. Re-dispatch the judge
+    // once on the same routing, then settle by review mode so a judge failure
+    // is surfaced, never silently settled. A stream that never reached its
+    // terminal envelope is a protocol defect instead and takes the bounded
+    // re-ask below.
+    if (!job.budgetStop && job.phase === "judge" && envelope.status === "failed" && envelope.error?.code !== "incomplete_stream") {
       // A judge that lost its socket is not an unavailable judge. It buys the
       // same bounded network waits a worker does, on the runtime it already
       // warmed, and spends none of the one re-dispatch counted below.
       const network = networkTransition(contract, job.node, state, "judge", envelope, job.exitCode);
       if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
+      // The provider died on the bounded re-ask itself, so the one permitted
+      // re-ask is spent: settle by review mode here rather than dispatch a
+      // third judge invocation behind a fresh failure count.
+      // The provider died on the bounded re-ask itself, so the one permitted
+      // re-ask is spent: settle by review mode here rather than dispatch a
+      // third judge invocation behind a fresh failure count.
+      if (judgeReaskOutstanding(state)) {
+        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lease, states, campaignPath, envelope.error?.message ?? "judge provider failed");
+        continue;
+      }
       state.judgeFailures = (state.judgeFailures ?? 0) + 1;
       if (state.judgeFailures < JUDGE_MAX_FAILURES) {
         writeNode(runDir, state, lease);
         await startJudge(contract, job.node, state, runDir, running, state.result, lease, states, campaignPath);
         continue;
       }
-      const providerMessage = envelope.error?.message ?? "judge provider failed";
-      transition(runDir, state, "blocked", {
-        phase: "judge",
-        result: state.result,
-        usage: state.usage,
-        error: { code: "judge_unavailable", message: excerpt(providerMessage) ?? "judge unavailable" },
-      }, lease);
-      await raiseNodeAttention(campaignPath, runDir, state, "judge_unavailable");
+      await settleUnavailableJudge(contract, job.node, state, runDir, lease, campaignPath, envelope.error?.message ?? "judge provider failed");
+      continue;
+    }    // Whatever else this invocation produced, it is not exactly one usable
+    // verdict: no verdict at all, several of them in separate agent messages,
+    // an unparseable one, a stream cut off before its terminal envelope, or a
+    // phase killed on its wall clock. One bounded re-ask, then the review mode
+    // decides — advisory completes, blocking enters attention with the work
+    // preserved so a retry in place can re-judge it.
+    if (job.phase === "judge" && job.budgetStop !== "node" && job.budgetStop !== "campaign") {
+      const evidence = judgeVerdictEvidence(envelope);
+      if (!evidence.ok) {
+        const network = networkTransition(contract, job.node, state, "judge", envelope, job.exitCode);
+        if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
+        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lease, states, campaignPath, evidence.reason);
+        continue;
+      }
+      await applyJudgeResult(contract, job.node, state, evidence.result, runDir, lease, running, states, campaignPath);
       continue;
     }
     // An empty final message is a missing worker result, not a no-op worker:
@@ -3444,6 +3601,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         applyVerificationFailure(contract, job.node, state, runDir, running, lease, states, campaignPath);
         continue;
       }
+      if (job.scopeViolation) recordScopeFinding(runDir, state, lease);
       persistNodeCapsule(
         contract,
         job.node,
@@ -3478,7 +3636,6 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       else transition(runDir, state, "done", { phase: "complete", result: workerResult }, lease);
       continue;
     }
-    await applyJudgeResult(contract, job.node, state, envelope.result, runDir, lease, running, states, campaignPath);
   }
 }
 
@@ -3633,22 +3790,119 @@ function budgetStopError(scope, state) {
 /** A failed judge envelope gets one bounded re-dispatch, then judge_unavailable. */
 const JUDGE_MAX_FAILURES = 2;
 
-/** Apply a judge verdict: pass settles done; a rejection citing no judgment item id is a judge protocol failure — one durable bounded re-ask, then blocked judge_protocol attention — and never consumes a revision, at any severity. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {unknown} result @param {string} runDir @param {LeaseHandle} lease @param {Map<string, Job>|null} running @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+/** Attention code raised when an advisory review completes without a verdict. */
+const INVALID_JUDGE_OUTPUT_CODE = "invalid_judge_output";
+
+/**
+ * Settle a judge round that produced no usable verdict. The first defect earns
+ * the one bounded re-ask on the node's own bound; once it is spent the review
+ * mode decides, and blocking review never degrades into a pass.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {Map<string, Job>|null} running
+ * @param {LeaseHandle} lease
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
+ * @param {string} reason
+ */
+async function applyJudgeProtocolFailure(contract, node, state, runDir, running, lease, states, campaignPath, reason) {
+  if (judgeReaskOutstanding(state)) {
+    if (reviewMode(node.gate) === "advisory") {
+      // The deterministic verification passed, so the review cannot fail the
+      // node; completing with the defect recorded keeps it visible instead of
+      // silently discarding the review.
+      settleAdvisoryReview(runDir, state, lease, invalidJudgeVerdict(reason));
+      await raiseNodeAttention(campaignPath, runDir, state, INVALID_JUDGE_OUTPUT_CODE);
+      return;
+    }
+    // Nothing about the attempt is rewritten: the accepted worker result, the
+    // verification records and the gate state stay exactly as a node awaiting
+    // its judge leaves them, so a retry in place re-judges instead of re-running.
+    transition(runDir, state, "blocked", {
+      phase: "judge",
+      result: state.result,
+      usage: state.usage,
+      error: { code: JUDGE_UNAVAILABLE_CODE, message: excerpt(reason) ?? "judge unavailable" },
+    }, lease);
+    await raiseNodeAttention(campaignPath, runDir, state, JUDGE_UNAVAILABLE_CODE);
+    return;
+  }
+  // The bound rides on the node: the next write — the recovered pending
+  // judge below or the re-ask dispatch's own invocation — persists it with
+  // the transition it belongs to, leaving no gap either way.
+  markJudgeReask(state, reason);
+  if (!running) {
+    // A verdict recovered after controller loss keeps its durable bound:
+    // the drive loop dispatches the one remaining bounded re-ask.
+    transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lease);
+    return;
+  }
+  await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaignPath);
+}
+
+/**
+ * Settle an advisory gate: the verdict is recorded with its findings and the
+ * node completes, because the deterministic verification already passed. A
+ * verdict that is not a clean pass appends the `gate.advisory` event the run
+ * journal keeps for review outcomes.
+ *
+ * @param {string} runDir
+ * @param {NodeSnapshot} state
+ * @param {LeaseHandle} lease
+ * @param {JudgeVerdict} verdict
+ */
+function settleAdvisoryReview(runDir, state, lease, verdict) {
+  clearJudgeReask(state);
+  state.gate = verdict;
+  if (verdict.verdict !== "pass") {
+    appendTransitionEvent(runDir, state, state.status, "done", {
+      type: "gate.advisory",
+      verdict: verdict.verdict,
+      summary: verdict.summary,
+    }, lease);
+  }
+  transition(runDir, state, "done", { phase: "complete", gate: verdict }, lease);
+}
+
+/** Settle a judge whose provider failed its bounded re-dispatches: blocking review blocks with the work preserved; advisory review completes with the defect recorded. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {LeaseHandle} lease @param {string} campaignPath @param {string} providerMessage */
+async function settleUnavailableJudge(contract, node, state, runDir, lease, campaignPath, providerMessage) {
+  if (reviewMode(node.gate) === "advisory") {
+    settleAdvisoryReview(runDir, state, lease, invalidJudgeVerdict(providerMessage));
+    await raiseNodeAttention(campaignPath, runDir, state, INVALID_JUDGE_OUTPUT_CODE);
+    return;
+  }
+  transition(runDir, state, "blocked", {
+    phase: "judge",
+    result: state.result,
+    usage: state.usage,
+    error: { code: JUDGE_UNAVAILABLE_CODE, message: excerpt(providerMessage) ?? "judge unavailable" },
+  }, lease);
+  await raiseNodeAttention(campaignPath, runDir, state, JUDGE_UNAVAILABLE_CODE);
+}
+
+/** Apply a judge verdict: pass settles done; a rejection citing no judgment item id is a judge protocol failure — one durable bounded re-ask, then blocked judge_protocol attention — and never consumes a revision, at any severity. Under advisory review a fail verdict is recorded and the node still completes. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {unknown} result @param {string} runDir @param {LeaseHandle} lease @param {Map<string, Job>|null} running @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
 async function applyJudgeResult(contract, node, state, result, runDir, lease, running, states, campaignPath) {
   /** @type {JudgeVerdict} */
   let verdict;
   try {
     verdict = parseJudge(String(result ?? ""));
   } catch (error) {
-    transition(runDir, state, "failed", { phase: "judge", error: { code: "invalid_judge_output", message: errorMessage(error) } }, lease);
+    await applyJudgeProtocolFailure(contract, node, state, runDir, running, lease, states, campaignPath, errorMessage(error));
     return;
   }
   state.gate = verdict;
   state.judgeFailures = 0;
-  const shouldFail = verdict.verdict === "fail" && verdict.maxSeverity !== "none"
-    && (node.gate.failOn ?? ["critical"]).includes(verdict.maxSeverity);
+  const advisory = reviewMode(node.gate) === "advisory";
   const protocolFailure = verdict.verdict === "fail" && uncitedRejection(verdict, node);
   if (protocolFailure && judgeReaskOutstanding(state)) {
+    if (advisory) {
+      settleAdvisoryReview(runDir, state, lease, verdict);
+      await raiseNodeAttention(campaignPath, runDir, state, "judge_protocol");
+      return;
+    }
     transition(runDir, state, "blocked", {
       phase: "judge",
       gate: verdict,
@@ -3659,10 +3913,7 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
     return;
   }
   if (protocolFailure) {
-    // The bound rides on the node: the next write — the recovered pending
-    // judge below or the re-ask dispatch's own invocation — persists it with
-    // the transition it belongs to, leaving no gap either way.
-    markJudgeReask(state);
+    markJudgeReask(state, UNCITED_REJECTION_REASON);
     if (!running) {
       // A verdict recovered after controller loss keeps its durable bound:
       // the drive loop dispatches the one remaining bounded re-ask.
@@ -3673,6 +3924,12 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
     return;
   }
   clearJudgeReask(state);
+  if (advisory) {
+    settleAdvisoryReview(runDir, state, lease, verdict);
+    return;
+  }
+  const shouldFail = verdict.verdict === "fail" && verdict.maxSeverity !== "none"
+    && (node.gate.failOn ?? ["critical"]).includes(verdict.maxSeverity);
   if (!shouldFail) {
     transition(runDir, state, "done", { phase: "complete", gate: verdict }, lease);
     return;
@@ -3706,8 +3963,8 @@ function applyRejection(contract, node, state, runDir, running, lease, states, c
   }, lease);
 }
 
-/** Deterministic verification failure settles through the shared rejection path. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
-function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath, verdict = verificationFailureVerdict(state)) {
+/** Deterministic verification failure settles through the shared rejection path. The verdict carries this attempt's unexpected paths, so a red attempt reports them whether it stops here or starts its revision (TECH-SPEC lean, rule 1). @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
+function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath, verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope)) {
   applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
 }
 
@@ -4820,11 +5077,15 @@ const STATUS_MARK = {
  */
 function renderFinalStatus(runDir, contract, states) {
   const nodes = /** @type {NodeSnapshot[]} */ (contract.nodes.map((node) => states.get(node.id)).filter((node) => node !== undefined));
+  const runMetadata = /** @type {{identityWarnings?: string[]}} */ (readJson(join(runDir, "run.json")) ?? {});
+  const identityWarnings = runMetadata.identityWarnings ?? [];
   const campaign = campaignUsage(campaignUsagePath(contract), contract.usagePolicy);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  const widths = [3, 24, 9, 28, 7, 24];
+  // The note carries every advisory marker a node earned (scope finding,
+  // review verdict, gate summary), so the cell holds the composed note whole.
+  const widths = [3, 24, 9, 28, 7, 64];
   /** @param {unknown[]} cells */
   const row = (cells) => cells.map((cell, index) => fitStatus(String(cell ?? ""), widths[index])).join(" ");
   const lines = [
@@ -4841,13 +5102,18 @@ function renderFinalStatus(runDir, contract, states) {
   for (const node of nodes) {
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
-    const detail = node.gate?.summary ?? node.error?.message ?? node.blockedBy?.join(", ") ?? node.phase ?? "-";
-    const note = `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
+    const detail = statusNote(node) ?? "-";
+    // A scope finding leads the note and drops the phase boilerplate: the
+    // operator has to see it, and the fixed cell cannot hold both.
+    const note = scopeFindingsNote(node.scopeFindings)
+      ? detail
+      : `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
     lines.push(row([STATUS_MARK[node.status] ?? "[?]", node.id, node.status, runtime, node.attempt ?? 0, note]));
   }
   lines.push("```", "", "## Needs you", "");
   const attention = nodes.filter((node) => !["pending", "running", "done"].includes(node.status));
-  if (!attention.length) lines.push("Nothing needs you right now.");
+  if (!attention.length && !identityWarnings.length) lines.push("Nothing needs you right now.");
+  for (const warning of identityWarnings) lines.push(`- [~] ${warning}`);
   for (const node of attention) lines.push(`- ${STATUS_MARK[node.status] ?? "[?]"} ${node.id}: ${node.gate?.summary ?? node.error?.message ?? node.status}`);
   return `${lines.join("\n")}\n`;
 }
@@ -4871,7 +5137,7 @@ function renderFinalReport(runDir, contract, states) {
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 12, 36];
+  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 12, 64];
   /** @param {unknown[]} cells */
   const row = (cells) => cells.map((cell, index) => fitStatus(String(cell ?? ""), widths[index])).join(" ");
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
@@ -4894,7 +5160,10 @@ function renderFinalReport(runDir, contract, states) {
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
     const detail = node.gate?.summary ?? node.error?.message ?? (node.blockedBy?.length ? node.blockedBy.join(", ") : null) ?? (typeof node.result === "string" && node.result.trim() ? node.result.trim() : node.phase ?? "-");
-    const note = `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
+    // The advisory scope finding leads the note, as it does in STATUS.md.
+    const note = scopeFindingsNote(node.scopeFindings)
+      ? `${scopeFindingsNote(node.scopeFindings)} · ${detail}`
+      : `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
     lines.push(row([
       STATUS_MARK[node.status] ?? "[?]",
       node.id,
@@ -5606,11 +5875,21 @@ async function captureRunIdentity(contract, scopeBoundaries) {
 }
 
 /**
+ * Compare the recorded source identity with the current one. A HEAD that
+ * descends from the recorded one is accepted and recorded — workers and the
+ * orchestrator commit between attempts, so a retry in place expects the branch
+ * to have moved on — while a non-descendant HEAD is still drift. A dirty-tree
+ * fingerprint mismatch is only a warning: the fingerprint covers the whole
+ * tree, so any committed work between attempts changes it.
+ *
  * @param {SourceIdentity|undefined} expected
  * @param {SourceIdentity|undefined} actual
+ * @returns {{warnings: string[]}} warnings to surface in status
  */
 function assertSourceUnchanged(expected, actual) {
   const fields = ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "driverVersions"];
+  /** @type {string[]} */
+  const warnings = [];
   for (const field of fields) {
     const expectedRecord = /** @type {Record<string, unknown>|undefined} */ (expected);
     const actualRecord = /** @type {Record<string, unknown>|undefined} */ (actual);
@@ -5630,10 +5909,71 @@ function assertSourceUnchanged(expected, actual) {
       }
       continue;
     }
+    if (field === "gitHead" && stableJson(expectedRecord?.gitHead ?? null) !== stableJson(actualRecord?.gitHead ?? null)) {
+      const expectedHead = typeof expectedRecord?.gitHead === "string" ? expectedRecord.gitHead : null;
+      const actualHead = typeof actualRecord?.gitHead === "string" ? actualRecord.gitHead : null;
+      if (expectedHead && actualHead && isDescendantHead(expected?.cwd, expectedHead, actualHead)) continue;
+      throw new Error(`source drift detected in gitHead; resume refused`);
+    }
+    if (field === "dirtyTreeFingerprint" && stableJson(expectedRecord?.[field] ?? null) !== stableJson(actualRecord?.[field] ?? null)) {
+      warnings.push("source tree fingerprint changed since the run started; work committed between attempts is expected and the run continues on the current tree");
+      continue;
+    }
     if (stableJson(expectedRecord?.[field] ?? null) !== stableJson(actualRecord?.[field] ?? null)) {
       throw new Error(`source drift detected in ${field}; resume refused`);
     }
   }
+  return { warnings };
+}
+
+/**
+ * Whether `head` is a descendant of `recorded` (or the same commit).
+ *
+ * @param {string|undefined} cwd
+ * @param {string} recorded
+ * @param {string} head
+ * @returns {boolean}
+ */
+function isDescendantHead(cwd, recorded, head) {
+  if (!cwd) return false;
+  const result = spawnSync("git", ["-C", cwd, "merge-base", "--is-ancestor", recorded, head], { encoding: "utf8" });
+  return result.status === 0;
+}
+
+/**
+ * The run's cumulative weighted input spend, metered the way the live budget
+ * enforcement meters it.
+ *
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @returns {number}
+ */
+function runWeightedInputTokens(contract, states) {
+  const weight = cacheReadWeightOf(contract);
+  return roundBudgetTokens([...states.values()].reduce(
+    (total, state) => total + weightedInput(state.usage, weight),
+    0,
+  ));
+}
+
+/**
+ * Apply an explicit budget extension to the in-memory contract, or report that
+ * the run budget is exhausted. Returns the recorded extension, or null when
+ * resume must stop with attention.
+ *
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {number|undefined} requested
+ * @returns {import("./contract.mjs").RunMetadata["budgetExtension"]|null}
+ */
+function extendRunBudget(contract, states, requested) {
+  const spent = runWeightedInputTokens(contract, states);
+  if (spent < contract.maxInputTokens) return undefined;
+  if (requested === undefined || requested <= contract.maxInputTokens) return null;
+  const extension = { previous: contract.maxInputTokens, maxInputTokens: requested, at: new Date().toISOString() };
+  contract.maxInputTokens = requested;
+  process.stdout.write(`[run] ${contract.id} budget extended · ${extension.previous} → ${extension.maxInputTokens} weighted input tokens\n`);
+  return extension;
 }
 
 /**
@@ -6654,7 +6994,7 @@ export { buildCapsule, detectStalls, runProcessAlive, startProcess };
 /** @type {Record<string, import("node:util").ParseArgsOptionsConfig>} */
 const COMMAND_OPTIONS = {
   run: { detach: { type: "boolean" } },
-  resume: { detach: { type: "boolean" } },
+  resume: { detach: { type: "boolean" }, node: { type: "string" }, reconcile: { type: "string" }, "max-input-tokens": { type: "string" } },
   supervise: { detach: { type: "boolean" }, interval: { type: "string" } },
   cancel: {},
   preflight: { static: { type: "boolean" }, json: { type: "boolean" } },
@@ -6692,6 +7032,26 @@ function parseCli(argv, quiet = false) {
     target: parsed.positionals[0],
     values: /** @type {Record<string, unknown>} */ (parsed.values),
   };
+}
+
+/**
+ * The retry-in-place options of a `resume` invocation, validated before any
+ * lease is taken.
+ *
+ * @param {Record<string, unknown>} values
+ * @returns {{node?: string, reconcile?: string, maxInputTokens?: number}}
+ */
+function resumeOptionsOf(values) {
+  const node = typeof values.node === "string" && values.node ? values.node : undefined;
+  const reconcile = typeof values.reconcile === "string" && values.reconcile ? values.reconcile : undefined;
+  let maxInputTokens;
+  if (typeof values["max-input-tokens"] === "string" && values["max-input-tokens"]) {
+    maxInputTokens = Number(values["max-input-tokens"]);
+    if (!Number.isInteger(maxInputTokens) || maxInputTokens <= 0) {
+      throw new Error("--max-input-tokens must be a positive integer number of weighted input tokens");
+    }
+  }
+  return { node, reconcile, maxInputTokens };
 }
 
 /**
@@ -6734,17 +7094,23 @@ async function main(argv) {
     return;
   }
   if (command === "resume") {
+    const resumeOptions = resumeOptionsOf(values);
     if (values.detach === true) {
       const runDir = resolve(target);
       if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
-      const child = detachSelf("resume", target);
+      const extraArgs = [
+        ...(resumeOptions.node ? ["--node", resumeOptions.node] : []),
+        ...(resumeOptions.reconcile ? ["--reconcile", resumeOptions.reconcile] : []),
+        ...(resumeOptions.maxInputTokens !== undefined ? ["--max-input-tokens", String(resumeOptions.maxInputTokens)] : []),
+      ];
+      const child = detachSelf("resume", target, extraArgs);
       const pid = child.pid;
       if (pid === undefined) throw new Error("detached child has no pid");
       await waitForBootstrap(runDir, pid, child);
       process.stdout.write(`[resume] detached · pid ${pid} · ${runDir}\n`);
       return;
     }
-    const result = await resumeRun(target);
+    const result = await resumeRun(target, resumeOptions);
     if (!result.ok) process.exitCode = 1;
     return;
   }

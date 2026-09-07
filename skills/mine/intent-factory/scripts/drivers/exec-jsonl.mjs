@@ -329,8 +329,13 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled", continuationId);
   const completed = events.findLast((event) => event.type === "turn.completed");
   const messages = events.filter((event) => event.type === "item.completed" && eventItem(event)?.type === "agent_message");
+  // A judge round is arbitrated by exactly one verdict. Counting the
+  // verdict-shaped messages here, at the provider boundary, is the only way the
+  // controller can tell one verdict from two: the last structured message looks
+  // identical in both cases once the rest is discarded.
+  const verdictCandidates = options.preferStructured ? messages.filter((event) => isVerdictCandidate(eventItem(event)?.text)) : [];
   const message = options.preferStructured
-    ? messages.findLast((event) => extractJson(eventItem(event)?.text) !== null) ?? messages.at(-1)
+    ? verdictCandidates.at(-1) ?? messages.findLast((event) => extractJson(eventItem(event)?.text) !== null) ?? messages.at(-1)
     : messages.at(-1);
   const failure = events.findLast((event) => event.type === "turn.failed" || event.type === "error");
   if (failure) {
@@ -374,7 +379,28 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
     usage: canonicalUsage(completed.usage, { inputIncludesCache: true }),
     costUsd: null,
     error: null,
+    ...(options.preferStructured ? { judgeCandidates: verdictCandidates.length } : {}),
   };
+}
+
+/**
+ * Whether one agent message carries a verdict-shaped object: a JSON value whose
+ * `verdict` names the only two outcomes a gate accepts. Prose, partial JSON,
+ * and unrelated objects are not candidates.
+ *
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+function isVerdictCandidate(text) {
+  const candidate = extractJson(text);
+  if (candidate === null) return false;
+  try {
+    const parsed = /** @type {unknown} */ (JSON.parse(candidate));
+    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && ["pass", "fail"].includes(String(/** @type {Record<string, unknown>} */ (parsed).verdict)));
+  } catch {
+    return false;
+  }
 }
 
 /**

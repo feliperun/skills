@@ -2,6 +2,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { validateContract, validateNodeSnapshot, validateRunMetadata } from "./contract.mjs";
 import { leaseHealthy, readJson, readLease } from "./store.mjs";
+import { scopeFindingsNote } from "./scope-findings.mjs";
+import { reviewNote } from "./review-modes.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
@@ -24,12 +26,14 @@ const MARK = {
  * @returns {string}
  */
 export function renderStatus(runDir) {
-  const { contract, nodes } = loadRun(runDir);
+  const { contract, nodes, identityWarnings } = loadRun(runDir);
   const campaign = readCampaignUsage(runDir, contract);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  const widths = [3, 24, 9, 28, 7, 24];
+  // The note carries every advisory marker a node earned (scope finding,
+  // review verdict, gate summary), so the cell holds the composed note whole.
+  const widths = [3, 24, 9, 28, 7, 64];
   /** @type {(cells: unknown[]) => string} */
   const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
   const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · campaign ${compactTokens(campaign.budgetInputTokens)} weighted input · workers ${campaign.remainingWorkerAllowance === null ? "unlimited" : compactTokens(campaign.remainingWorkerAllowance)} · judge reserve ${campaign.judgeReserveInputTokens === null ? "-" : compactTokens(campaign.judgeReserveInputTokens)}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
@@ -37,15 +41,21 @@ export function renderStatus(runDir) {
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
     const handoff = pendingHandoff(node);
-    const baseNote = `phase ${planNode?.phase ?? "-"} · ${continuationMode(node)} · ${node.gate?.summary ?? node.error?.message ?? node.blockedBy?.join(", ") ?? node.phase ?? "-"}`;
+    const detail = statusNote(node) ?? "-";
+    // A scope finding leads the note and drops the phase boilerplate: the
+    // operator has to see it, and the fixed cell cannot hold both.
+    const baseNote = scopeFindingsNote(node.scopeFindings)
+      ? detail
+      : `phase ${planNode?.phase ?? "-"} · ${continuationMode(node)} · ${detail}`;
     const note = handoff ? `handoff→${handoff.runtime} · ${baseNote}` : baseNote;
     lines.push(row([MARK[node.status] ?? "[?]", node.id, node.status, runtime, node.attempt ?? 0, note]));
   }
   lines.push("```", "", "## Needs you", "");
   const attention = nodes.filter((node) => !["pending", "running", "done"].includes(node.status));
   const orphans = !leaseHealthy(readLease(runDir)) ? nodes.filter((node) => node.status === "running").map((node) => node.id) : [];
-  if (!attention.length && !orphans.length) lines.push("Nothing needs you right now.");
+  if (!attention.length && !orphans.length && !identityWarnings.length) lines.push("Nothing needs you right now.");
   if (orphans.length) lines.push(`- [>] the run process is gone while ${orphans.join(", ")} still claims to be running. Those nodes are orphans, not live work. Resume the run directory to adopt whatever their workers finished.`);
+  for (const warning of identityWarnings) lines.push(`- [~] ${warning}`);
   for (const node of attention) lines.push(`- ${MARK[node.status] ?? "[?]"} ${node.id}: ${node.gate?.summary ?? node.error?.message ?? node.status}`);
   return `${lines.join("\n")}\n`;
 }
@@ -57,7 +67,7 @@ export function renderStatus(runDir) {
  * @returns {string}
  */
 export function renderStatusJson(runDir) {
-  const { contract, nodes } = loadRun(runDir);
+  const { contract, nodes, identityWarnings } = loadRun(runDir);
   const campaign = readCampaignUsage(runDir, contract);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
@@ -73,6 +83,7 @@ export function renderStatusJson(runDir) {
     remainingWorkerAllowance: campaign.remainingWorkerAllowance,
     judgeReserveInputTokens: campaign.judgeReserveInputTokens,
     leaseHealthy: leaseHealthy(readLease(runDir)),
+    identityWarnings,
     summary: [...counts].map(([status, count]) => `${count} ${status}`).join(" · "),
     nodes: nodes.map((node) => ({
       id: node.id,
@@ -84,7 +95,8 @@ export function renderStatusJson(runDir) {
       attempt: node.attempt,
       revisions: node.revisions,
       pendingHandoff: pendingHandoff(node),
-      note: node.gate?.summary ?? node.error?.message ?? node.blockedBy?.join(", ") ?? node.phase,
+      note: statusNote(node),
+      scopeFindings: node.scopeFindings?.unexpectedPaths ?? null,
     })),
   };
   return `${JSON.stringify(payload, null, 2)}\n`;
@@ -100,7 +112,7 @@ export function renderReport(runDir) {
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 20, 36];
+  const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 20, 64];
   /** @type {(cells: unknown[]) => string} */
   const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
   /** @type {import("./contract.mjs").Usage & {costUsd: number|null}} */
@@ -114,7 +126,10 @@ export function renderReport(runDir) {
     const cost = costs[index];
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
-    lines.push(row([MARK[node.status] ?? "[?]", node.id, node.status, node.attempt ?? 0, node.revisions ?? 0, runtime, compactTokens(usage.inputTokens), compactTokens(usage.outputTokens), compactTokens(usage.cacheReadInputTokens), formatCost(cost), `phase ${planNode?.phase ?? "-"} · ${continuationMode(node)} · ${nodeNote(node)}`]));
+    const note = scopeFindingsNote(node.scopeFindings)
+      ? nodeNote(node)
+      : `phase ${planNode?.phase ?? "-"} · ${continuationMode(node)} · ${nodeNote(node)}`;
+    lines.push(row([MARK[node.status] ?? "[?]", node.id, node.status, node.attempt ?? 0, node.revisions ?? 0, runtime, compactTokens(usage.inputTokens), compactTokens(usage.outputTokens), compactTokens(usage.cacheReadInputTokens), formatCost(cost), note]));
   }
   totals.costUsd = aggregateCost.costUsd;
   lines.push("```", "", `totals · in ${compactTokens(totals.inputTokens)} · out ${compactTokens(totals.outputTokens)} · cache ${compactTokens(totals.cacheReadInputTokens)} · cost ${formatCost(aggregateCost)}`);
@@ -192,13 +207,13 @@ export function renderFindings(runDir) {
 
 /**
  * @param {string} runDir
- * @returns {{contract: ValidatedContract, nodes: NodeSnapshot[]}}
+ * @returns {{contract: ValidatedContract, nodes: NodeSnapshot[], identityWarnings: string[]}}
  */
 function loadRun(runDir) {
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(/** @type {import("./contract.mjs").JsonObject} */ (JSON.parse(readFileSync(contractPath, "utf8"))), contractPath, { persisted: true });
-  validateRunMetadata(readJson(join(runDir, "run.json")));
-  return { contract, nodes: readNodes(runDir, contract) };
+  const metadata = validateRunMetadata(readJson(join(runDir, "run.json")));
+  return { contract, nodes: readNodes(runDir, contract), identityWarnings: metadata.identityWarnings ?? [] };
 }
 
 /**
@@ -267,14 +282,70 @@ function pendingHandoff(node) {
   return { runtime: override.runtime, reason: override.reason };
 }
 
+/** Segments of a node note are joined by this separator. */
+const NOTE_SEPARATOR = " · ";
+
 /**
+ * The longest note a status surface shows. It is the width the status tables
+ * render, so a bounded note never has to be cut again on its way into a cell
+ * and the JSON carries exactly the string the tables do.
+ */
+export const MAX_NOTE_LENGTH = 64;
+
+/**
+ * Joins the note segments into one note bounded to `maxLength`, cutting the
+ * trailing segment first: the leading scope and review markers are what the
+ * operator and the campaign match on, so a long gate summary or error is the
+ * part that yields, and every surface shows the same bounded string.
+ *
+ * @param {(string|null|undefined)[]} segments
+ * @param {number} [maxLength]
+ * @returns {string|null}
+ */
+function boundedNote(segments, maxLength = MAX_NOTE_LENGTH) {
+  const parts = segments.filter(Boolean);
+  if (!parts.length) return null;
+  const note = parts.join(NOTE_SEPARATOR);
+  if (note.length <= maxLength) return note;
+  const head = parts.slice(0, -1).join(NOTE_SEPARATOR);
+  const tail = /** @type {string} */ (parts.at(-1));
+  const room = maxLength - (head ? head.length + NOTE_SEPARATOR.length : 0);
+  const cut = `${tail.slice(0, Math.max(0, room - 1))}…`;
+  if (head && cut.length > 1) return `${head}${NOTE_SEPARATOR}${cut}`;
+  return `${note.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * The note a status surface shows for a node: gate summary or error, led by
+ * any advisory scope finding and by the review outcome, so a gated done node
+ * cannot hide an advisory finding or an invalid verdict behind its gate
+ * summary (TECH-SPEC lean, rules 1 and 2). The order is the stable format
+ * every surface shares: `scope: N unexpected paths · <review note> · <gate
+ * summary or error>`, bounded so the tables and the JSON cannot disagree.
+ *
+ * @param {NodeSnapshot} node
+ * @returns {string|null}
+ */
+export function statusNote(node) {
+  const scope = scopeFindingsNote(node.scopeFindings);
+  const review = reviewNote(node);
+  const detail = node.gate?.summary ?? node.error?.message ?? node.blockedBy?.join(", ") ?? node.phase;
+  const note = boundedNote([review, detail]);
+  if (!scope) return note;
+  return boundedNote([scope, note]);
+}
+
+/**
+ * A scope finding is advisory, so the node keeps its own note; the finding
+ * still has to stay visible on a gated node, where the gate summary would
+ * otherwise be the whole note (TECH-SPEC lean, rule 1).
+ *
  * @param {NodeSnapshot} node
  * @returns {string}
  */
 function nodeNote(node) {
-  if (node.gate?.summary) return node.gate.summary;
-  if (node.error?.message) return node.error.message;
-  if (node.blockedBy?.length) return `blocked by ${node.blockedBy.join(", ")}`;
+  const note = statusNote(node);
+  if (note) return note;
   if (typeof node.result === "string" && node.result.trim()) return node.result.trim();
   return node.phase ?? "-";
 }

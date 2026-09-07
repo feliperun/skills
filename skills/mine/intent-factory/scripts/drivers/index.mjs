@@ -44,7 +44,7 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {DriverCommand & {driver: string, model: string, capabilities: DriverCapabilities}} ProviderCommand */
 
-/** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string}|null}} ProviderEnvelope */
+/** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string}|null, judgeCandidates?: number}} ProviderEnvelope */
 
 /**
  * One declared runtime. `driver` names a registered adapter (`claude`,

@@ -11,7 +11,7 @@ import {
   renderStatus,
   validateContract,
 } from "./lib.mjs";
-import { renderReportJson, renderStatusJson } from "./render.mjs";
+import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "./render.mjs";
 import { cancelRun, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_MIN_TURNS_FOR_AVERAGE } from "./runner.mjs";
 import { invocationAlive, invocationResult, processStartToken, quotaResetSchedule } from "./supervisor.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
@@ -20,8 +20,6 @@ import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import { deriveBudgetDecision } from "./budget.mjs";
-import { buildCapsule } from "./capsule.mjs";
-import { pruneRun } from "./contract-prune.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
@@ -1012,7 +1010,7 @@ test("a gate revision clears the stale canonical result file", async () => {
   const path = writeContract(directory, fixture({
     id: "result-regrind-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { review: "blocking", failOn: ["major", "critical"] } }],
   }));
   const result = await withResultFileCodex(directory, "revision-regrinds", path);
   const state = nodeState(result);
@@ -1345,7 +1343,7 @@ process.stdin.on("end", () => {
       type: "backend",
       definitionOfDone: [{ id: "quality", text: "the result is high quality", judgment: true }],
       taskPacket: packet(),
-      gate: { failOn: ["critical"] },
+      gate: { review: "blocking", failOn: ["major", "critical"] },
     }],
   }));
   const result = await runContract(path);
@@ -1421,7 +1419,9 @@ test("an uncited fail below the gate failOn threshold is a judge protocol failur
   const counter = join(outDir, "judge-calls.txt");
   const promptOne = join(outDir, "judge-prompt-1.txt");
   const promptTwo = join(outDir, "judge-prompt-2.txt");
-  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "major", summary: "major but uncited", findings: [{ severity: "major", description: "the work needs rework", evidence: "inspected the delivered diff" }] });
+  // A minor verdict sits below every failOn set a blocking review may declare,
+  // so an uncited minor rejection isolates the protocol rule from the threshold.
+  const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "minor", summary: "minor but uncited", findings: [{ severity: "minor", description: "the work needs rework", evidence: "inspected the delivered diff" }] });
   const fake = join(directory, "uncited-below-provider.mjs");
   writeFileSync(fake, `#!/usr/bin/env node
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
@@ -1461,7 +1461,7 @@ process.stdin.on("end", () => {
       type: "backend",
       definitionOfDone: [{ id: "quality", text: "the result is high quality", judgment: true }],
       taskPacket: packet(),
-      gate: { failOn: ["critical"] },
+      gate: { review: "blocking", failOn: ["major", "critical"] },
     }],
   }));
   const result = await runContract(path);
@@ -1472,7 +1472,7 @@ process.stdin.on("end", () => {
   assert.equal(state.revisions, 0, "an uncited rejection never consumes a revision");
   assert.equal(state.attempt, 1);
   assert.equal(state.gate?.verdict, "fail", "the below-threshold verdict is recorded");
-  assert.equal(state.gate?.maxSeverity, "major", "an uncited major fail under failOn [critical] is a protocol failure, not a pass");
+  assert.equal(state.gate?.maxSeverity, "minor", "an uncited fail below failOn is a protocol failure, not a pass");
   const judges = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
   assert.equal(judges.length, 2, "the bounded re-ask still applies below the failOn threshold");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
@@ -1533,7 +1533,7 @@ process.stdin.on("end", () => {
         { id: "quality", text: "the result is high quality", judgment: true },
       ],
       taskPacket: packet(),
-      gate: { failOn: ["critical"] },
+      gate: { review: "blocking", failOn: ["major", "critical"] },
     }],
   }));
   const result = await runContract(path);
@@ -1609,7 +1609,7 @@ process.stdin.on("end", () => {
       type: "backend",
       definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
       taskPacket: packet(),
-      gate: { failOn: ["critical"] },
+      gate: { review: "blocking", failOn: ["major", "critical"] },
     }],
   }));
   const nodePath = join(runDir, "nodes", "build.json");
@@ -1684,7 +1684,7 @@ test("provider diagnostics stay bounded and recovery consumes only a bounded tai
   assert.equal(recovered.status, "done");
 });
 
-test("fails closed on unexpected writes and preserves pre-existing dirt", async () => {
+test("an unexpected write on green verification is an advisory finding, not a terminal failure", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-"));
   writeFileSync(join(directory, "preexisting.txt"), "keep me\n");
   const path = writeContract(directory, fixture({
@@ -1694,15 +1694,18 @@ test("fails closed on unexpected writes and preserves pre-existing dirt", async 
   }));
   const result = await withFakeCodex(directory, "write-unexpected", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.ok(state.error, "unexpected write records an error");
-  assert.equal(state.error.code, "unexpected_write");
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.error, null, "an advisory scope finding records no terminal error");
   assert.ok(state.scope, "scope snapshot persisted");
   assert.ok(state.scope.unexpectedPaths.includes("unexpected.txt"));
-  const scopeFindings = /** @type {{nodes: {id: string, unexpectedPaths?: string[]}[]}} */ (
-    JSON.parse(readFileSync(join(directory, ".runs", "scope-run", "findings.json"), "utf8"))
-  );
-  assert.deepEqual(scopeFindings.nodes[0].unexpectedPaths, ["unexpected.txt"]);
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["unexpected.txt"]);
+  assert.equal(readFileSync(join(directory, "preexisting.txt"), "utf8"), "keep me\n", "pre-existing dirt is preserved");
+  assert.equal(existsSync(join(result.runDir, "findings.json")), false, "a done run leaves no findings artifact");
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const finding = events.find((event) => event.type === "scope.finding");
+  assert.ok(finding, "a scope.finding event is appended");
+  assert.deepEqual(finding.unexpectedPaths, ["unexpected.txt"]);
+  assert.equal(finding.unexpectedPathCount, 1);
 
   const cleanDirectory = mkdtempSync(join(tmpdir(), "runner-scope-clean-"));
   writeFileSync(join(cleanDirectory, "preexisting.txt"), "keep me\n");
@@ -1713,9 +1716,197 @@ test("fails closed on unexpected writes and preserves pre-existing dirt", async 
   }));
   const clean = await withFakeCodex(cleanDirectory, "pass", () => runContract(cleanPath));
   assert.equal(nodeState(clean).status, "done");
+  assert.equal(nodeState(clean).scopeFindings, undefined, "a clean attempt records no scope finding");
+
+  // The same advisory outcome reaches a gated node: the judge is told about
+  // the unexpected paths and the finding stays visible in status, where the
+  // gate summary would otherwise be the whole node note.
+  const gatedDirectory = mkdtempSync(join(tmpdir(), "runner-scope-gated-"));
+  const gatedPath = writeContract(gatedDirectory, fixture({
+    id: "scope-gated-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const gated = await withFakeCodex(gatedDirectory, "write-unexpected-judge-prompt", () => runContract(gatedPath));
+  const gatedState = nodeState(gated);
+  assert.equal(gatedState.status, "done", gatedState.error?.message);
+  assert.deepEqual(gatedState.scopeFindings?.unexpectedPaths, ["unexpected.txt"], "a gated done node keeps its advisory finding");
+  assert.equal(gatedState.gate?.verdict, "fail", "the advisory gate verdict is recorded");
+  assert.equal(gatedState.gate?.summary, "minor advisory");
+  const seenByJudge = readFileSync(join(gatedDirectory, ".runs", "judge-prompt.txt"), "utf8");
+  assert.match(seenByJudge, /Scope findings/u);
+  assert.match(seenByJudge, /- unexpected\.txt/u);
+
+  // One stable format for a node that carries both: the scope note, then the
+  // review note, then the gate summary it would otherwise hide.
+  const note = /scope: 1 unexpected path · advisory: 1 finding · minor advisory/u;
+  const status = renderStatus(gated.runDir);
+  assert.match(status, note);
+  const payload = /** @type {{nodes: {id: string, note: string, scopeFindings: string[]|null}[]}} */ (JSON.parse(renderStatusJson(gated.runDir)));
+  assert.equal(payload.nodes[0].note, "scope: 1 unexpected path · advisory: 1 finding · minor advisory");
+  assert.deepEqual(payload.nodes[0].scopeFindings, ["unexpected.txt"]);
+  // STATUS.md is the artifact the campaign reads: it shows the same note.
+  const statusArtifact = readFileSync(join(gated.runDir, "STATUS.md"), "utf8");
+  assert.match(statusArtifact, note);
+  assert.match(renderReport(gated.runDir), /scope: 1 unexpected path · advisory: 1 finding/u);
+
+  // A gate summary longer than the note budget cannot make the surfaces
+  // disagree: the summary is the part the bound cuts, and the JSON carries the
+  // very string the tables render.
+  const longDirectory = mkdtempSync(join(tmpdir(), "runner-scope-gated-long-"));
+  const longPath = writeContract(longDirectory, fixture({
+    id: "scope-gated-long-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const long = await withFakeCodex(longDirectory, "write-unexpected-long-review", () => runContract(longPath));
+  assert.equal(nodeState(long).status, "done", nodeState(long).error?.message);
+  const longNote = /** @type {string} */ (JSON.parse(renderStatusJson(long.runDir)).nodes[0].note);
+  assert.equal(longNote.length, MAX_NOTE_LENGTH, "the note is bounded to the width every surface shows");
+  assert.match(longNote, /^scope: 1 unexpected path · advisory: 1 finding · /u, "the advisory markers survive a cut summary");
+  assert.ok(longNote.endsWith("…"), "a cut summary is marked as cut");
+  for (const [surface, text] of [
+    ["the status table", renderStatus(long.runDir)],
+    ["STATUS.md", readFileSync(join(long.runDir, "STATUS.md"), "utf8")],
+    ["the report", renderReport(long.runDir)],
+  ]) {
+    assert.ok(text.includes(longNote), `${surface} shows the same bounded note`);
+  }
 });
 
-test("a worker-created symlink cannot authorize its target", async () => {
+test("an incomplete worker that writes outside scope still fails with unexpected_write", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-incomplete-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-incomplete-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected-failed", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write", "the provider failure must not displace the scope verdict");
+  assert.match(state.error?.message ?? "", /unexpected\.txt/u);
+  assert.equal(state.scopeFindings, undefined, "only a completed attempt earns an advisory finding");
+  assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
+});
+
+test("a scope violation on failed verification keeps the failure and appends the unexpected paths to the message", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-red-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-red-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(1)"] }] }),
+      gate: false,
+    }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.ok(state.error, "verification failure records an error");
+  assert.equal(state.error.code, "verification_failed");
+  assert.match(state.error.message, /unexpected paths changed/u);
+  assert.match(state.error.message, /unexpected\.txt/u);
+  assert.equal(state.scopeFindings, undefined, "a failed attempt never gets an advisory finding");
+  assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
+});
+
+test("a done envelope whose worker result is not done still fails with unexpected_write", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-blocked-result-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-blocked-result-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected-blocked-context", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write", "a blocked_context result is not completed work and cannot defer the scope verdict");
+  assert.match(state.error?.message ?? "", /unexpected\.txt/u);
+  assert.equal(state.scopeFindings, undefined, "only an accepted worker result earns an advisory finding");
+  assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
+
+  // An unparseable result behind a done envelope is the same verdict: the
+  // envelope alone never earns the deferred scope decision, so the paths stay
+  // terminal instead of vanishing into an invalid-result repair.
+  const invalidDirectory = mkdtempSync(join(tmpdir(), "runner-scope-invalid-result-"));
+  const invalidPath = writeContract(invalidDirectory, fixture({
+    id: "scope-invalid-result-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const invalid = await withFakeCodex(invalidDirectory, "write-unexpected-invalid-result", () => runContract(invalidPath));
+  const invalidState = nodeState(invalid);
+  assert.equal(invalidState.status, "failed");
+  assert.equal(invalidState.error?.code, "unexpected_write");
+  assert.equal(invalidState.scopeFindings, undefined);
+});
+
+test("a done envelope without the canonical result file keeps the terminal unexpected_write", async () => {
+  // The final message alone is not accepted work: the controller materializes
+  // the canonical file from it only after the scope gate, so an attempt that
+  // also wrote outside its scope never reaches verification or a finding.
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-message-only-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-message-only-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected-message-only", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.code, "unexpected_write", "a done envelope without the canonical file cannot defer the scope verdict");
+  assert.match(state.error?.message ?? "", /unexpected\.txt/u);
+  assert.equal(state.scopeFindings, undefined, "no advisory finding without an accepted worker result");
+  assert.equal(existsSync(join(result.runDir, "results", "build.json")), false, "the envelope result was never materialized");
+  assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
+});
+
+test("a scope violation on a gated red attempt reaches the retry prompt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-red-revision-"));
+  const path = writeContract(directory, fixture({
+    id: "scope-red-revision-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(1)"] }] }),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["critical"] },
+    }],
+  }));
+  const result = await withFakeCodex(directory, "write-unexpected-revision", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.attempt, 2, "the gate spent its revision before stopping");
+  assert.equal(state.status, "exhausted", state.error?.message);
+  assert.equal(state.error?.code, "verification_failed");
+  assert.match(state.error?.message ?? "", /unexpected paths changed/u);
+  assert.match(state.error?.message ?? "", /unexpected-2\.txt/u);
+  assert.equal(state.scopeFindings, undefined, "a failed attempt never gets an advisory finding");
+  // The next attempt is dispatched before the terminal branch, so the paths
+  // have to travel inside the verdict: the node state that carried them is
+  // cleared by the time the revision starts.
+  const retryPrompt = readFileSync(join(directory, ".runs", "scope-retry-prompt.txt"), "utf8");
+  assert.match(retryPrompt, /quality gate rejected/u);
+  assert.match(retryPrompt, /unexpected paths changed/u);
+  assert.match(retryPrompt, /unexpected-1\.txt/u);
+});
+
+test("a worker-created symlink cannot authorize its target, but is advisory on green verification", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-new-symlink-"));
   writeFileSync(join(directory, "outside.txt"), "baseline\n");
   initializeGit(directory);
@@ -1726,14 +1917,14 @@ test("a worker-created symlink cannot authorize its target", async () => {
   }));
   const result = await withFakeCodex(directory, "new-symlink-escape", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.equal(state.error?.code, "unexpected_write");
+  assert.equal(state.status, "done", state.error?.message);
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt"]);
   assert.equal(readFileSync(join(directory, "outside.txt"), "utf8"), "unauthorized target\n");
   assert.ok(state.scope?.unexpectedPaths.includes("outside.txt"));
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["outside.txt"]);
 });
 
-test("retargeting a contained alias cannot authorize the new target", async () => {
+test("retargeting a contained alias cannot authorize the new target, but is advisory on green verification", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-retargeted-symlink-"));
   writeFileSync(join(directory, "src.txt"), "source\n");
   writeFileSync(join(directory, "outside.txt"), "outside\n");
@@ -1746,10 +1937,10 @@ test("retargeting a contained alias cannot authorize the new target", async () =
   }));
   const result = await withFakeCodex(directory, "retargeted-symlink-escape", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.equal(state.error?.code, "unexpected_write");
+  assert.equal(state.status, "done", state.error?.message);
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt", "src.txt"]);
   assert.ok(state.scope?.unexpectedPaths.includes("outside.txt"));
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["outside.txt"]);
 });
 
 test("a pre-existing contained alias remains an authorized write path", async () => {
@@ -1768,6 +1959,60 @@ test("a pre-existing contained alias remains an authorized write path", async ()
   assert.equal(state.status, "done", state.error?.message);
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt", "src.txt"]);
   assert.equal(readFileSync(join(directory, "src.txt"), "utf8"), "authorized target\n");
+});
+
+test("a file write root matches exactly that path in the scope gate", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-"));
+  writeFileSync(join(directory, "notes.md"), "before\n");
+  initializeGit(directory);
+  const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["notes.md"], verification: [] });
+  const path = writeContract(directory, fixture({
+    id: "scope-file-root-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: autonomousPacket, gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-file-root", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual(state.scope?.boundary?.roots, ["notes.md"]);
+  assert.equal(state.scope?.unexpectedPaths.length, 0);
+  assert.equal(state.scopeFindings, undefined);
+  assert.equal(readFileSync(join(directory, "notes.md"), "utf8"), "in the file root\n");
+});
+
+test("a file write root does not authorize a sibling file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-sibling-"));
+  writeFileSync(join(directory, "notes.md"), "before\n");
+  initializeGit(directory);
+  const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["notes.md"], verification: [] });
+  const path = writeContract(directory, fixture({
+    id: "scope-file-root-sibling-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: autonomousPacket, gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-outside-file-root", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.ok(state.scope?.unexpectedPaths.includes("sibling.md"));
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["sibling.md"]);
+});
+
+test("a file write root does not authorize a path beneath a same-named directory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-nested-"));
+  writeFileSync(join(directory, "notes.md"), "before\n");
+  initializeGit(directory);
+  const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["notes.md"], verification: [] });
+  const path = writeContract(directory, fixture({
+    id: "scope-file-root-nested-run",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: autonomousPacket, gate: false }],
+  }));
+  const result = await withFakeCodex(directory, "write-under-file-root", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual(state.scope?.boundary?.fileRoots, ["notes.md"], "the boundary records the root that named a file");
+  assert.ok(state.scope?.unexpectedPaths.includes("notes.md/nested.txt"));
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["notes.md/nested.txt"]);
 });
 
 test("autonomous heartbeats observe progress made through a contained alias", async () => {
@@ -1831,7 +2076,7 @@ test("preserves the worker report when the judge provider fails", async () => {
   const path = writeContract(directory, fixture({
     id: "judge-fail-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { review: "blocking", failOn: ["major", "critical"] } }],
   }));
   const result = await withFakeCodex(directory, "judge-fail", () => runContract(path));
   const state = nodeState(result);
@@ -1847,7 +2092,7 @@ test("a judge whose tool host is disabled never yields a verdict and blocks as j
   const path = writeContract(directory, fixture({
     id: "judge-tool-host-run",
     pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { review: "blocking", failOn: ["major", "critical"] } }],
   }));
   const result = await withFakeCodex(directory, "judge-tool-host-disabled", () => runContract(path));
   const state = nodeState(result);
@@ -1861,6 +2106,435 @@ test("a judge whose tool host is disabled never yields a verdict and blocks as j
   const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
   assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
 });
+
+/**
+ * A codex-shaped provider whose judge produces one review-protocol defect.
+ * `two-verdicts` streams two agent messages that each carry a verdict,
+ * `empty-output` ends a finished turn without any verdict, and `no-terminal`
+ * streams a verdict but never its terminal envelope. With `again` the defect
+ * repeats on the bounded re-ask; otherwise the re-ask returns a clean verdict.
+ *
+ * @param {string} directory
+ * @param {"two-verdicts"|"empty-output"|"no-terminal"|"two-verdicts-then-fail"} defect
+ * @param {{again?: boolean}} [options]
+ * @returns {string}
+ */
+function judgeDefectCodex(directory, defect, options = {}) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-judge-defect-")), `judge-defect-${defect}.mjs`);
+  const calls = join(directory, ".runs", `judge-defect-${defect}${options.again ? "-again" : ""}-judges`);
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const defect = ${JSON.stringify(defect)};
+const again = ${options.again ? "true" : "false"};
+const calls = ${JSON.stringify(calls)};
+if (process.argv.includes("--version")) {
+  console.log("judge-defect 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const prompt = input || process.argv.at(-1) || "";
+  const verdict = (summary) => JSON.stringify({ verdict: "pass", maxSeverity: "none", summary, findings: [] });
+  const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "defect-thread" }));
+  if (!prompt.startsWith("Review node")) {
+    const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (resultPath) writeFileSync(resultPath, result);
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+    return;
+  }
+  appendFileSync(calls, "x\\n");
+  const run = readFileSync(calls, "utf8").trim().split("\\n").filter(Boolean).length;
+  if (run > 1 && !again && defect !== "two-verdicts-then-fail") {
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict("clean re-ask") } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+    return;
+  }
+  if (defect === "two-verdicts-then-fail" && run > 1) {
+    console.log(JSON.stringify({ type: "turn.failed", error: { message: "re-ask provider died" } }));
+    return;
+  }
+  if (defect === "two-verdicts") {
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict("first verdict") } }));
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict("second verdict") } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+    return;
+  }
+  if (defect === "no-terminal") {
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict("clean but unsealed") } }));
+    return;
+  }
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+});
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @template T @param {string} directory @param {"two-verdicts"|"empty-output"|"no-terminal"|"two-verdicts-then-fail"} defect @param {{again?: boolean}} options @param {() => T | Promise<T>} runner @returns {Promise<T>} */
+async function withJudgeDefectCodex(directory, defect, options, runner) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = judgeDefectCodex(directory, defect, options);
+  try {
+    return await runner();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/**
+ * A codex-shaped provider whose worker finishes at once and whose judge keeps
+ * emitting nothing past any wall-clock budget, so the judge phase is killed.
+ *
+ * @param {string} directory
+ * @returns {string}
+ */
+function stallingJudgeCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-judge-stall-")), "judge-stall.mjs");
+  writeFileSync(executable, `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("judge-stall 1.0.0");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const prompt = input || process.argv.at(-1) || "";
+  const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "stall-thread" }));
+  if (!prompt.startsWith("Review node")) {
+    const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    if (resultPath) writeFileSync(resultPath, result);
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+    return;
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
+});
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+/** @template T @param {string} directory @param {() => T | Promise<T>} runner @returns {Promise<T>} */
+async function withStallingJudgeCodex(directory, runner) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = stallingJudgeCodex(directory);
+  try {
+    return await runner();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+test("default review is advisory and the node records that it reviewed advisorially", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-default-"));
+  const path = writeContract(directory, fixture({
+    id: "review-default-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { failOn: ["minor", "major", "critical"], maxRevisions: 0 },
+    }],
+  }));
+  const result = await withAdvisoryGateCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.review, "advisory", "an omitted review mode reviews advisorially");
+  assert.equal(state.revisions, 0, "an advisory finding never consumes a revision");
+  assert.equal(state.gate?.verdict, "fail");
+  assert.equal(state.gate?.findings.length, 1);
+});
+
+test("an advisory fail verdict reaches done with findings and a gate.advisory event", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-advisory-"));
+  const path = writeContract(directory, fixture({
+    id: "review-advisory-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "advisory", failOn: ["major", "critical"], maxRevisions: 0 },
+    }],
+  }));
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(state.status, "done");
+  assert.equal(state.review, "advisory");
+  assert.equal(state.revisions, 0, "an advisory review never consumes a revision");
+  assert.equal(state.gate?.verdict, "fail", "the fail verdict is recorded with its findings");
+  assert.equal(state.gate?.maxSeverity, "critical");
+  assert.equal(state.gate?.findings[0].description, "broken [works]");
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const advisory = events.find((event) => event.type === "gate.advisory");
+  assert.ok(advisory, "the advisory settle appends a gate.advisory event");
+  assert.equal(advisory.verdict, "fail");
+  assert.equal(advisory.node, "build");
+  assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /advisory: 1 finding/u, "the status note leads with the advisory finding the gate summary would hide");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-dispatched");
+});
+
+test("blocking review is unchanged: a cited fail at the threshold consumes its revision and exhausts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-blocking-"));
+  const path = writeContract(directory, fixture({
+    id: "review-blocking-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 0 },
+    }],
+  }));
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(result.ok, false);
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.review, "blocking");
+  assert.equal(state.error?.code, "revision_cap");
+  assert.equal(state.revisions, 0);
+  assert.equal(state.attempt, 1, "maxRevisions 0 grants no revision");
+});
+
+test("review none skips the judge and settles on the mechanical verdict", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-none-"));
+  const path = writeContract(directory, fixture({
+    id: "review-none-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "none" },
+    }],
+  }));
+  // A provider whose judge would reject everything proves the judge never runs.
+  const result = await withBrokenGateCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(state.status, "done");
+  assert.equal(state.review, "none");
+  assert.equal(state.gate?.verdict, "pass", "the checklist settles mechanically");
+  assert.equal(state.gate?.findings.length, 0);
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0, "no judge is ever dispatched");
+  assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
+});
+
+test("two separate agent-message verdicts re-ask once and the re-ask recovers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-two-verdicts-"));
+  const path = writeContract(directory, fixture({
+    id: "review-two-verdicts-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "two-verdicts", {}, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.revisions, 0, "a judge protocol defect never consumes a revision");
+  assert.equal(state.attempt, 1);
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask");
+  assert.equal(state.gate?.summary, "clean re-ask");
+});
+
+test("a provider failure on the bounded re-ask settles instead of dispatching a third judge", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-reask-fail-"));
+  const path = writeContract(directory, fixture({
+    id: "review-reask-fail-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "two-verdicts-then-fail", {}, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "judge", "the node is left exactly as one awaiting its judge");
+  assert.equal(state.error?.code, "judge_unavailable");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "the failed re-ask settles instead of buying a third judge");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+});
+
+test("an empty judge output re-asks once and the re-ask recovers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-empty-output-"));
+  const path = writeContract(directory, fixture({
+    id: "review-empty-output-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "empty-output", {}, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask after empty output");
+  assert.equal(state.gate?.summary, "clean re-ask");
+});
+
+test("a missing terminal envelope re-asks once and the re-ask recovers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-no-terminal-"));
+  const path = writeContract(directory, fixture({
+    id: "review-no-terminal-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "no-terminal", {}, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask after an incomplete stream");
+  assert.equal(state.gate?.summary, "clean re-ask");
+});
+
+test("a judge timeout re-asks once then blocks as judge_unavailable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-judge-timeout-"));
+  const path = writeContract(directory, fixture({
+    id: "review-judge-timeout-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      timeoutSec: 1,
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withStallingJudgeCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "judge");
+  assert.equal(state.error?.code, "judge_unavailable");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "the wall-clock kill earns exactly one bounded re-ask");
+  assert.equal(state.gate, null, "no verdict is fabricated for a judge that never returned one");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
+});
+
+test("advisory review settles invalid_judge_output and completes with the work recorded", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-invalid-advisory-"));
+  const path = writeContract(directory, fixture({
+    id: "review-invalid-advisory-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "advisory", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "two-verdicts", { again: true }, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(state.gate?.verdict, "invalid_judge_output");
+  assert.equal(state.gate?.findings.length, 0, "an invalid verdict records no findings");
+  assert.match(state.gate?.summary ?? "", /2 separate verdicts/u);
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask");
+  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.type === "gate.advisory" && event.verdict === "invalid_judge_output"));
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "invalid_judge_output"), "the defective review is never silent");
+  assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /judge: invalid output/u);
+});
+
+test("blocking review enters judge_unavailable with the worker result and verification preserved", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-invalid-blocking-"));
+  const path = writeContract(directory, fixture({
+    id: "review-invalid-blocking-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withJudgeDefectCodex(directory, "two-verdicts", { again: true }, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
+  assert.equal(state.phase, "judge", "the node is left exactly as one awaiting its judge");
+  assert.equal(state.error?.code, "judge_unavailable");
+  assert.equal(state.gate, null, "the gate state stays empty until a verdict exists");
+  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete", "the accepted worker result is preserved");
+  assert.equal(state.verification?.passed, true, "the verification records are preserved");
+  assert.equal(state.revisions, 0, "a review that never arbitrated consumes no revision");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
+  assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask");
+  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
+  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
+  assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /needs you: judge unavailable/u);
+});
+
+test("a verification proof reuses the recorded result and executes nothing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-review-proof-reuse-"));
+  // Writing into the run directory keeps the counter outside the workspace
+  // snapshot, so the scope gate never sees the probe.
+  const executions = join(directory, ".runs", "proof-reuse-run", "verification-executions");
+  const path = writeContract(directory, fixture({
+    id: "proof-reuse-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({
+        verification: [{ argv: [process.execPath, "-e", `require("node:fs").appendFileSync(${JSON.stringify(executions)}, "x\\n")`] }],
+      }),
+      definitionOfDone: [
+        { id: "verified", text: "the controller verification passed", proof: { kind: "verification", ref: 0 } },
+        { id: "works", text: "It works", judgment: true },
+      ],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const result = await withAdvisoryGateCodex(directory, () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "done", state.error?.message);
+  assert.equal(readFileSync(executions, "utf8").trim().split("\n").filter(Boolean).length, 1, "the controller ran the command once and the proof reused that result");
+  const proof = state.gate?.findings ?? [];
+  assert.equal(proof.length, 1, "the advisory verdict is the only finding on the node");
+  const prompt = readFileSync(join(result.runDir, "logs", "build.1.judge.jsonl"), "utf8");
+  assert.ok(prompt.length > 0);
+});
+
 
 test("enforces the wall-clock cap even while output changes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-timeout-"));
@@ -1911,7 +2585,7 @@ test("bounds gate retries and reports exhausted", async () => {
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 1 },
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 1 },
     }],
   }));
   const result = await withBrokenGateCodex(directory, () => runContract(path));
@@ -2002,10 +2676,16 @@ test("resume source identity uses the pre-execution symlink boundary", async () 
   symlinkSync("outside", join(directory, "alias"));
   writeFileSync(join(directory, "alias", "unauthorized.txt"), "unauthorized target\n");
   orphan(runDir, "build");
-  await assert.rejects(
-    () => withFakeCodex(directory, "worker-fail", () => resumeRun(runDir)),
-    /source drift detected in dirtyTreeFingerprint/u,
+  // Workers and the orchestrator commit between attempts, so a changed tree
+  // fingerprint is a surfaced warning, never a refusal.
+  const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
+  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+  assert.ok(
+    (metadata.identityWarnings ?? []).some((/** @type {string} */ warning) => warning.includes("fingerprint")),
+    "the fingerprint mismatch is recorded on the run",
   );
+  assert.match(readFileSync(join(runDir, "STATUS.md"), "utf8"), /fingerprint changed since the run started/u);
+  assert.equal(resumed.ok, false, "the orphaned attempt still fails instead of passing silently");
 });
 
 test("resume fails closed when the persisted scope boundary is missing", async () => {
@@ -2022,7 +2702,7 @@ test("resume fails closed when the persisted scope boundary is missing", async (
   );
 });
 
-test("resume rejects source drift outside packet write files", async () => {
+test("resume refuses a head that is not a descendant of the recorded one", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-unexpected-drift-"));
   const work = join(directory, "work");
   mkdirSync(work);
@@ -2035,9 +2715,16 @@ test("resume rejects source drift outside packet write files", async () => {
     nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"], writeFiles: ["README.md"] }), gate: false }],
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  writeFileSync(join(work, "unexpected.txt"), "not in packet\n");
   orphan(runDir, "build");
-  await assert.rejects(() => withFakeCodex(directory, "worker-fail", () => resumeRun(runDir)), /source drift detected in dirtyTreeFingerprint/u);
+  // An unrelated history: not a descendant of the head the run was recorded
+  // at, so the tree the run would continue on is not the one the work was
+  // authorized against.
+  execFileSync("git", ["-C", work, "checkout", "-q", "--orphan", "stray"]);
+  execFileSync("git", ["-C", work, "-c", "user.email=runner@example.test", "-c", "user.name=runner", "commit", "-q", "-m", "unrelated history"]);
+  await assert.rejects(
+    () => withFakeCodex(directory, "worker-fail", () => resumeRun(runDir)),
+    /source drift detected in gitHead; resume refused/u,
+  );
 });
 
 test("resume adopts a completed orphan judge without running it twice", async () => {
@@ -2728,7 +3415,7 @@ test("gate revisions are not consumed by attempts burned in restarts", async () 
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 1 },
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 1 },
     }],
   }));
   const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
@@ -2820,7 +3507,7 @@ test("events record attempt, runtime, and gate verdict", async () => {
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 0 },
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 0 },
     }],
   }));
   const result = await withBrokenGateCodex(directory, () => runContract(path));
@@ -3377,7 +4064,7 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 0 },
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 0 },
     }],
   }));
   const result = await withBrokenGateCodex(directory, () => runContract(path));
@@ -3397,7 +4084,7 @@ test("a finished run with non-done nodes writes a findings.json handoff", async 
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 0 },
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 0 },
     }],
   }));
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -3439,7 +4126,9 @@ test("resume removes a stale findings.json after driving the run to done", async
       type: "backend",
       taskPacket: packet(),
       definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }],
-      gate: { failOn: ["critical"], maxRevisions: 0 },
+      // Blocking is what exhausts the run: the advisory default would settle
+      // the rejected node done and leave no artifact for the resume to clear.
+      gate: { review: "blocking", failOn: ["major", "critical"], maxRevisions: 0 },
     }],
   }));
   const runDir = await withFakeCodex(directory, "critical", async () => (await runContract(path)).runDir);
@@ -3470,7 +4159,7 @@ test("usagePolicy blocks pending nodes once the weighted budget is spent", async
   assert.equal(blocked.error.code, "budget_exceeded");
 });
 
-test("a scope-gate failure still persists the usage its invocation spent", async () => {
+test("a scope finding still persists the usage its invocation spent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-usage-"));
   const path = writeContract(directory, fixture({
     id: "scope-usage-run",
@@ -3479,9 +4168,9 @@ test("a scope-gate failure still persists the usage its invocation spent", async
   }));
   const result = await withFakeCodex(directory, "write-unexpected", () => runContract(path));
   const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.equal(state.error?.code, "unexpected_write");
-  assert.equal(state.usage?.inputTokens, 10, "transcript usage survives the scope failure");
+  assert.equal(state.status, "done", state.error?.message);
+  assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["unexpected.txt"]);
+  assert.equal(state.usage?.inputTokens, 10, "transcript usage survives the scope finding");
   const invocation = state.invocations?.at(-1);
   assert.equal(invocation?.usage?.inputTokens, 10, "invocation record carries the same usage");
 });
@@ -4782,7 +5471,6 @@ test("run warns when a node id is already done in another run", async () => {
     }),
   );
   assert.match(result.stdout, /\[warn\] node build is already done in run first-run/u);
-  assert.match(result.stdout, /\[warn\] single-node contract/u);
 });
 
 test("run warnings ignore an unrelated historical run with an obsolete contract", async () => {
@@ -5514,23 +6202,6 @@ test("a failing finalVerification stops the phase-terminal node before the judge
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
 });
 
-test("a targetedFix node runs finalVerification even with a dependant node", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-targeted-"));
-  const path = writeContract(directory, fixture({
-    id: "final-verification-targeted-run",
-    pollIntervalMs: 10,
-    finalVerification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }],
-    nodes: [
-      { id: "fix", type: "backend", targetedFix: true, taskPacket: packet(), gate: false },
-      { id: "ship", type: "backend", taskPacket: packet({ objective: "Ship it" }), dependsOn: ["fix"], gate: false },
-    ],
-  }));
-  const result = await withFakeCodex(directory, "pass", () => runContract(path));
-  assert.equal(result.ok, true);
-  assert.equal(nodeState(result, "fix").verification?.commands?.length, 2, "targetedFix carries the final checkpoint on a non-terminal node");
-  assert.equal(nodeState(result, "ship").verification?.commands?.length, 2);
-});
-
 test("a contract without finalVerification leaves controller verification untouched", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-final-verification-absent-"));
   const path = writeContract(directory, fixture({
@@ -5545,124 +6216,384 @@ test("a contract without finalVerification leaves controller verification untouc
 
 const RUNNER_CLI = fileURLToPath(new URL("./runner.mjs", import.meta.url));
 
-/**
- * A run directory as `run` leaves it: the persisted contract, one state file
- * per node that reached a status, and the capsules attempts left behind.
- *
- * @param {string} directory
- * @param {Record<string, unknown>} contract
- * @param {Record<string, string>} statuses
- * @param {Record<string, unknown>} [capsules] keyed by `<nodeId>.<attempt>`
- * @returns {string}
- */
-function prunableRun(directory, contract, statuses, capsules = {}) {
-  const runDir = join(directory, ".runs", String(contract.id));
-  writeJsonAtomic(join(runDir, "contract.json"), { ...contract, cwd: directory });
-  for (const [id, status] of Object.entries(statuses)) {
-    writeJsonAtomic(join(runDir, "nodes", `${id}.json`), { status });
-  }
-  for (const [name, capsule] of Object.entries(capsules)) {
-    writeJsonAtomic(join(runDir, "capsules", `${name}.json`), capsule);
-  }
-  return runDir;
-}
-
-/** @param {string} runId @param {string} nodeId @param {Partial<import("./capsule.mjs").Capsule>} [overrides] */
-function prunableCapsule(runId, nodeId, overrides = {}) {
-  return buildCapsule({
-    runId,
-    nodeId,
-    attemptId: "1",
-    objective: "Implement it",
-    decisions: ["the schema stays at version 2"],
-    changedFiles: ["README.md"],
-    verifications: [{ argv: "npm run check", pass: true }],
-    nextAction: "finish the second half of the packet",
-    ...overrides,
-  });
-}
-
-test("contract prune drops done nodes and seeds the survivors with their capsules", () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-prune-"));
-  // the packets read `contract.json` relative to the contract cwd
-  writeContract(directory, fixture());
-  const contract = fixture({
-    id: "prune-source",
-    nodes: [
-      { id: "alpha", type: "backend", taskPacket: packet(), gate: false },
-      { id: "beta", type: "backend", taskPacket: packet({ objective: "Continue it" }), dependsOn: ["alpha"], gate: false },
-      { id: "gamma", type: "backend", taskPacket: packet({ objective: "Close it" }), dependsOn: ["alpha", "beta"], gate: false },
-    ],
-  });
-  const runDir = prunableRun(
-    directory,
-    contract,
-    { alpha: "done", beta: "failed", gamma: "pending" },
-    { "beta.0": prunableCapsule("prune-source", "beta", { nextAction: "stale" }), "beta.1": prunableCapsule("prune-source", "beta") },
-  );
-  const out = join(directory, "continuation.json");
-
-  const pruned = pruneRun(runDir, { out });
-
-  assert.deepEqual(pruned.dropped, ["alpha"]);
-  assert.deepEqual(pruned.kept, ["beta", "gamma"]);
-  assert.deepEqual(pruned.seeded, ["beta"], "only the node with a capsule is seeded");
-  const written = JSON.parse(readFileSync(out, "utf8"));
-  assert.equal(written.id, "prune-source-continuation", "a pruned run never resumes the frozen one");
-  assert.deepEqual(written.nodes.map((/** @type {{id: string}} */ node) => node.id), ["beta", "gamma"]);
-  assert.deepEqual(written.nodes[0].dependsOn, [], "the settled dependency is already satisfied");
-  assert.deepEqual(written.nodes[1].dependsOn, ["beta"], "a dependency on a surviving node stays");
-  const seed = written.nodes[0].taskPacket.decisions;
-  assert.match(seed[0], /^continuation seed from attempt 1 of run prune-source \(capsule [0-9a-f]{64}\)$/u);
-  assert.ok(seed.includes("continuation seed next action: finish the second half of the packet"), "the newest capsule wins");
-  assert.ok(seed.includes("continuation seed decided: the schema stays at version 2"));
-  assert.ok(seed.includes("continuation seed already changed: README.md"));
-  assert.ok(seed.includes("continuation seed passed: npm run check"));
-  assert.deepEqual(written.nodes[1].taskPacket.decisions, [], "a node without a capsule keeps its packet");
-  assert.equal(written.nodes[0].packetHash, undefined, "the stale packet hash never survives a reseeded packet");
-  assert.equal(written.nodes.some((/** @type {{targetedFix?: boolean}} */ node) => node.targetedFix), false);
-
-  const validated = spawnSync(process.execPath, [RUNNER_CLI, "validate", out], { encoding: "utf8" });
-  assert.equal(validated.status, 0, validated.stderr);
-  assert.equal(validated.stdout, "valid\n");
-});
-
-test("contract prune writes a single remaining node only with --targeted-fix", () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-prune-targeted-"));
-  writeContract(directory, fixture());  // the packets read `contract.json` relative to the contract cwd
-  const contract = fixture({
-    id: "prune-targeted",
-    nodes: [
-      { id: "alpha", type: "backend", taskPacket: packet(), gate: false },
-      { id: "beta", type: "backend", taskPacket: packet({ objective: "Continue it" }), dependsOn: ["alpha"], gate: false },
-    ],
-  });
-  const runDir = prunableRun(directory, contract, { alpha: "done", beta: "exhausted" });
-  const refused = join(directory, "refused.json");
-
-  assert.throws(() => pruneRun(runDir, { out: refused }), /leaves the single node beta.*--targeted-fix/su);
-  assert.equal(existsSync(refused), false, "a refused prune writes nothing");
-
-  const out = join(directory, "targeted.json");
-  const pruned = pruneRun(runDir, { out, targetedFix: true });
-  assert.deepEqual(pruned.kept, ["beta"]);
-  const written = JSON.parse(readFileSync(out, "utf8"));
-  assert.equal(written.nodes.length, 1);
-  assert.equal(written.nodes[0].targetedFix, true, "the flag is stamped on the surviving node");
-
-  const validated = spawnSync(process.execPath, [RUNNER_CLI, "contract", "validate", out], { encoding: "utf8" });
-  assert.equal(validated.status, 0, validated.stderr);
-  assert.equal(validated.stdout, "valid\n", "a targeted fix is not warned about for being alone");
-});
-
-test("validate rejects a single-node contract that is not a targeted fix", () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-validate-targeted-"));
-  const serial = writeContract(directory, fixture({ id: "serial-micro-contract" }));
+test("a single-node contract validates without warning and contract prune is gone", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-single-node-"));
+  const serial = writeContract(directory, fixture({ id: "single-node-run" }));
 
   for (const argv of [["validate", serial], ["contract", "validate", serial]]) {
     const result = spawnSync(process.execPath, [RUNNER_CLI, ...argv], { encoding: "utf8" });
-    assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /single node build without targetedFix: true/u);
-    assert.equal(result.stdout, "", "a rejected contract is never reported as valid");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "valid\n", "a single-node contract is simply valid");
   }
+
+  const contractPath = join(directory, "targeted.json");
+  writeJsonAtomic(contractPath, fixture({ id: "targeted-field-run", nodes: [{ id: "build", type: "backend", targetedFix: true, taskPacket: packet(), gate: false }] }));
+  const rejected = spawnSync(process.execPath, [RUNNER_CLI, "validate", contractPath], { encoding: "utf8" });
+  assert.equal(rejected.status, 1, rejected.stdout);
+  assert.match(rejected.stderr, /nodes\[0\] has unexpected field targetedFix/u, "the targeted-fix node field is gone");
+
+  const pruned = spawnSync(process.execPath, [RUNNER_CLI, "contract", "prune", join(directory, ".runs", "single-node-run"), "--out", join(directory, "out.json")], { encoding: "utf8" });
+  assert.equal(pruned.status, 2, pruned.stdout);
+  assert.match(pruned.stderr, /usage: runner.mjs contract validate/u, "contract prune is not a command any more");
+  assert.equal(existsSync(join(directory, "out.json")), false, "no continuation contract is written");
+});
+
+/**
+ * Rewrite a persisted node snapshot the way the failure being resumed would
+ * have left it.
+ *
+ * @param {string} runDir
+ * @param {string} nodeId
+ * @param {{status: string, code: string, message?: string, blockedBy?: string[], attempt?: number}} failure
+ * @returns {void}
+ */
+function persistFailure(runDir, nodeId, failure) {
+  const path = join(runDir, "nodes", `${nodeId}.json`);
+  const state = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({
+    ...state,
+    status: failure.status,
+    phase: failure.status === "blocked" ? "dependency" : "worker",
+    result: null,
+    gate: null,
+    verification: null,
+    scopeFindings: null,
+    attempt: failure.attempt ?? state.attempt,
+    blockedBy: failure.blockedBy ?? [],
+    error: { code: failure.code, message: failure.message ?? failure.code.replace(/_/g, " ") },
+  }, null, 2));
+}
+
+/**
+ * A codex-shaped provider whose worker prompts are logged before it completes,
+ * so a test can read the prompt a retry in place regenerated.
+ *
+ * @param {string} directory
+ * @returns {{executable: string, log: string}}
+ */
+function promptLoggingCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "runner-prompt-log-")), "prompt-log.mjs");
+  const log = join(directory, ".runs", "worker-prompts.txt");
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    if (input.startsWith("Review node")) {
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] }) } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 1 } }));
+      return;
+    }
+    appendFileSync(${JSON.stringify(log)}, input);
+    const result = JSON.stringify({ status: "done", summary: "retried worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    const resultPath = /canonical result file: (\\S+\\.json)/.exec(input)?.[1];
+    if (resultPath) writeFileSync(resultPath, result);
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return { executable, log };
+}
+
+/** @template T @param {string} executable @param {() => T | Promise<T>} body @returns {Promise<T>} */
+async function withCodexBinary(executable, body) {
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = executable;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+  }
+}
+
+/** @param {string} runDir @returns {{budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[], sourceIdentity: {gitHead: string|null}}} */
+function runMetadata(runDir) {
+  return JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+}
+
+/** @param {string} runDir @returns {string[]} */
+function recoveryDecisions(runDir) {
+  try {
+    return readFileSync(join(runDir, "events.jsonl"), "utf8").trim().split("\n").filter(Boolean)
+      .map((line) => /** @type {{recovery?: string}} */ (JSON.parse(line)).recovery ?? "");
+  } catch (error) {
+    if (/** @type {{code?: string}} */ (error).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/**
+ * A codex whose first judge turn returns two verdicts (blocking review blocks
+ * as judge_unavailable) and whose later judge turns return exactly one clean
+ * verdict, so the same provider can drive the resume that re-judges it.
+ *
+ * @param {string} directory
+ * @returns {string}
+ */
+function retryJudgeCodex(directory) {
+  const executable = join(mkdtempSync(join(tmpdir(), "retry-judge-")), "retry-judge.mjs");
+  const judges = join(directory, ".runs", "retry-judge-calls");
+  writeFileSync(executable, `#!${process.execPath}
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const judges = ${JSON.stringify(judges)};
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 1.0.0");
+} else {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const prompt = input || process.argv.at(-1) || "";
+    const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean re-judge", findings: [] });
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "retry-judge-thread" }));
+    if (!prompt.startsWith("Review node")) {
+      const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+      const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
+      if (resultPath) writeFileSync(resultPath, result);
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2 } }));
+      return;
+    }
+    appendFileSync(judges, "x\\n");
+    const run = readFileSync(judges, "utf8").trim().split("\\n").filter(Boolean).length;
+    if (run <= 2) {
+      // The first round and its bounded re-ask both return two verdicts: that
+      // is the judge_unavailable boundary the resume has to clear.
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
+    } else {
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
+    }
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 1 } }));
+  });
+}
+`);
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+test("resume re-judges a judge_unavailable node instead of re-dispatching a worker", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-judge-unavailable-"));
+  const path = writeContract(directory, fixture({
+    id: "retry-judge-unavailable-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet(),
+      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+      gate: { review: "blocking", failOn: ["major", "critical"] },
+    }],
+  }));
+  const provider = retryJudgeCodex(directory);
+  const blocked = await withCodexBinary(provider, () => runContract(path));
+  const state = nodeState(blocked);
+  assert.equal(state.status, "blocked", state.error?.message);
+  assert.equal(state.error?.code, "judge_unavailable");
+  const workerTurns = (state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length;
+  assert.equal(workerTurns, 1);
+
+  // The same provider now answers with one verdict: the resume re-judges the
+  // preserved work instead of spending a second worker attempt on it.
+  const resumed = await withCodexBinary(provider, () => resumeRun(blocked.runDir));
+  const after = nodeState(resumed);
+  assert.equal(after.status, "done", after.error?.message);
+  assert.equal((after.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, workerTurns, "the worker is never re-run");
+  assert.equal(after.attempt, 1, "a re-judge is adoption, not a new attempt");
+  assert.equal(after.previousAttempt, undefined, "a re-judge carries no previous-attempt section");
+  assert.equal(resumed.ok, true);
+});
+
+test("resume retries a failed node as attempt 2 with a bounded previous attempt section", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-attempt-two-"));
+  const path = writeContract(directory, fixture({
+    id: "retry-attempt-two-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ verification: [{ argv: ["false"] }] }),
+      gate: false,
+    }],
+  }));
+  const failed = await withFakeCodex(directory, "worker-fail", () => runContract(path));
+  assert.equal(nodeState(failed).status, "failed");
+  assert.equal(nodeState(failed).attempt, 1);
+  // A provider-level failure never reaches verification; patch in the shape a
+  // real declared-command failure would have persisted, to prove the section
+  // names the failing command when one is on disk.
+  const nodePath = join(failed.runDir, "nodes", "build.json");
+  const persistedNode = JSON.parse(readFileSync(nodePath, "utf8"));
+  persistedNode.verification = {
+    passed: false,
+    completed: true,
+    commands: [{ argv: ["false"], passed: false, attempts: [{ passed: false, stdout: "", stderr: "", error: null, exitCode: 1, signal: null, timedOut: false, durationMs: 1 }] }],
+  };
+  writeFileSync(nodePath, JSON.stringify(persistedNode, null, 2));
+
+  const provider = promptLoggingCodex(directory);
+  const resumed = await withCodexBinary(provider.executable, () => resumeRun(failed.runDir));
+  const after = nodeState(resumed);
+  assert.equal(after.attempt, 2, "the retry is attempt plus one");
+  assert.equal(after.revisions, 0, "the gate-rejection counter is not touched by a retry");
+  const section = /** @type {string} */ (after.previousAttempt);
+  assert.ok(section.startsWith("## Previous attempt"), "the section carries the heading");
+  assert.match(section, /Attempt 1 failed; this is attempt 2/u);
+  assert.match(section, /Error: provider_error/u);
+  assert.match(section, /Failing verification:\n- false/u, "the failing verification command is named");
+  assert.ok(Buffer.byteLength(section, "utf8") <= 8 * 1024, "the whole section stays within 8 KiB");
+  const prompt = readFileSync(provider.log, "utf8");
+  assert.match(prompt, /## Previous attempt[\s\S]*Error: provider_error/u, "the regenerated worker prompt carries the section");
+});
+
+test("resume retries stalled and canceled nodes in place", async () => {
+  for (const [status, code] of [["stalled", "progress_stalled"], ["canceled", "canceled"]]) {
+    const directory = mkdtempSync(join(tmpdir(), `retry-${status}-`));
+    const path = writeContract(directory, fixture({ id: `retry-${status}-run`, pollIntervalMs: 10 }));
+    const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+    persistFailure(runDir, "build", { status, code });
+    const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+    const state = nodeState(resumed);
+    assert.equal(state.status, "done", state.error?.message);
+    assert.equal(state.attempt, 2, `a ${status} node is re-dispatched as attempt plus one`);
+    assert.match(/** @type {string} */ (state.previousAttempt), new RegExp(`Error: ${code}`, "u"), `the ${status} failure travels with the retry`);
+  }
+});
+
+test("resume retries a dependency_failed node once its dependency is retried", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-dependency-"));
+  const path = writeContract(directory, fixture({
+    id: "retry-dependency-run",
+    pollIntervalMs: 10,
+    nodes: [
+      { id: "first", type: "backend", taskPacket: packet({ objective: "First" }), gate: false },
+      { id: "second", type: "backend", taskPacket: packet({ objective: "Second" }), dependsOn: ["first"], gate: false },
+    ],
+  }));
+  const failed = await withFakeCodex(directory, "worker-fail", () => runContract(path));
+  assert.equal(nodeState(failed, "first").status, "failed");
+  assert.equal(nodeState(failed, "second").status, "blocked");
+  assert.equal(nodeState(failed, "second").error?.code, "dependency_failed");
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(failed.runDir));
+  assert.equal(resumed.ok, true);
+  assert.equal(nodeState(resumed, "first").status, "done");
+  assert.equal(nodeState(resumed, "first").attempt, 2);
+  assert.equal(nodeState(resumed, "second").status, "done");
+  assert.equal(nodeState(resumed, "second").attempt, 1, "the dependant is dispatched for its first attempt");
+  assert.equal(nodeState(resumed, "second").previousAttempt, undefined, "a node that never ran carries no failure");
+});
+
+test("resume --node limits the retry to the node and the nodes that depend on it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-node-target-"));
+  const path = writeContract(directory, fixture({
+    id: "retry-node-target-run",
+    pollIntervalMs: 10,
+    nodes: [
+      { id: "alpha", type: "backend", taskPacket: packet({ objective: "Alpha" }), gate: false },
+      { id: "beta", type: "backend", taskPacket: packet({ objective: "Beta" }), gate: false },
+      { id: "gamma", type: "backend", taskPacket: packet({ objective: "Gamma" }), dependsOn: ["beta"], gate: false },
+    ],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  // alpha is an unrelated failure elsewhere in the same run, not a dependency
+  // of the targeted node: it must stay untouched by a `--node beta` retry.
+  persistFailure(runDir, "alpha", { status: "failed", code: "provider_error", attempt: 1 });
+  persistFailure(runDir, "beta", { status: "failed", code: "provider_error", attempt: 1 });
+  persistFailure(runDir, "gamma", { status: "blocked", code: "dependency_failed", blockedBy: ["beta"] });
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir, { node: "beta" }));
+  const alpha = nodeState(resumed, "alpha");
+  assert.equal(alpha.status, "failed", "a node outside the target keeps its failure");
+  assert.equal(alpha.attempt, 1, "no attempt is spent outside the target");
+  assert.equal(nodeState(resumed, "beta").status, "done", "the targeted node is retried");
+  assert.equal(nodeState(resumed, "beta").attempt, 2);
+  assert.equal(nodeState(resumed, "gamma").status, "done", "a dependant of the target is retried with it");
+  assert.equal(resumed.ok, false, "the untouched failure keeps the run in attention");
+});
+
+test("resume leaves unknown_effect_reconciled alone and retries it only with --reconcile", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-reconcile-"));
+  const path = writeContract(directory, fixture({ id: "retry-reconcile-run", pollIntervalMs: 10 }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  persistFailure(runDir, "build", { status: "blocked", code: "unknown_effect_reconciled" });
+
+  const left = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  assert.equal(nodeState(left).status, "blocked", "the stop boundary holds without the flag");
+  assert.equal(nodeState(left).error?.code, "unknown_effect_reconciled");
+  assert.equal(nodeState(left).attempt, 1, "the boundary is not crossed by an ordinary resume");
+  assert.ok(!recoveryDecisions(runDir).includes("reconcile_acknowledged"), "no acknowledgement is invented");
+
+  const reconciled = await withFakeCodex(directory, "pass", () => resumeRun(runDir, { reconcile: "build" }));
+  assert.equal(nodeState(reconciled).status, "done", nodeState(reconciled).error?.message);
+  assert.ok(recoveryDecisions(runDir).includes("reconcile_acknowledged"), "the acknowledgement is recorded in events.jsonl");
+});
+
+test("resume reports an exhausted budget as attention and continues with --max-input-tokens", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-budget-"));
+  const path = writeContract(directory, fixture({
+    id: "retry-budget-run",
+    pollIntervalMs: 10,
+    maxInputTokens: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const failed = await withFakeCodex(directory, "failure-with-usage", () => runContract(path));
+  assert.equal(nodeState(failed).status, "failed");
+  // The run already spent its ceiling: the contract on disk records a budget
+  // the recorded usage has exhausted.
+  const contractPath = join(failed.runDir, "contract.json");
+  const persisted = JSON.parse(readFileSync(contractPath, "utf8"));
+  persisted.maxInputTokens = 1;
+  writeFileSync(contractPath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+  const refused = await withFakeCodex(directory, "pass", () => resumeRun(failed.runDir));
+  assert.equal(refused.ok, false, "an exhausted budget is attention, not a silent continuation");
+  assert.equal(nodeState(refused).status, "failed", "nothing is re-dispatched");
+  assert.equal(nodeState(refused).attempt, 1, "no attempt is spent against an exhausted budget");
+  assert.equal(runMetadata(failed.runDir).budgetExtension, undefined, "no extension is recorded without the flag");
+  assert.match(readFileSync(join(failed.runDir, "findings.json"), "utf8"), /budget/u);
+
+  const extended = await withFakeCodex(directory, "pass", () => resumeRun(failed.runDir, { maxInputTokens: 1000 }));
+  assert.equal(extended.ok, true);
+  assert.equal(nodeState(extended).status, "done");
+  assert.equal(nodeState(extended).attempt, 2);
+  const extension = runMetadata(failed.runDir).budgetExtension;
+  assert.equal(extension?.previous, 1, "the extension records the previous ceiling");
+  assert.equal(extension?.maxInputTokens, 1000, "the extension records the new ceiling");
+  assert.ok(extension?.at, "the extension records a timestamp");
+});
+
+test("resume accepts a descendant head and records it on the run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "retry-descendant-head-"));
+  const work = join(directory, "work");
+  mkdirSync(work);
+  writeFileSync(join(work, "README.md"), "baseline\n");
+  initializeGit(work);
+  const path = writeContract(directory, fixture({
+    id: "retry-descendant-head-run",
+    cwd: "work",
+    pollIntervalMs: 10,
+    nodes: [{ id: "build", type: "backend", taskPacket: packet({ readFiles: ["README.md"], writeFiles: ["README.md"] }), gate: false }],
+  }));
+  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
+  const recorded = runMetadata(runDir).sourceIdentity.gitHead;
+  assert.ok(recorded, "the run records the head it started from");
+  orphan(runDir, "build");
+  // A worker or the orchestrator committed between attempts: the branch moved
+  // on from the recorded head, which is what a retry in place expects.
+  execFileSync("git", ["-C", work, "-c", "user.email=runner@example.test", "-c", "user.name=runner", "-c", "commit.gpgSign=false", "commit", "-q", "--allow-empty", "-m", "committed between attempts"]);
+  const head = execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  assert.notEqual(head, recorded);
+
+  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
+  assert.equal(resumed.ok, true);
+  assert.equal(nodeState(resumed).status, "done");
+  assert.equal(runMetadata(runDir).sourceIdentity.gitHead, head, "the new head is recorded on the run");
 });

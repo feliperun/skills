@@ -358,6 +358,16 @@ packet. Packets carry a `packetHash` that the runner validates on load; regenera
 the contract when a scoped file changes, and treat the stored contract as the
 durable execution record.
 
+An `autonomous` packet declares `writeRoots` instead of `writeFiles`: whole-repo
+read, write bounded to the listed directories. A `writeRoots` entry that names an
+existing regular file authorizes exactly that path; a directory entry covers
+itself and everything beneath it. Scope is a review concern, not a gate: an
+attempt whose worker result and controller verification both pass keeps its
+unexpected writes as an advisory finding (`scopeFindings`, shown to the judge and
+as the node note in `STATUS.md` and `status --json`) and reaches `done`
+exactly as a clean attempt would; only a failed verification turns unexpected
+writes into part of the failure.
+
 ## Worker results
 
 Every worker ends with exactly one structured worker-result object as the only
@@ -622,6 +632,8 @@ Terminal states are `done`, `no-op`, `blocked`, `failed`, `exhausted`, `stalled`
 `gate: false` skips review. A gate object enables review and accepts:
 
 - `runtime`: optional judge runtime override.
+- `review`: `none`, `advisory` or `blocking`; omitted is `advisory`, and
+  `gate: false` is `none`.
 - `failOn`: severities that cause retry or failure; default `['critical']`.
 - `maxRevisions`: retries after the first rejected attempt; default `1`.
 
@@ -631,14 +643,35 @@ lost attempts to controller deaths still receives the revision it was
 contracted for. The node state records `attempt` (worker starts, used for log
 generations) separately from `revisions` (gate rejections consumed).
 
-Findings below the configured threshold remain recorded in node state but are advisory.
+`review` decides what a verdict can do to the node. `advisory` — the default —
+records the verdict, its findings and `maxSeverity`, appends a `gate.advisory`
+event, and still settles `done` on the node's deterministic verification: it
+never consumes a revision and never re-dispatches the worker, and findings
+below the threshold are advisory exactly as before. `blocking` is the previous
+behaviour, findings at or above `failOn` re-dispatching the node within
+`maxRevisions`. `none` never dispatches a judge and settles the checklist
+mechanically. Validation keeps a blocking review honest: a `blocking` gate
+whose `failOn` omits `major` is rejected, because it could never reject a
+major, and any `failOn` listing `major` without `critical` is rejected too,
+because the gate tests exact membership and would let a critical through.
 
 Run deterministic repository checks before invoking a judge. Judge output is a
 strict JSON object: `pass` is valid only when `findings` is empty and
 `maxSeverity` is `none`; any non-empty findings list uses `fail`, even when all
 findings are below `failOn` and therefore do not trigger a revision. For Codex
 judges, normalization selects the last parseable JSON agent message rather than
-an unrelated trailing prose message.
+an unrelated trailing prose message, and counts the verdict-shaped agent
+messages it saw: a judge that returned two of them, or none, or that died
+before its terminal envelope, or that was killed on its wall clock, is a
+review-protocol defect, not a verdict. One defect earns one bounded re-ask, the
+same machinery an uncited rejection spends. When the re-ask fails too, advisory
+review completes the node `done` with `gate.verdict` `invalid_judge_output` and
+an attention note, while blocking review marks the node `blocked` with
+`judge_unavailable` and leaves the accepted worker result, the verification
+records and the gate state on disk exactly as they are for a node awaiting its
+judge, so `resume` re-judges the work instead of re-running it. Blocking review
+never silently passes, and a review that never arbitrated never fails a node
+whose verification passed.
 
 Evidence-producing checks must either use unique temporary/output paths under
 concurrency or run serially. Re-run the deterministic command before accepting
@@ -663,13 +696,24 @@ tree. Point a command proof at the narrow check that proves the item, and let
 the contract-level `finalVerification` carry the expensive suite — it runs
 from the controller, outside the worker sandbox and outside that cap.
 
+**A proof that names a verification entry runs nothing.**
+`proof: {kind: "verification", ref: 0}` reuses the result the controller
+already recorded for that `verification` command on this attempt — pass or
+fail, with its output — so an item proven by the node's own verification costs
+no second execution. The reference is positional, and it is never recovered by
+comparing command strings: a joined argv loses argument boundaries and shell
+semantics, so `printf %s 'value; false'` exits 0 as an argv and 1 as a shell
+string. `command` proofs still execute and still pay the ceiling above.
+
 **`failOn: ["critical"]` is close to no gate at all.** A judge working at
 `major` — which is what the ones used here do — will fail a node repeatedly
 without ever reaching `critical`, so with `failOn: ["critical"]` every one of
 those findings is advisory and the node reaches `done`. Two independent
 campaigns hit this: one approved nine majors in a single phase, the other
 shipped a fail-closed regression that had been described in a major. Use
-`failOn: ["major"]` unless there is a stated reason not to.
+`failOn: ["major"]` unless there is a stated reason not to; validation now
+rejects a `blocking` gate without `major` in `failOn`, and any `failOn` that
+lists `major` without `critical`.
 
 **A worker reads only inside the worktree.** The `claude` driver passes no
 `--add-dir`, and no contract field grants one, so an instruction naming an
@@ -677,6 +721,18 @@ absolute path outside `cwd` silently produces nothing — the worker scans, the
 read fails, and the node proceeds on whatever it inferred. Embed the text the
 node must read in the packet itself rather than pointing at a path outside the
 repository.
+
+**The scope gate will not fail a green attempt over an undeclared write.**
+Enumerating every path a task touches is the hardest part of authoring a
+packet, and it is done once at plan time with no feedback; an attempt whose
+worker result and controller verification both pass keeps that mismatch as an
+advisory `scopeFindings` entry instead of a terminal `unexpected_write`. Only
+a failed verification still turns the same unexpected paths into part of the
+error. The finding is not cosmetic: the judge prompt gains a `Scope findings`
+section listing the paths, and `STATUS.md` and `status --json` lead the node
+note with `scope: N unexpected paths` (the JSON also carries the paths as
+`scopeFindings`). Do not rely on the scope gate to catch a change outside the
+packet's intent — that is now the judge's job, not the controller's.
 
 ## Run artifacts
 
@@ -704,10 +760,13 @@ written at each settled worker boundary. Both are state, not diagnostics.
 
 When a run finishes with any non-done node, the controller writes
 `findings.json`: a consolidated snapshot with per-node status, error,
-gate findings, `blockedBy`, `missingContext`, and the `unexpectedPaths` that
-tripped a closed-scope failure — the single file a triage session reads
-instead of loading run state. Nodes remain the source of truth;
-a resume that later drives the run fully done removes the artifact.
+gate findings, `blockedBy`, `missingContext`, and the `unexpectedPaths` of an
+attempt whose scope violation coincided with a failed verification — the
+single file a triage session reads instead of loading run state. A scope
+violation on an attempt whose verification passed is not a failure: it never
+appears in `findings.json`, only as `scopeFindings` on the done node. Nodes
+remain the source of truth; a resume that later drives the run fully done
+removes the artifact.
 
 The stored `contract.json` inlines every task packet and drops generated
 prompts and `taskPacketFile`, so a run directory is a complete resumable
@@ -741,25 +800,54 @@ once per invocation and act only on terminal states.
 
 One contract covers one whole approved plan step as a batched multi-node DAG
 (`dependsOn`), authored in a single turn. Serial single-node contracts keep the
-control session active for the entire physical runtime; `validate` warns on a
-single-node contract because the only legitimate case is a targeted fix node
-after gate exhaustion.
+control session active for the entire physical runtime; a single-node contract
+is otherwise simply valid, and `validate` does not warn on it.
 
 ## Resume
 
-`resume <run-dir>` continues an interrupted run from its own directory.
+`resume <run-dir>` continues an interrupted run from its own directory. A retry
+is the same run and the same node, attempt plus one, with the failure attached;
+the packet is frozen per run and never changes.
 
-Every node that is not `done` is either adopted or restarted. Adoption reads
-the newest worker log of the node's current attempt and keeps the result when
-the stream itself proves the turn completed; a gated node is then re-judged
-rather than re-implemented, and a node carrying a failed verdict restarts from
-the retry prompt. Nodes with no usable worker output return to `pending`.
+Resume adopts completed work first. Adoption reads the newest worker log of the
+node's current attempt and keeps the result when the stream itself proves the
+turn completed, which is what recovers an orphaned provider process: the
+control plane can die while a detached worker keeps writing and finishes,
+leaving node state claiming `running` forever. A node `blocked` with
+`judge_unavailable` — an accepted worker result and verification records on
+disk, review unresolved — is re-judged from that preserved result and is never
+reset to `pending` or re-dispatched to a worker.
 
-Adoption is what recovers an orphaned provider process: the control plane can
-die while a detached worker keeps writing and finishes, which leaves node state
-claiming `running` forever. Resume converts that log into state instead of
-paying for the work twice. It does not adopt judge output — only the worker
-phase, which is the expensive one.
+Only then does resume re-dispatch ordinary failures. A node `failed`,
+`stalled`, `canceled`, exhausted by wall clock, or `blocked` with
+`dependency_failed` returns to `pending` and is dispatched as attempt plus one
+— attempt is the worker-start counter; revisions, the gate-rejection counter,
+is not reset. A node blocked with `dependency_failed` becomes pending only
+once the dependency it waited on is itself retried; otherwise it keeps its
+boundary and resume reports it as attention. `resume --node <id>` limits the
+retry to that node and the nodes that transitively depend on it.
+
+The regenerated worker prompt for a retried attempt appends a bounded
+`## Previous attempt` section: the prior error code and message, judge
+findings, scope findings if present, and the failing verification commands
+with a bounded output tail. The judge prompt for that attempt carries the same
+section under the same heading.
+
+Two states are stop boundaries that only an explicit flag crosses. A node
+`blocked` with `unknown_effect_reconciled` is re-dispatched only when resume is
+given `--reconcile <node-id>`, which records the acknowledgement in
+`events.jsonl`; without it resume lists the node as attention and leaves it
+untouched. When the run's cumulative ledger budget is exhausted, resume
+reports attention and exits non-zero unless `--max-input-tokens <n>` raises the
+contract-level ceiling; the extension is persisted in `run.json` with the
+previous value, the new value, and a timestamp.
+
+Resume accepts a current `HEAD` that is a descendant of the recorded `gitHead`
+— workers and the orchestrator commit between attempts, so a retry in place
+expects the branch to have moved on — and records the new head; a
+non-descendant `HEAD` is still refused as drift. A `dirtyTreeFingerprint`
+mismatch is only a warning surfaced in status, not a refusal, for the same
+reason.
 
 The stored `contract.json` round-trips through validation on resume: the
 internal disabled-gate shape `{"enabled": false}` stays disabled, so a node

@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
 import { parseJudge, retryPrompt } from "../scripts/lib.mjs";
 import { mechanicalVerdict } from "../scripts/judge-gate.mjs";
-import { captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands } from "../scripts/verification.mjs";
+import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands, validateWorkspaceScopeBoundary } from "../scripts/verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../scripts/worker-result.mjs";
 
 /** @param {string} directory */
@@ -362,6 +362,42 @@ test("scope exact files and roots respect prefix boundaries", () => {
   assert.deepEqual(exact.unexpectedPaths, ["src/foobar/file.txt"]);
   const root = compareWorkspaceSnapshot(before, cwd, { files: [], roots: ["src/foo"] });
   assert.deepEqual(root.unexpectedPaths, ["src/foobar/file.txt"]);
+});
+
+/** A boundary is always re-validated against the scope that declared it.
+ * @param {import("../scripts/verification.mjs").WorkspaceScopeBoundary} boundary
+ * @returns {import("../scripts/verification.mjs").WorkspaceScope} */
+function declared(boundary) {
+  return { files: [], roots: ["docs/NOTES.md"], boundary };
+}
+
+test("a scope root that names a regular file authorizes exactly that path", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "runner-verification-file-root-"));
+  mkdirSync(join(cwd, "docs"));
+  writeFileSync(join(cwd, "docs", "NOTES.md"), "before");
+  writeFileSync(join(cwd, "sibling.md"), "before");
+  initializeGit(cwd);
+  const boundary = captureWorkspaceScope(cwd, { files: [], roots: ["docs/NOTES.md"] });
+  assert.deepEqual(boundary.fileRoots, ["docs/NOTES.md"]);
+  assert.throws(
+    () => validateWorkspaceScopeBoundary(cwd, { ...boundary, fileRoots: ["docs/OTHER.md"] }),
+    /file roots must be declared roots/u,
+  );
+
+  const before = captureWorkspaceSnapshot(cwd);
+  writeFileSync(join(cwd, "docs", "NOTES.md"), "after");
+  assert.deepEqual(compareWorkspaceSnapshot(before, cwd, declared(boundary)).unexpectedPaths, []);
+
+  // Replacing the declared file with a same-named directory authorizes only
+  // that path: what is beneath it stays unexpected, unlike a directory root.
+  rmSync(join(cwd, "docs", "NOTES.md"));
+  mkdirSync(join(cwd, "docs", "NOTES.md"));
+  writeFileSync(join(cwd, "docs", "NOTES.md", "nested.txt"), "inside");
+  writeFileSync(join(cwd, "sibling.md"), "after");
+  assert.deepEqual(
+    compareWorkspaceSnapshot(before, cwd, declared(boundary)).unexpectedPaths,
+    ["docs/NOTES.md/nested.txt", "sibling.md"],
+  );
 });
 
 test("workspace snapshots reject paths over the hard byte limit", (t) => {

@@ -228,8 +228,10 @@ function validateWriteRoot(path, label, cwd) {
   if (!anchor) throw new TypeError(`${label} has no containing directory inside cwd`);
   const realAnchor = realpathSync(anchor);
   if (!pathInside(realAnchor, realCwd)) throw new TypeError(`${label} escapes cwd`);
-  if (existsSync(absolute) && !statSync(absolute).isDirectory()) {
-    throw new TypeError(`${label} must name a directory: ${path}`);
+  // A file root matches exactly that path in the scope gate; a directory
+  // root matches itself and everything beneath it.
+  if (existsSync(absolute) && !statSync(absolute).isDirectory() && !statSync(absolute).isFile()) {
+    throw new TypeError(`${label} must name a directory or an existing file: ${path}`);
   }
   if (!existsSync(absolute) && !statSync(anchor).isDirectory()) {
     throw new TypeError(`${label} must name a directory: ${path}`);

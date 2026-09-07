@@ -10,6 +10,9 @@ import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 import { validateBudgetDecision, validateBudgetProfile, validateBudgetState } from "./budget.mjs";
 import { validateDefinitionOfDone } from "./definition-of-done.mjs";
 import { validateFinalVerification, validateVerificationSnapshot } from "./final-verification.mjs";
+import { MAX_SCOPE_FINDING_PATHS } from "./scope-findings.mjs";
+import { REVIEW_MODES } from "./review-modes.mjs";
+import { VERIFICATION_LIMITS } from "./verification.mjs";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
@@ -29,14 +32,16 @@ const RULE_FIELDS = new Set(["match", "runtime", "backoffSec"]);
 const NODE_FIELDS = new Set([
   "id", "type", "phase", "runtime", "dependsOn", "taskPacket", "taskPacketFile", "prompt", "promptFile",
   "definitionOfDone", "gate", "timeoutSec", "maxInputTokens", "maxCostUsd", "progressPolicy",
-  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy", "budgetProfile", "targetedFix",
+  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy", "budgetProfile",
 ]);
 const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
   "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
   "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities", "costRank",
 ]);
-const GATE_FIELDS = new Set(["enabled", "runtime", "failOn", "maxRevisions", "requiredCapabilities"]);
+const GATE_FIELDS = new Set(["enabled", "runtime", "review", "failOn", "maxRevisions", "requiredCapabilities"]);
+const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
+const GATE_VERDICTS = new Set(["pass", "fail", "invalid_judge_output"]);
 const MATCH_FIELDS = new Set(["id", "type", "runtime", "role", "status", "errorCode", "currentRuntime"]);
 const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "glm", "exec-jsonl", "replay"]);
 const NODE_STATUSES = new Set(["pending", "running", "done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
@@ -70,18 +75,18 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{match: RuntimeRuleMatch, runtime: string, backoffSec?: number}} ValidatedRuntimeRule */
 
-/** @typedef {{enabled: boolean, runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
+/** @typedef {{enabled: boolean, review?: ("none"|"advisory"|"blocking"), runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
 /** @typedef {{graceSec: number, intervalSec: number, maxDryHeartbeats: number}} ProgressPolicy */
 /** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
-/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never", targetedFix?: boolean}} ValidatedNode */
+/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
 
 /** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, runtimeRules: ValidatedRuntimeRule[], nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
 /** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
 /** @typedef {{severity: "minor"|"major"|"critical", description: string, evidence: string}} Finding */
-/** @typedef {{verdict: "pass"|"fail", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: Finding[]}} GateResult */
+/** @typedef {{verdict: "pass"|"fail"|"invalid_judge_output", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: Finding[]}} GateResult */
 /** @typedef {{code: string, message: string}} SnapshotError */
 /** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} Usage */
 /** @typedef {ValidatedRuntime & {id: string, capabilities: import("./drivers/index.mjs").DriverCapabilities}} RuntimeSnapshot */
@@ -91,16 +96,17 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{passed: boolean, commands?: VerificationCommandResult[], completed?: boolean, error?: string, attempts?: VerificationAttempt[]}} VerificationState */
 /** @typedef {{kind: "recovery"|"timeout"|"rotation", decision?: string, invocationId?: string, phase?: "worker"|"judge", result?: unknown, usage?: Usage, costUsd?: number|null, reason?: string, timeoutSec?: number, at?: string}} ExecutionOverride */
 /** @typedef {{literal: string, paths: string[]}} WorkspaceScopeOrigin */
-/** @typedef {{schemaVersion: 1, files: string[], roots: string[], fileOrigins: WorkspaceScopeOrigin[], rootOrigins: WorkspaceScopeOrigin[]}} WorkspaceScopeBoundary */
+/** @typedef {{schemaVersion: 1, files: string[], roots: string[], fileRoots?: string[], fileOrigins: WorkspaceScopeOrigin[], rootOrigins: WorkspaceScopeOrigin[]}} WorkspaceScopeBoundary */
 /** @typedef {{changedPaths: string[], unexpectedPaths: string[], changedPathCount: number, unexpectedPathCount: number, truncated: boolean, boundary?: WorkspaceScopeBoundary}} BoundedScope */
+/** @typedef {{unexpectedPaths: string[]}} ScopeFindings */
 /** @typedef {{at: string, role: "worker"|"judge", runtime: string, nextRuntime?: string, rule?: number, ruleIndex?: number, revision?: number, hop?: number, status?: NodeStatus, errorCode?: string, backoffSec?: number, backoffUntil?: string, usage?: Usage, costUsd?: number|null}} RoutingHistoryEntry */
 /** @typedef {{at: string, role: "worker"|"judge", runtime: string, nextRuntime?: string, rule?: number, ruleIndex?: number, revision?: number, hop?: number, reason: string, backoffSec?: number, backoffUntil?: string, usage?: Usage, costUsd?: number|null}} RoutingOverride */
 /** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
 /** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null}} WorktreeState */
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null}} NodeSnapshot */
-/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string}} RunMetadata */
-/** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
+/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[]}} RunMetadata */
+/** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
 
 /**
  * Validate and canonicalize the versioned contract. Runtime JSON remains
@@ -175,7 +181,6 @@ export function validateContract(raw, contractPath, options = {}) {
     ids.add(node.id);
     requireString(node.type, `nodes[${index}].type`);
     boundedString(node.phase, `nodes[${index}].phase`, 128);
-    if (node.targetedFix !== undefined && typeof node.targetedFix !== "boolean") throw new TypeError(`nodes[${index}].targetedFix must be a boolean`);
     if (node.runtime !== undefined) requireRuntime(runtimes, node.runtime, `nodes[${index}].runtime`);
     const dependsOn = node.dependsOn ?? [];
     if (!Array.isArray(dependsOn) || dependsOn.some((id) => typeof id !== "string")) {
@@ -195,12 +200,19 @@ export function validateContract(raw, contractPath, options = {}) {
     const definitionOfDone = validateDefinitionOfDone(
       node.definitionOfDone ?? [],
       `nodes[${index}].definitionOfDone`,
+      {
+        // A `verification` proof names an entry of this packet's verification
+        // array by position and reuses its recorded result at gate time; an
+        // entry the node snapshot cannot record could never be reused.
+        verificationCount: taskPacket.verification.length,
+        recordableCount: VERIFICATION_LIMITS.stateCommands,
+      },
     );
     const requiredCapabilities = validateCapabilityRequirements(
       /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (node.requiredCapabilities),
       `nodes[${index}].requiredCapabilities`,
     );
-    const gate = validateGate(node.gate, runtimes, index);
+    const gate = validateGate(node.gate, runtimes, index, /** @type {string} */ (node.id));
     const timeoutSec = node.timeoutSec === undefined
       ? undefined
       : positiveNumber(node.timeoutSec, `nodes[${index}].timeoutSec`);
@@ -254,9 +266,6 @@ export function validateContract(raw, contractPath, options = {}) {
   assertPhaseOrdering(nodes);
 
   const warnings = nodes.flatMap((node, index) => [...commandCoverageWarnings(node, index), ...unsnapshottedWriteWarnings(node, index, cwd)]);
-  if (nodes.length === 1 && nodes[0].targetedFix !== true) {
-    warnings.push("single-node contract: a plan step arrives as one batched multi-node DAG with dependsOn; single nodes are only for targeted fix nodes after gate exhaustion");
-  }
   return /** @type {ValidatedContract} */ ({
     ...raw,
     schemaVersion: /** @type {number} */ (raw.schemaVersion),
@@ -339,12 +348,36 @@ export function validateRunMetadata(value, options = {}) {
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "pid", "processStartToken", "startedAt", "sourceIdentity",
     "holderId", "leaseGeneration", "leaseAcquiredAt", "leaseRenewedAt", "leaseExpiresAt",
+    "budgetExtension", "identityWarnings",
   ]), "run metadata");
   validateMetadata(value, "run metadata");
   requireInteger(value.pid, "run metadata.pid");
   if (value.processStartToken !== undefined && value.processStartToken !== null) requireString(value.processStartToken, "run metadata.processStartToken");
   requireString(value.startedAt, "run metadata.startedAt");
   validateSourceIdentity(value.sourceIdentity, "run metadata.sourceIdentity", { kind: "run" });
+  // An exhausted run budget is extended only explicitly, and the extension is
+  // recorded on the run it raises the ceiling for (retry.mjs, rule 4).
+  if (value.budgetExtension !== undefined) {
+    const extension = /** @type {Record<string, unknown>} */ (value.budgetExtension);
+    assertObject(extension, "run metadata.budgetExtension");
+    rejectUnknown(extension, new Set(["previous", "maxInputTokens", "at"]), "run metadata.budgetExtension");
+    positiveInteger(extension.previous, "run metadata.budgetExtension.previous");
+    positiveInteger(extension.maxInputTokens, "run metadata.budgetExtension.maxInputTokens");
+    if (/** @type {number} */ (extension.maxInputTokens) <= /** @type {number} */ (extension.previous)) {
+      throw new TypeError("run metadata.budgetExtension.maxInputTokens must exceed previous");
+    }
+    requireTimestamp(extension.at, "run metadata.budgetExtension.at");
+  }
+  if (value.identityWarnings !== undefined) {
+    if (!Array.isArray(value.identityWarnings) || value.identityWarnings.length > 8) {
+      throw new TypeError("run metadata.identityWarnings must be an array of at most 8 strings");
+    }
+    for (const [index, warning] of value.identityWarnings.entries()) {
+      if (typeof warning !== "string" || !warning.trim() || Buffer.byteLength(warning, "utf8") > 1024) {
+        throw new TypeError(`run metadata.identityWarnings[${index}] must be a string of at most 1024 bytes`);
+      }
+    }
+  }
   if (options.requireLease) validateLeaseMetadata(value);
   if (options.requireSourceIdentity) validateCompleteSourceIdentity(/** @type {JsonObject} */ (value.sourceIdentity));
   return /** @type {RunMetadata} */ (value);
@@ -361,7 +394,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
     "schemaVersion", "contractVersion", "id", "type", "sourceIdentity", "packetHash", "status", "phase",
     "attempt", "revisions", "judgeFailures", "runtime", "blockedBy", "startedAt", "updatedAt", "result", "gate", "error", "usage",
     "costUsd", "routing", "progress", "worktree", "invocations", "executionOverrides", "verification", "scope",
-    "budgetDecision", "budgetState",
+    "scopeFindings", "budgetDecision", "budgetState", "review", "previousAttempt",
   ]), "node snapshot");
   validateMetadata(value, "node snapshot");
   requireId(value.id, "node snapshot.id");
@@ -371,6 +404,11 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   nonNegativeInteger(value.attempt, "node snapshot.attempt");
   nonNegativeInteger(value.revisions, "node snapshot.revisions");
   if (value.judgeFailures !== undefined) nonNegativeInteger(value.judgeFailures, "node snapshot.judgeFailures");
+  // The review mode that governed the attempt's gate, recorded so a status
+  // surface can tell an advisory finding from a below-threshold blocking one.
+  if (value.review !== undefined && !REVIEW_MODES.has(/** @type {string} */ (value.review))) {
+    throw new TypeError("node snapshot.review is invalid");
+  }
   requirePacketHash(value.packetHash, "node snapshot.packetHash");
   validateSourceIdentity(value.sourceIdentity, "node snapshot.sourceIdentity", { kind: "node" });
   const sourceIdentity = /** @type {JsonObject} */ (value.sourceIdentity);
@@ -402,6 +440,15 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   if (value.executionOverrides !== undefined) validateExecutionOverrides(value.executionOverrides, "node snapshot.executionOverrides");
   if (value.verification !== undefined && value.verification !== null) validateVerificationSnapshot(value.verification);
   if (value.scope !== undefined && value.scope !== null) validateScopeSnapshot(value.scope);
+  if (value.scopeFindings !== undefined && value.scopeFindings !== null) validateScopeFindings(value.scopeFindings);
+  // The bounded `Previous attempt` section a retry in place attaches to the
+  // re-dispatched attempt's worker and judge prompts (retry.mjs renders it).
+  if (value.previousAttempt !== undefined) {
+    if (typeof value.previousAttempt !== "string" || !value.previousAttempt.trim()) {
+      throw new TypeError("node snapshot.previousAttempt must be a non-empty string");
+    }
+    if (Buffer.byteLength(value.previousAttempt, "utf8") > 8 * 1024) throw new TypeError("node snapshot.previousAttempt exceeds 8192 bytes");
+  }
   if (expectedNode) validateSnapshotBinding(value, expectedNode);
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > 128 * 1024) throw new TypeError("node snapshot exceeds 131072 bytes");
   return /** @type {NodeSnapshot} */ (value);
@@ -414,13 +461,14 @@ export function validateNodeSnapshot(value, expectedNode = null) {
 export function validateEvent(value) {
   assertObject(value, "event");
   rejectUnknown(value, new Set([
-    "schemaVersion", "contractVersion", "at", "node", "from", "to", "phase", "attempt", "runtime",
+    "schemaVersion", "contractVersion", "at", "node", "from", "to", "type", "phase", "attempt", "runtime",
     "role", "status", "currentRuntime", "errorCode", "error", "verdict", "summary", "revisions", "sourceIdentity", "packetHash", "override", "recovery", "invocationId", "unexpectedPaths", "unexpectedPathCount", "budgetDecision", "budgetAction",
   ]), "event");
   validateMetadata(value, "event");
   requireString(value.at, "event.at");
   requireId(value.node, "event.node");
   requireString(value.to, "event.to");
+  if (value.type !== undefined) boundedString(value.type, "event.type", 128);
   if (value.role !== undefined && value.role !== "worker" && value.role !== "judge") throw new TypeError("event.role is invalid");
   if (value.status !== undefined && !NODE_STATUSES.has(/** @type {string} */ (value.status))) throw new TypeError("event.status is invalid");
   if (value.runtime !== undefined) requireId(value.runtime, "event.runtime");
@@ -526,9 +574,11 @@ function validateRuntimeValues(runtime, label, executableRequired) {
  * @param {unknown} gate
  * @param {Record<string, ValidatedRuntime>} runtimes
  * @param {number} index
+ * @param {string} nodeId
  * @returns {ValidatedGate}
  */
-function validateGate(gate, runtimes, index) {
+function validateGate(gate, runtimes, index, nodeId) {
+  const label = `nodes[${index}] (${nodeId})`;
   if (gate === false || gate === undefined) return { enabled: false };
   assertObject(gate, `nodes[${index}].gate`);
   rejectUnknown(gate, GATE_FIELDS, `nodes[${index}].gate`);
@@ -539,15 +589,32 @@ function validateGate(gate, runtimes, index) {
   if (gate.enabled !== undefined && gate.enabled !== true) {
     throw new TypeError(`nodes[${index}].gate.enabled must be true or false`);
   }
+  if (gate.review !== undefined && !GATE_REVIEWS.has(/** @type {string} */ (gate.review))) {
+    throw new TypeError(`nodes[${index}].gate.review must be none, advisory, or blocking`);
+  }
+  const review = /** @type {("none"|"advisory"|"blocking")} */ (gate.review ?? "advisory");
   if (gate.runtime !== undefined) requireRuntime(runtimes, gate.runtime, `nodes[${index}].gate.runtime`);
   const failOnValue = /** @type {unknown} */ (gate.failOn ?? ["critical"]);
   if (!Array.isArray(failOnValue) || failOnValue.some((value) => !["minor", "major", "critical"].includes(value))) {
     throw new TypeError(`nodes[${index}].gate.failOn contains an invalid severity`);
   }
+  const failOn = /** @type {("minor"|"major"|"critical")[]} */ (failOnValue);
+  // The runner compares the verdict severity against this set by exact
+  // membership, so `["major"]` admits a critical finding: the threshold set
+  // has to be closed downwards (TECH-SPEC lean, rule 2).
+  if (failOn.includes("major") && !failOn.includes("critical")) {
+    throw new TypeError(`${label}: gate.failOn lists major without critical, and the gate checks exact membership, so a critical finding would pass (TECH-SPEC lean, rule 2)`);
+  }
+  // A blocking review that never fails on a major can never reject one, so it
+  // is not a review at all. Advisory review ignores failOn and may declare any.
+  if (review === "blocking" && !failOn.includes("major")) {
+    throw new TypeError(`${label}: gate.review blocking requires major in gate.failOn (TECH-SPEC lean, rule 2)`);
+  }
   return {
     enabled: true,
+    review,
     runtime: /** @type {string|undefined} */ (gate.runtime),
-    failOn: /** @type {("minor"|"major"|"critical")[]} */ (failOnValue),
+    failOn,
     maxRevisions: nonNegativeInteger(gate.maxRevisions ?? 1, `nodes[${index}].gate.maxRevisions`),
     requiredCapabilities: validateCapabilityRequirements(
       /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (gate.requiredCapabilities),
@@ -930,9 +997,14 @@ function validateGateResult(value, label) {
   rejectUnknown(value, GATE_RESULT_FIELDS, label);
   const verdict = value.verdict;
   const maxSeverity = value.maxSeverity;
-  if (verdict !== "pass" && verdict !== "fail") throw new TypeError(`${label}.verdict is invalid`);
+  if (!GATE_VERDICTS.has(/** @type {string} */ (verdict))) throw new TypeError(`${label}.verdict is invalid`);
   if (!["none", "minor", "major", "critical"].includes(/** @type {string} */ (maxSeverity))) {
     throw new TypeError(`${label}.maxSeverity is invalid`);
+  }
+  // An invalid verdict is the record that the judge produced nothing usable:
+  // it carries no finding the node could be rejected with.
+  if (verdict === "invalid_judge_output" && (maxSeverity !== "none" || /** @type {unknown[]} */ (value.findings).length > 0)) {
+    throw new TypeError(`${label} with verdict invalid_judge_output records no findings`);
   }
   if (typeof value.summary !== "string") throw new TypeError(`${label}.summary must be a string`);
   if (Buffer.byteLength(value.summary, "utf8") > 4 * 1024) throw new TypeError(`${label}.summary exceeds 4096 bytes`);
@@ -961,7 +1033,9 @@ function validateGateResult(value, label) {
     if (rank[severityKey] > rank[/** @type {keyof typeof rank} */ (actualMax)]) actualMax = severityKey;
   }
   if (actualMax !== maxSeverity) throw new TypeError(`${label}.maxSeverity does not match findings`);
-  if ((verdict === "pass") !== (maxSeverity === "none")) {
+  // An invalid verdict is not a pass, yet it records no severity either: only a
+  // real arbitrated verdict is held to the pass/none pairing.
+  if (verdict !== "invalid_judge_output" && (verdict === "pass") !== (maxSeverity === "none")) {
     throw new TypeError(`${label}.verdict and maxSeverity are inconsistent`);
   }
 }
@@ -1108,16 +1182,39 @@ function validateScopeSnapshot(value) {
 }
 
 /**
+ * An advisory finding recorded when a completed attempt's controller
+ * verification passed despite unexpected workspace writes (TECH-SPEC lean,
+ * rule 1). Never a terminal state.
+ *
+ * @param {unknown} value
+ */
+function validateScopeFindings(value) {
+  assertObject(value, "node snapshot.scopeFindings");
+  rejectUnknown(value, new Set(["unexpectedPaths"]), "node snapshot.scopeFindings");
+  const paths = /** @type {unknown[]} */ (value.unexpectedPaths);
+  if (!Array.isArray(value.unexpectedPaths) || paths.length > MAX_SCOPE_FINDING_PATHS || paths.some((path) => typeof path !== "string")) {
+    throw new TypeError("node snapshot.scopeFindings.unexpectedPaths is invalid");
+  }
+  if (paths.some((path) => Buffer.byteLength(/** @type {string} */ (path), "utf8") > 1024)) {
+    throw new TypeError("node snapshot.scopeFindings.unexpectedPaths contains an oversized path");
+  }
+}
+
+/**
  * @param {unknown} value
  * @param {string} label
  */
 function validateScopeBoundarySnapshot(value, label) {
   assertObject(value, label);
-  rejectUnknown(value, new Set(["schemaVersion", "files", "roots", "fileOrigins", "rootOrigins"]), label);
+  rejectUnknown(value, new Set(["schemaVersion", "files", "roots", "fileRoots", "fileOrigins", "rootOrigins"]), label);
   if (value.schemaVersion !== 1 || !Array.isArray(value.files) || !Array.isArray(value.roots) || !Array.isArray(value.fileOrigins) || !Array.isArray(value.rootOrigins)) {
     throw new TypeError(`${label} is malformed`);
   }
-  const total = value.files.length + value.roots.length + value.fileOrigins.length + value.rootOrigins.length;
+  // Declared roots that named a regular file at capture time: they authorize
+  // exactly that path, never the paths beneath it.
+  const fileRoots = value.fileRoots ?? [];
+  if (!Array.isArray(fileRoots)) throw new TypeError(`${label}.fileRoots is invalid`);
+  const total = value.files.length + value.roots.length + fileRoots.length + value.fileOrigins.length + value.rootOrigins.length;
   if (total > 4096) throw new TypeError(`${label} is too large`);
   /** @param {unknown} path @param {string} pathLabel */
   const validPath = (path, pathLabel) => {
@@ -1128,8 +1225,11 @@ function validateScopeBoundarySnapshot(value, label) {
       throw new TypeError(`${pathLabel} contains an invalid path`);
     }
   };
-  for (const [kind, paths] of [["files", value.files], ["roots", value.roots]]) {
+  for (const [kind, paths] of [["files", value.files], ["roots", value.roots], ["fileRoots", fileRoots]]) {
     for (const path of /** @type {unknown[]} */ (paths)) validPath(path, `${label}.${kind}`);
+  }
+  for (const path of /** @type {unknown[]} */ (fileRoots)) {
+    if (!/** @type {unknown[]} */ (value.roots).includes(path)) throw new TypeError(`${label}.fileRoots must be declared roots`);
   }
   for (const [kind, origins] of [["fileOrigins", value.fileOrigins], ["rootOrigins", value.rootOrigins]]) {
     for (const [index, origin] of /** @type {unknown[]} */ (origins).entries()) {
