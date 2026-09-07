@@ -188,13 +188,19 @@ Seven rules replace the eighteen.
    `.runs/status.json` (pointer to the active run) are derived each tick for
    readers. No supervisor lease, heartbeat, liveness journal, outbox,
    projector or generation fencing.
-6. **Notify with receipts, session pulls.** On `node.terminal`,
-   `run.terminal` and `attention` the controller calls
+6. **Notify with receipts; actionable events wake the orchestrator.** On
+   `node.terminal`, `run.terminal` and `attention` the controller calls
    `INTENT_FACTORY_NOTIFY_BIN` with a one-line message and appends a receipt
    (`delivered` or `failed`, with the timestamp) to `notify.jsonl`; a failed
-   delivery is retried on the next ticks up to three times with backoff. The
-   control session reads `campaign sync` (journal event ids as the cursor)
-   when it wakes; nothing wakes it.
+   delivery is retried on the next ticks up to three times with backoff.
+   Progress never wakes the control session, but a terminal run, a node in
+   attention, an orphaned run and a campaign with no active run for twenty
+   minutes do: the session arms one persistent watcher per campaign
+   (`campaign watch --wake` from phase 2b; until then the harness monitor
+   running `watch-campaign.mjs`) and acts on each wake. The human channel is
+   a copy, never the only path back to the orchestrator: on 2026-09-06 the
+   Ford channel delivered every terminal event while the orchestrator slept
+   through 25 idle hours in a 27-hour campaign.
 7. **Docs fit in one sitting.** `SKILL.md` ≤ 6 KB, `references/contract.md`
    ≤ 20 KB, `references/operations.md` ≤ 10 KB. History lives under
    `docs/intent-factory/`.
@@ -384,7 +390,12 @@ forbid the canonical result file the controller designates under
   clock, first-attempt rate), refreshes the controller snapshot.
 - The control session checks status at most once per wake and acts only on
   terminal states or attention. Progress reaches the human through the notify
-  bin and the dashboard.
+  bin and the dashboard. The session keeps a persistent campaign watcher
+  armed for as long as the campaign is active and re-arms it after a restart;
+  every wake ends with the next step dispatched or the blocker recorded.
+- The orchestrator never edits the target tree while a run is active; docs,
+  spec and journal edits wait for the terminal state (the journal under
+  `.runs/` is outside the workspace snapshot and is the exception).
 - A retry is `resume`, never a new contract, from phase 0 onwards (phase 0
   itself may need one legacy take if `retry-in-place` is the node that
   fails).
