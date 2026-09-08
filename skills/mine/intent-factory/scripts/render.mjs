@@ -17,6 +17,9 @@ const POINTER_ATTENTION_CHARS = 80;
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
 /** @typedef {import("./contract.mjs").NodeStatus} NodeStatus */
 /** @typedef {Record<string, unknown>} JsonObject */
+/** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} StatusPayloadUsage */
+/** @typedef {{id: string, status: NodeStatus, phase: string|null, executionPhase: string|null, runtime: string|null, continuation: string, attempt: number, revisions: number, startedAt: string|null, updatedAt: string|null, usage: StatusPayloadUsage|null, costUsd: number|null, verdict: string|null, pendingHandoff: {runtime: string, reason: string}|null, note: string|null, scopeFindings: string[]|null, errorCode: string|null, blockedBy: string[]}} StatusPayloadNode */
+/** @typedef {{schemaVersion: 1, run: string, contractId: string, campaignId: string, goal: string, usage: {inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null}, controller: JsonObject, identityWarnings: string[], summary: string, nodes: StatusPayloadNode[]}} StatusPayload */
 
 const MARK = {
   pending: "[ ]",
@@ -31,43 +34,103 @@ const MARK = {
 };
 
 /**
+ * `status <run-dir>`: everything the operator needs, in the same order as
+ * the dashboard page (TECH-SPEC lean, section 4's last paragraph) —
+ * needs-you, now, nodes, cost. Every cell comes from the same payload
+ * `status --json` and the per-run `status.json` file emit
+ * (`buildStatusPayload`); `nodes` and `identityWarnings` from `loadRun` are
+ * used only for the two facts the payload does not carry: throwing on an
+ * invalid persisted snapshot, and `controllerStatus`'s lock read.
+ *
  * @param {string} runDir
  * @returns {string}
  */
 export function renderStatus(runDir) {
   const { contract, nodes, identityWarnings } = loadRun(runDir);
   const usage = readRunUsage(runDir);
-  const counts = new Map();
-  for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
-  const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
-  // The note carries every advisory marker a node earned (scope finding,
-  // review verdict, gate summary), so the cell holds the composed note whole.
-  const widths = [3, 24, 9, 28, 7, 64];
-  /** @type {(cells: unknown[]) => string} */
-  const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
+  const payload = buildStatusPayload(runDir, contract, nodes, identityWarnings, usage);
   const controller = controllerStatus(runDir, nodes);
-  const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`, "", `controller: ${controller.line}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
-  for (const node of nodes) {
-    const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
-    const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
-    const handoff = pendingHandoff(node);
-    const detail = statusNote(node) ?? "-";
-    // A scope finding leads the note and drops the phase boilerplate: the
-    // operator has to see it, and the fixed cell cannot hold both.
-    const baseNote = scopeFindingsNote(node.scopeFindings)
-      ? detail
-      : `phase ${planNode?.phase ?? "-"} · ${continuationMode(node)} · ${detail}`;
-    const note = handoff ? `handoff→${handoff.runtime} · ${baseNote}` : baseNote;
-    lines.push(row([MARK[node.status] ?? "[?]", node.id, node.status, runtime, node.attempt ?? 0, note]));
-  }
-  lines.push("```", "", "## Needs you", "");
-  const attention = nodes.filter((node) => !["pending", "running", "done"].includes(node.status));
-  const orphans = controller.status.state !== "active" ? nodes.filter((node) => node.status === "running").map((node) => node.id) : [];
+  const now = Date.now();
+
+  const lines = [`# run ${payload.run}`, "", payload.goal, "", `controller: ${controller.line}`, ""];
+
+  lines.push("## Needs you", "");
+  const attention = payload.nodes.filter((node) => !["pending", "running", "done", "no-op"].includes(node.status));
+  const orphans = controller.status.state !== "active" ? payload.nodes.filter((node) => node.status === "running").map((node) => node.id) : [];
   if (!attention.length && !orphans.length && !identityWarnings.length) lines.push("Nothing needs you right now.");
   if (orphans.length) lines.push(`- [>] the run process is gone while ${orphans.join(", ")} still claims to be running. Those nodes are orphans, not live work. Resume the run directory to adopt whatever their workers finished.`);
   for (const warning of identityWarnings) lines.push(`- [~] ${warning}`);
-  for (const node of attention) lines.push(`- ${MARK[node.status] ?? "[?]"} ${node.id}: ${node.gate?.summary ?? node.error?.message ?? node.status}`);
+  for (const node of attention) lines.push(`- ${MARK[node.status] ?? "[?]"} ${node.id}: ${node.note ?? node.status}`);
+  lines.push("", "## Now", "", nowLine(payload, now), "", "## Nodes", "");
+
+  const widths = [3, 24, 9, 3, 28, 8, 6, 6, 6, 10, 9, MAX_NOTE_LENGTH];
+  /** @type {(cells: unknown[]) => string} */
+  const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
+  lines.push("```", row(["", "NODE", "STATE", "TRY", "RUNTIME", "ELAPSED", "IN", "CACHE", "OUT", "USD", "VERDICT", "NOTE"]), row(widths.map((width) => "-".repeat(width))));
+  for (const node of payload.nodes) {
+    lines.push(row([
+      MARK[node.status] ?? "[?]",
+      node.id,
+      node.status,
+      node.attempt ?? 0,
+      node.runtime ?? "-",
+      formatElapsed(node, now),
+      compactTokens(node.usage?.inputTokens),
+      compactTokens(node.usage?.cacheReadInputTokens),
+      compactTokens(node.usage?.outputTokens),
+      compactCost(node.costUsd),
+      node.verdict ?? "-",
+      node.note ?? "-",
+    ]));
+  }
+  lines.push("```", "", "## Cost", "", `in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The node the operator should look at right now, formatted the same way
+ * the dashboard's now strip is (TECH-SPEC lean, section 4, item 1): the
+ * active node's elapsed time and cost so far, or an idle line once every
+ * node has settled.
+ *
+ * @param {StatusPayload} payload
+ * @param {number} now epoch ms
+ * @returns {string}
+ */
+function nowLine(payload, now) {
+  const active = activeStatusNode(payload.nodes);
+  if (active) return `now: ${active.id} ${active.status} (${formatElapsed(active, now)}) · ${active.runtime ?? "-"} · ${compactCost(active.costUsd)}`;
+  const allTerminal = payload.nodes.every((node) => ["done", "no-op"].includes(node.status));
+  return allTerminal ? `now: idle · run done · ${compactCost(payload.usage.costUsd)}` : "now: idle";
+}
+
+/**
+ * A node's wall-clock elapsed time: `startedAt` to `updatedAt` once it has
+ * settled into a terminal state, `startedAt` to `now` while it is still
+ * live (running, blocked or stalled), `-` before it ever started.
+ *
+ * @param {{status: string, startedAt: string|null, updatedAt: string|null}} node
+ * @param {number} now epoch ms
+ * @returns {string}
+ */
+function formatElapsed(node, now) {
+  if (!node.startedAt) return "-";
+  const start = Date.parse(node.startedAt);
+  if (!Number.isFinite(start)) return "-";
+  const terminal = ["done", "no-op", "failed", "exhausted", "canceled"].includes(node.status);
+  const end = terminal && node.updatedAt ? Date.parse(node.updatedAt) : now;
+  return formatDuration(Math.max(0, (Number.isFinite(end) ? end : now) - start));
+}
+
+/** @param {number} ms @returns {string} */
+function formatDuration(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
 }
 
 /**
@@ -93,7 +156,7 @@ export function renderStatusJson(runDir) {
  * @param {NodeSnapshot[]} nodes
  * @param {string[]} identityWarnings
  * @param {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null}} usage
- * @returns {JsonObject}
+ * @returns {StatusPayload}
  */
 function buildStatusPayload(runDir, contract, nodes, identityWarnings, usage) {
   const counts = new Map();
@@ -122,6 +185,11 @@ function buildStatusPayload(runDir, contract, nodes, identityWarnings, usage) {
       continuation: continuationMode(node),
       attempt: node.attempt,
       revisions: node.revisions,
+      startedAt: node.startedAt ?? null,
+      updatedAt: node.updatedAt ?? null,
+      usage: node.usage ? { inputTokens: node.usage.inputTokens ?? null, outputTokens: node.usage.outputTokens ?? null, cacheReadInputTokens: node.usage.cacheReadInputTokens ?? null } : null,
+      costUsd: typeof node.costUsd === "number" ? node.costUsd : null,
+      verdict: node.gate?.verdict ?? null,
       pendingHandoff: pendingHandoff(node),
       note: statusNote(node),
       scopeFindings: node.scopeFindings?.unexpectedPaths ?? null,
@@ -133,10 +201,13 @@ function buildStatusPayload(runDir, contract, nodes, identityWarnings, usage) {
 
 /**
  * The node the operator should look at right now: the first node that is
- * running, else the first in an attention state, else null.
+ * running, else the first in an attention state, else null. Generic over the
+ * node shape so both the raw `NodeSnapshot[]` (`derivePointer`) and the
+ * `status.json` payload's nodes (`nowLine`) share this one rule.
  *
- * @param {NodeSnapshot[]} nodes
- * @returns {NodeSnapshot|null}
+ * @template {{status: NodeStatus}} T
+ * @param {T[]} nodes
+ * @returns {T|null}
  */
 function activeStatusNode(nodes) {
   return nodes.find((node) => node.status === "running")
@@ -151,7 +222,10 @@ function activeStatusNode(nodes) {
  * cheap bounded read stays valid for any reader still built that way.
  * `generatedAt` is unix seconds, not ISO: the statusline's no-jq fallback has
  * no clock and only jq's builtin `now` can compute an age from a live clock,
- * and neither path needs a `date` process to read an integer.
+ * and neither path needs a `date` process to read an integer. `elapsedSec`
+ * is likewise precomputed here (as of `generatedAt`, not live) so the
+ * statusline never has to subtract two timestamps to show it — it just
+ * prints the integer, whichever reader it is.
  *
  * @param {JsonObject} payload the per-run status.json payload
  * @param {NodeSnapshot[]} nodes
@@ -161,8 +235,11 @@ function activeStatusNode(nodes) {
 function derivePointer(payload, nodes, generatedAt) {
   const active = activeStatusNode(nodes);
   const done = nodes.filter((node) => node.status === "done" || node.status === "no-op").length;
-  const attentionNode = nodes.find((node) => !["pending", "running", "done", "no-op"].includes(node.status));
+  const attentionNodes = nodes.filter((node) => !["pending", "running", "done", "no-op"].includes(node.status));
+  const attentionNode = attentionNodes[0] ?? null;
   const state = attentionNode ? "attention" : nodes.every((node) => ["done", "no-op"].includes(node.status)) ? "done" : "active";
+  const activeStartedAt = active?.startedAt ? Math.floor(Date.parse(active.startedAt) / 1000) : null;
+  const usage = /** @type {{costUsd: number|null}} */ (payload.usage);
   const pointer = {
     schemaVersion: 1,
     runId: payload.run,
@@ -171,6 +248,9 @@ function derivePointer(payload, nodes, generatedAt) {
     checkpoints: { done, total: nodes.length },
     activeNode: active ? truncateChars(active.id, POINTER_STRING_CHARS) : null,
     runtime: active?.runtime ? truncateChars(`${active.runtime.driver}/${active.runtime.model}`, POINTER_STRING_CHARS) : null,
+    elapsedSec: activeStartedAt !== null && Number.isFinite(activeStartedAt) ? Math.max(0, generatedAt - activeStartedAt) : null,
+    costUsd: typeof usage.costUsd === "number" ? Math.round(usage.costUsd * 100) / 100 : null,
+    needsYou: attentionNodes.length,
     attention: attentionNode ? truncateChars(statusNote(attentionNode) ?? attentionNode.status, POINTER_ATTENTION_CHARS) : null,
     generatedAt,
   };

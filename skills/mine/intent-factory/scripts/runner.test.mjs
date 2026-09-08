@@ -3237,7 +3237,7 @@ test("runner notifies node.terminal and run.terminal only, never a running node"
   assert.equal(receipts[0].nodeId, "build");
   assert.equal(receipts[0].nodeStatus, "done");
   assert.equal(receipts[0].errorCode, null);
-  assert.equal(receipts[1].summary, "run progress-emission-run terminal · 1/1 done");
+  assert.equal(receipts[1].summary, "run progress-emission-run done · 1/1 nodes");
   assert.deepEqual([receipts[1].done, receipts[1].total], [1, 1]);
 });
 

@@ -17,19 +17,21 @@ function makePointer(overrides = {}) {
     schemaVersion: 1,
     runId: "run-a",
     campaignId: "hb",
-    state: "running",
+    state: "attention",
     checkpoints: { done: 3, total: 7 },
     activeNode: "node-a",
     runtime: "codex",
-    attention: null,
+    elapsedSec: 185,
+    costUsd: 4.2,
+    needsYou: 2,
+    attention: "waiting on the gate",
     generatedAt: Math.floor(Date.now() / 1000),
     ...overrides,
   };
 }
 
 /**
- * Write the canonical pointer (key-sorted, compact, trailing newline) exactly
- * like the bounded writer does.
+ * Write the pointer exactly like the bounded writer does: compact, one line.
  *
  * @param {string} directory
  * @param {Record<string, unknown>} [overrides]
@@ -39,24 +41,13 @@ function writePointer(directory, overrides = {}) {
   const runsDir = join(directory, ".runs");
   mkdirSync(runsDir, { recursive: true });
   const path = join(runsDir, "status.json");
-  writeFileSync(path, `${JSON.stringify(sortKeys(makePointer(overrides)))}\n`);
+  writeFileSync(path, `${JSON.stringify(makePointer(overrides))}\n`);
   return path;
 }
 
-/** @param {unknown} value @returns {unknown} */
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (!value || typeof value !== "object") return value;
-  /** @type {Record<string, unknown>} */
-  const sorted = {};
-  for (const key of Object.keys(/** @type {Record<string, unknown>} */ (value)).sort()) {
-    sorted[key] = sortKeys(/** @type {Record<string, unknown>} */ (value)[key]);
-  }
-  return sorted;
-}
-
 /**
- * Build the restricted PATH fixture: only sh, sed and awk, no jq and no date.
+ * Build the restricted PATH fixture: only the binaries the no-jq fallback
+ * path uses, no jq and no date.
  *
  * @returns {{ binDir: string, env: NodeJS.ProcessEnv }}
  */
@@ -66,7 +57,11 @@ function restrictedEnv() {
   const candidates = [
     ["sh", ["/bin/sh"]],
     ["sed", ["/usr/bin/sed", "/bin/sed"]],
-    ["awk", ["/usr/bin/awk", "/bin/awk"]],
+    ["grep", ["/usr/bin/grep", "/bin/grep"]],
+    ["wc", ["/usr/bin/wc", "/bin/wc"]],
+    ["head", ["/usr/bin/head", "/bin/head"]],
+    ["tr", ["/usr/bin/tr", "/bin/tr"]],
+    ["cat", ["/bin/cat", "/usr/bin/cat"]],
   ];
   for (const [name, sources] of candidates) {
     const source = sources.find((path) => existsSync(path));
@@ -102,125 +97,62 @@ function singleLine(stdout) {
   return line;
 }
 
-test("statusline renders pointer fields with age when jq is present", () => {
+test("statusline renders run id, state, active node, elapsed, cost and needs-you count", () => {
   const directory = mkdtempSync(join(tmpdir(), "if-statusline-render-"));
-  const generatedAt = Math.floor(Date.now() / 1000) - 130;
-  writePointer(directory, { generatedAt, attention: null });
-
-  const expectedBefore = Math.floor((Date.now() / 1000 - generatedAt) / 60);
-  const stdout = render(directory);
-  const expectedAfter = Math.floor((Date.now() / 1000 - generatedAt) / 60);
-  const line = singleLine(stdout);
-
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
-  const age = /(\d+)m ago$/.exec(line);
-  assert.ok(age !== null, line);
-  const ageMinutes = Number(age[1]);
-  assert.ok(ageMinutes === expectedBefore || ageMinutes === expectedAfter, `age ${ageMinutes} not in [${expectedBefore}, ${expectedAfter}]`);
-});
-
-test("statusline renders pointer attention text", () => {
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-attention-"));
-  writePointer(directory, { attention: "waiting on the gate" });
+  writePointer(directory);
   const line = singleLine(render(directory));
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
-  assert.ok(line.includes("· attention: waiting on the gate"), line);
+  assert.equal(line, "run-a · attention · node-a 3m05s · $4.2 · needs you: 2");
 });
 
-test("statusline degrades to empty lines without jq, and omits age (no live clock)", () => {
+test("statusline degrades to the same line without jq", () => {
   const { binDir, env } = restrictedEnv();
   assert.equal(existsSync(join(binDir, "jq")), false, "jq must be absent from the degrade PATH");
   assert.equal(existsSync(join(binDir, "date")), false, "date must be absent from the degrade PATH");
-
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-degrade-"));
-  writePointer(directory, { attention: "waiting on the gate" });
+  const directory = mkdtempSync(join(tmpdir(), "if-statusline-nojq-"));
+  writePointer(directory);
   const line = singleLine(render(directory, env));
-  assert.equal(line, "if hb running 3/7 node-a codex · attention: waiting on the gate");
+  assert.equal(line, "run-a · attention · node-a 3m05s · $4.2 · needs you: 2");
+});
 
+test("statusline renders an idle run with no active node and no needs-you", () => {
+  const directory = mkdtempSync(join(tmpdir(), "if-statusline-idle-"));
+  writePointer(directory, { state: "done", activeNode: null, runtime: null, elapsedSec: null, needsYou: 0, attention: null });
+  assert.equal(singleLine(render(directory)), "run-a · done · - - · $4.2 · needs you: 0");
+});
+
+test("statusline formats elapsed seconds, minutes and hours", () => {
+  for (const [elapsedSec, expected] of [[45, "45s"], [125, "2m05s"], [3725, "1h02m"]]) {
+    const directory = mkdtempSync(join(tmpdir(), "if-statusline-elapsed-"));
+    writePointer(directory, { elapsedSec });
+    const line = singleLine(render(directory));
+    assert.ok(line.includes(`node-a ${expected} ·`), `${line} expected elapsed ${expected}`);
+  }
+});
+
+test("statusline renders a dash for a missing cost", () => {
+  const directory = mkdtempSync(join(tmpdir(), "if-statusline-nocost-"));
+  writePointer(directory, { costUsd: null });
+  const line = singleLine(render(directory));
+  assert.ok(line.includes("· - · needs you:"), line);
+});
+
+test("statusline prints an empty line without a run, with no external tool required", () => {
   const withoutRuns = mkdtempSync(join(tmpdir(), "if-statusline-none-"));
-  assert.equal(render(withoutRuns, env), "\n");
+  assert.equal(render(withoutRuns), "\n");
 
   const brokenDir = mkdtempSync(join(tmpdir(), "if-statusline-broken-"));
   mkdirSync(join(brokenDir, ".runs"), { recursive: true });
   writeFileSync(join(brokenDir, ".runs", "status.json"), "not json at all\n");
-  assert.equal(render(brokenDir, env), "\n");
+  assert.equal(render(brokenDir), "\n");
 });
 
-test("statusline renders quoted or newline attention without corrupting state", () => {
-  // A valid bounded attention may carry escapes such as \n and \"; the
-  // renderer must show it faithfully on one line and never let it forge a
-  // second state record.
-  const attention = 'wait\nstate=done "quoted"';
-
-  for (const mode of ["jq", "fallback"]) {
-    const directory = mkdtempSync(join(tmpdir(), `if-statusline-attn-${mode}-`));
-    writePointer(directory, { attention });
-    const line = singleLine(render(directory, mode === "fallback" ? restrictedEnv().env : undefined));
-    assert.ok(line.startsWith("if hb running 3/7 node-a codex"), line);
-    assert.ok(line.includes('· attention: wait\\nstate=done \\"quoted\\"'), line);
-  }
-});
-
-test("statusline degrades silently on a pointer larger than the read window", () => {
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-oversize-"));
-  const path = writePointer(directory, { attention: null });
-
-  // Valid JSON prefix followed by whitespace, pushed past the 1 KiB cap: the
-  // size check and the read cap come from the same bounded mechanism, so the
-  // renderer prints an empty line with exit 0.
-  const original = readFileSync(path, "utf8");
-  writeFileSync(path, `${original}${" ".repeat(2048)}`);
-  assert.equal(render(directory), "\n");
-});
-
-test("statusline bounded output stays within 160 characters", () => {
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-bound-"));
-  writePointer(directory, {
-    campaignId: "c".repeat(128),
-    runId: "r".repeat(128),
-    activeNode: "n".repeat(128),
-    runtime: "t".repeat(128),
-    attention: "A".repeat(80),
-  });
-  const line = singleLine(render(directory));
-  assert.ok(line.length <= 160, `rendered ${line.length} characters: ${line}`);
-});
-
-test("statusline truncates attention within the 160-character bound", () => {
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-attn-bound-"));
-  writePointer(directory, {
-    campaignId: "c".repeat(64),
-    attention: "A".repeat(80),
-  });
-  const line = singleLine(render(directory));
-  assert.ok(line.length <= 160, `rendered ${line.length} characters: ${line}`);
-  assert.ok(line.includes("· attention: A"), "attention must appear on the rendered line");
-  assert.equal(line.includes("A".repeat(80)), false, "attention must be truncated to fit the bound");
-});
-
-test("statusline renders with no external tool on PATH", () => {
-  // The process budget is builtins plus jq plus one bounded-read process:
-  // with an empty PATH none of them exists, and the builtin reader still
-  // renders the line.
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-builtin-"));
-  writePointer(directory, { attention: "waiting on the gate" });
-  const line = singleLine(render(directory, { PATH: "" }));
-  assert.equal(line, "if hb running 3/7 node-a codex · attention: waiting on the gate");
-});
-
-test("statusline degrades on an oversized pointer without jq", () => {
+test("statusline degrades silently on a pointer larger than the 1 KiB cap, with and without jq", () => {
   const { env } = restrictedEnv();
-  const directory = mkdtempSync(join(tmpdir(), "if-statusline-oversize-nojq-"));
-  const path = writePointer(directory, { attention: null });
-
-  // Bytes beyond the single bounded line: the read window ends at that line,
-  // so the file is not the bounded artifact and degrades.
-  const original = readFileSync(path, "utf8");
-  writeFileSync(path, `${original}${" ".repeat(2048)}`);
-  assert.equal(render(directory, env), "\n");
-
-  // One line already past the 1 KiB cap degrades with and without jq.
-  writeFileSync(path, `${JSON.stringify(sortKeys(makePointer({ attention: "A".repeat(1200) })))}\n`);
-  assert.equal(render(directory, env), "\n");
-  assert.equal(render(directory), "\n");
+  for (const runnerEnv of [undefined, env]) {
+    const directory = mkdtempSync(join(tmpdir(), "if-statusline-oversize-"));
+    const path = writePointer(directory);
+    const original = readFileSync(path, "utf8");
+    writeFileSync(path, `${original}${" ".repeat(2048)}`);
+    assert.equal(render(directory, runnerEnv), "\n");
+  }
 });

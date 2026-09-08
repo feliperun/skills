@@ -12,7 +12,7 @@
  */
 
 import { spawn as defaultSpawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMacosNotifier } from "./os-macos.mjs";
 
@@ -26,13 +26,18 @@ export const DEFAULT_BACKOFF_MS = [5_000, 30_000];
 const SUMMARY_CHARS = 200;
 
 /** @typedef {Record<string, unknown>} JsonObject */
-/** @typedef {{type: "node.terminal"|"run.terminal"|"attention", runId: string, campaignId?: string|null, nodeId?: string|null, status?: string|null, attempt?: number|null, errorCode?: string|null, done?: number|null, total?: number|null, dedupeKey?: string|null}} NotifyEvent */
+/** @typedef {{type: "node.terminal"|"run.terminal"|"attention", runId: string, campaignId?: string|null, nodeId?: string|null, status?: string|null, attempt?: number|null, errorCode?: string|null, done?: number|null, total?: number|null, dedupeKey?: string|null, runDir?: string|null, costUsd?: number|null}} NotifyEvent */
 /** @typedef {{ok: boolean, error?: string, noTransport?: boolean}} DeliveryResult */
 
 /**
  * Render the fixed one-line message for an event, from counters and
- * identifiers only (node id, run id, state, attempt, error code, done/total),
- * never from model text.
+ * identifiers only (node id, run id or directory, state, attempt, error
+ * code, done/total, cost), never from model text:
+ *   `node <id> failed · run <id> · attempt 2 · verification_failed · resume <run-dir>`
+ *   `run <id> done · 3/3 nodes · $4.21`
+ *   `node <id> needs you · run <id> · <error code>`
+ * `runDir` and `costUsd`, when present on the event, come from the run's own
+ * `status.json` (`NotifyQueue.enqueue` reads it) — never from the model.
  *
  * @param {NotifyEvent} event
  * @returns {string}
@@ -41,21 +46,43 @@ export function renderNotification(event) {
   const runId = event.runId ?? "-";
   switch (event.type) {
     case "node.terminal": {
+      const ok = event.status === "done" || event.status === "no-op";
       const errorPart = event.errorCode ? ` · ${event.errorCode}` : "";
-      return truncate(`node ${event.nodeId ?? "-"} ${event.status ?? "-"} · run ${runId} · attempt ${event.attempt ?? 0}${errorPart}`);
+      const resumePart = !ok && event.runDir ? ` · resume ${event.runDir}` : "";
+      return truncate(`node ${event.nodeId ?? "-"} ${event.status ?? "-"} · run ${runId} · attempt ${event.attempt ?? 0}${errorPart}${resumePart}`);
     }
     case "run.terminal": {
       const done = event.done ?? 0;
       const total = event.total ?? 0;
-      return truncate(`run ${runId} terminal · ${done}/${total} done${total > done ? " · attention" : ""}`);
+      const state = total > done ? "attention" : "done";
+      const costPart = typeof event.costUsd === "number" ? ` · $${event.costUsd.toFixed(2)}` : "";
+      return truncate(`run ${runId} ${state} · ${done}/${total} nodes${costPart}`);
     }
     case "attention": {
-      const nodePart = event.nodeId ? ` · node ${event.nodeId}` : "";
+      const subject = event.nodeId ? `node ${event.nodeId} needs you · run ${runId}` : `run ${runId} needs you`;
       const errorPart = event.errorCode ? ` · ${event.errorCode}` : "";
-      return truncate(`run ${runId} attention${nodePart}${errorPart}`);
+      return truncate(`${subject}${errorPart}`);
     }
     default:
       throw new TypeError(`renderNotification: unknown event type ${String(event.type)}`);
+  }
+}
+
+/**
+ * The run's total cost so far, read from its own `status.json` (the single
+ * source `writeStatusArtifacts` refreshes every tick). Missing or unreadable
+ * is `null`: a notification never blocks or fails on this being unavailable.
+ *
+ * @param {string} runDir
+ * @returns {number|null}
+ */
+function readRunCostUsd(runDir) {
+  try {
+    const payload = JSON.parse(readFileSync(join(runDir, "status.json"), "utf8"));
+    const costUsd = payload?.usage?.costUsd;
+    return typeof costUsd === "number" ? costUsd : null;
+  } catch {
+    return null;
   }
 }
 
@@ -143,12 +170,18 @@ export class NotifyQueue {
   }
 
   /**
+   * Enrich the event with `runDir` and the run's current `costUsd` (from its
+   * own `status.json`, never the model) before rendering its summary, so
+   * `resume <run-dir>` and the run-terminal cost are counters and
+   * identifiers the templates can use without the caller supplying them.
+   *
    * @param {NotifyEvent} event
    * @returns {Promise<void>}
    */
   async enqueue(event) {
-    const summary = renderNotification(event);
-    const entry = { event: { ...event, summary }, attempts: 0, nextAttemptAt: this.now() };
+    const enriched = { ...event, runDir: this.runDir, costUsd: readRunCostUsd(this.runDir) };
+    const summary = renderNotification(enriched);
+    const entry = { event: { ...enriched, summary }, attempts: 0, nextAttemptAt: this.now() };
     this.pending.push(entry);
     await this._attempt(entry);
   }
