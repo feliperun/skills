@@ -181,7 +181,6 @@ test("generic exec-jsonl emits the documented normalized request", () => {
     structuredOutput: true,
     outputSchema: { type: "object" },
     continuationId: null,
-    maxInvocationTokens: 1000,
   });
 });
 
@@ -931,7 +930,6 @@ test("toolPolicy travels only the Claude-compatible hook settings boundary", () 
     toolPolicy: policy,
   }).input));
   assert.equal("toolPolicy" in request, false, "the exec-jsonl request carries no tool policy");
-  assert.equal(request.maxInvocationTokens, null, "unrelated budget fields stay null, not fabricated");
   assert.equal(providerCommand({ driver: "codex", model: "m" }, "work", { toolPolicy: policy }).args.includes("--settings"), false);
   assert.deepEqual(
     missingCapabilities(driverCapabilities({ driver: "claude" }), { toolPolicy: true }),

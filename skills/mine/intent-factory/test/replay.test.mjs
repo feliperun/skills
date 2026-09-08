@@ -1078,7 +1078,7 @@ test("D32: the replayed campaign inbox bounds event size, sets deliveredAt after
   assert.equal(readFileSync(cursorPath, "utf8"), afterAck, "re-acknowledging the same event is a durable no-op");
 });
 
-test("preflight --json measures the worker preamble per runtime and outranks the recorded guess", async () => {
+test("preflight --json measures the worker preamble per runtime", async () => {
   assertExecutable();
   const replayed = await driveReplayedContract({
     id: "d-preamble-measured",
@@ -1110,19 +1110,5 @@ test("preflight --json measures the worker preamble per runtime and outranks the
     projectMetrics(sources).workerPreambleTokens,
     { value: { "replay-worker": 0 }, direction: "down", count: 1 },
     "the indicator is the per-runtime measurement preflight reported",
-  );
-
-  /** @param {string} runtimeId @param {number} preambleTokens @returns {Record<string, unknown>} */
-  const dispatch = (runtimeId, preambleTokens) => ({
-    at: "2026-09-05T00:00:00.000Z",
-    node: runtimeId,
-    to: "running",
-    budgetDecision: { extensionAllowanceTokens: 0, inputs: { runtimeId, preambleBytes: preambleTokens * 4, preambleTokens } },
-  });
-  const mixed = projectMetrics({ events: [dispatch("replay-worker", 9999), dispatch("unmeasured", 4000)], preflight: [payload] });
-  assert.deepEqual(
-    mixed.workerPreambleTokens,
-    { value: { "replay-worker": 0, unmeasured: 4000 }, direction: "down", count: 2 },
-    "a measured runtime never falls back to its recorded guess; an unmeasured one still reports",
   );
 });

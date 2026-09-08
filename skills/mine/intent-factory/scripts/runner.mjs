@@ -1310,17 +1310,22 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   if (identityMatches && canContinue) {
     return { prompt, continuationId: session.invocation.continuationId ?? null, mode: "reuse" };
   }
-  // Any other session (wrong identity, or a driver that cannot continue) is
-  // not resumable as-is, so the fresh attempt carries the prior nodes'
+  // A driver that cannot continue at all, or a session picked up from a
+  // different phase-sibling node whose identity does not match this one, has
+  // no native continuity: the fresh attempt carries the prior nodes'
   // structured summaries forward instead of starting blind.
-  if (session) {
+  if (session && (!canContinue || session.nodeId !== node.id)) {
     return {
       prompt: phaseHandoffPrompt(contract, node, state, runDir, role),
       continuationId: null,
       mode: "rotate",
     };
   }
-  return { prompt, continuationId: null, mode: "fresh" };
+  // A capable driver continuing its own node whose identity merely drifted
+  // (the run directory moved, or a runtime edge) still gets the caller's own
+  // prompt — already carrying the node's bounded "Previous attempt" section —
+  // in a fresh session, never a synthesized handoff.
+  return { prompt, continuationId: null, mode: session ? "rotate" : "fresh" };
 }
 
 /**
@@ -3529,10 +3534,12 @@ function hasMeasuredUsage(usage) {
 
 /** @param {NodeSnapshot} state @returns {Usage} */
 function invocationUsage(state) {
-  return (state.invocations ?? []).reduce(
-    (total, invocation) => addUsage(total, invocation.usage),
-    /** @type {Usage} */ ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 }),
-  );
+  const seen = new Set();
+  return (state.invocations ?? []).reduce((total, invocation) => {
+    if (invocation.id && seen.has(invocation.id)) return total;
+    if (invocation.id) seen.add(invocation.id);
+    return addUsage(total, invocation.usage);
+  }, /** @type {Usage} */ ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 }));
 }
 
 /** @param {NodeSnapshot} state @returns {number|undefined} */

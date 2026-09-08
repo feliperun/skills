@@ -27,11 +27,10 @@ const LIVENESS_TYPE = "liveness";
  * is the measurement: its `usage.inputTokens` is what the harness costs before
  * the packet, per runtime, under the run's own flags.
  *
- * @param {unknown[]} events
  * @param {unknown[]} [preflight] recorded `preflight --json` payloads
  * @returns {{value: Record<string, number>, count: number}}
  */
-export function preambleTokensByRuntime(events, preflight = []) {
+export function preambleTokensByRuntime(preflight = []) {
   const measured = preflightPreambleTallies(preflight);
   /** @type {Map<string, {total: number, samples: number}>} */
   const runtimes = new Map(measured);

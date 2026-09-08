@@ -217,7 +217,7 @@ export function initializeGit(directory) {
 export function fakeCodex(directory, mode = "pass") {
   const path = join(mkdtempSync(join(tmpdir(), "runner-fake-codex-")), `fake-codex-${mode}.mjs`);
   writeFileSync(path, `#!${process.execPath}
-import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 const mode = ${JSON.stringify(mode)};
 if (process.argv.includes("--version")) {
   if (mode === "version-fail") {
@@ -308,32 +308,6 @@ if (process.argv.includes("--version")) {
       const text = protocolResult(JSON.stringify({ status: "done", summary: \`worker attempt \${run}\`, changedFiles: [], verification: [], artifacts: [], missingContext: [] }));
       console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));
       console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
-      return;
-    }
-    if (mode === "alias-heartbeat" && !judge) {
-      const statePath = ${JSON.stringify(join(directory, ".runs", "scope-alias-heartbeat-run", "nodes", "build.json"))};
-      let observedHeartbeat = 0;
-      writeFileSync("alias/progress.txt", "initial");
-      const observeHeartbeat = () => {
-        let progress;
-        try {
-          progress = JSON.parse(readFileSync(statePath, "utf8")).progress;
-        } catch {
-          return;
-        }
-        const heartbeat = progress?.heartbeatCount ?? 0;
-        if (heartbeat <= observedHeartbeat) return;
-        observedHeartbeat = heartbeat;
-        if (heartbeat >= 3) {
-          unwatchFile(statePath, observeHeartbeat);
-          console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
-          console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:10,output_tokens:2,cached_input_tokens:0}}));
-          return;
-        }
-        writeFileSync("alias/progress.txt", String(heartbeat));
-      };
-      watchFile(statePath, { interval: 5 }, observeHeartbeat);
-      observeHeartbeat();
       return;
     }
     if (mode === "large-output") {

@@ -51,18 +51,6 @@ function reopenCrashWindowKeepingThread(runDir, invocationId, nodeId = "build") 
   writeFileSync(stdout, `${started}\n`);
 }
 
-/** @returns {Record<string, unknown>} */
-function usagePolicy() {
-  return {
-    epoch: "intent-settlement-test-v1",
-    maxInputTokens: 1_000_000,
-    judgeReserveInputTokens: 0,
-    maxPhaseInputTokens: 500_000,
-    maxInvocationTokens: 500_000,
-    cacheReadWeight: 0.1,
-  };
-}
-
 /** @param {{verification?: Array<{argv: string[]}>}} [overrides] @returns {Record<string, unknown>} */
 function packetForFixture(overrides = {}) {
   return {
@@ -111,8 +99,7 @@ test("every provider invocation persists an intent before spawn and a settlement
 
 test("an intent withheld from settlement classifies unknown_effect and resolves through adoption proof exactly once", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-adopt-"));
-  const policy = usagePolicy();
-  const path = writeContract(directory, fixture({ id: "intent-adopt-run", pollIntervalMs: 10, usagePolicy: policy }));
+  const path = writeContract(directory, fixture({ id: "intent-adopt-run", pollIntervalMs: 10 }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
   const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
@@ -134,14 +121,16 @@ test("an intent withheld from settlement classifies unknown_effect and resolves 
   );
 
   // The completed-turn log proved the effect; usage stays exact-once.
-  const ledgerPath = join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json");
-  const recorded = Object.keys(JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[/** @type {string} */ (policy.epoch)].invocations);
+  /** @param {string} path @returns {string[]} */
+  const usageRecordIds = (path) => readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).invocationId);
+  const usagePath = join(runDir, "usage.jsonl");
+  const recorded = usageRecordIds(usagePath);
   assert.equal(recorded.filter((id) => id === invocationId).length, 1);
 
   // A further resume must not duplicate anything.
   await withFakeCodex(directory, "pass", async () => resumeRun(runDir));
-  const reread = JSON.parse(readFileSync(ledgerPath, "utf8")).epochs[/** @type {string} */ (policy.epoch)].invocations;
-  assert.deepEqual(Object.keys(reread).sort(), [...recorded].sort());
+  const reread = usageRecordIds(usagePath);
+  assert.deepEqual(reread.sort(), recorded.sort());
 });
 
 test("the terminal settlement of an attempt with an advisory scope finding persists provider receipts", async () => {

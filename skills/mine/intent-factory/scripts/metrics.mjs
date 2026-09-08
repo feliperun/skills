@@ -151,7 +151,7 @@ export function projectMetrics({
   const takes = Array.isArray(takeRunIds) ? takeRunIds.length : null;
   // staleSec left undefined keeps heartbeat.mjs's own GOVERNANCE_STALE_SEC.
   const governance = deriveGovernanceMetrics({ events, livenessFacts, outbox, now, staleSec });
-  const preamble = preambleTokensByRuntime(events, preflight);
+  const preamble = preambleTokensByRuntime(preflight);
   return {
     wallClockPerClosedCheckpoint: measured("down", span.count, closed === 0 || span.seconds === null ? null : span.seconds / closed),
     takesPerClosedCheckpoint: measured("down", takes ?? 0, takes === null || closed === 0 ? null : takes / closed),

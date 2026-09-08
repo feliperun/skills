@@ -378,22 +378,19 @@ and the result normalizes normally.
 
 `exec-jsonl` is the generic driver for an existing executable that speaks the
 JSONL protocol: it receives one `run.request` line on stdin, including
-`continuationId` and (when declared) `maxInvocationTokens`, and writes
+`continuationId`, and writes
 `run.started`/`message`/`run.completed`/`run.failed` events to stdout, in that
 order, with no unknown fields. Set `executable` (or `INTENT_FACTORY_EXEC_JSONL_BIN`)
 for the binary, `args` for fixed arguments, and `versionArgs` when it does not
 accept `--version`. It supports structured output, continuation, and usage
-reporting, but neither monetary-budget enforcement, sandbox, nor permission
-negotiation.
+reporting, but neither sandbox nor permission negotiation.
 
 ### Replay driver
 
 `replay` stands in for any provider in tests and evals: it emits recorded,
 already-normalized envelopes with zero model invocations, so controller
-behaviour (gates, budgets, resume, failover) is exercised deterministically
-after provider normalization. It declares the budget capabilities so the
-controller sends `maxInvocationTokens`/`maxCostUsd`, which the executable
-records without enforcing. The default executable is the sibling
+behaviour (gates, resume, failover) is exercised deterministically
+after provider normalization. The default executable is the sibling
 `scripts/drivers/replay-bin.mjs`; override it with `executable` or
 `INTENT_FACTORY_REPLAY_BIN`.
 
@@ -517,49 +514,16 @@ was ever tried.
 
 `stallTimeoutSec` limits silence from stdout and stderr. `timeoutSec` caps a
 single provider invocation and may be overridden per node, so a slow worker
-never spends the judge's budget; a node is therefore bounded by
+never spends the judge's time; a node is therefore bounded by
 `(1 + maxRevisions) × 2 × timeoutSec`. The default is 2400 seconds (40
 minutes); set 4800 seconds explicitly for profile-wide or multi-browser nodes.
-A node that exhausts its wall-clock budget is restarted by `resume` with the
+A node that exhausts its wall-clock timeout is restarted by `resume` with the
 same bounded invocation timeout. A timeout override is used only when a human
 explicitly supplies one; resume never doubles the timeout automatically.
 
-`usagePolicy.maxInputTokens` is mandatory when `usagePolicy` is an object.
-The contract-level `maxInputTokens` is mandatory on every contract, authored
-or persisted: schema 2 removed the default that used to fill a missing
-persisted-contract budget, so a contract without an explicit ceiling is an
-error. A per-node `maxInputTokens` is legacy: on a node authored today it is
-only an explicit hard ceiling above the derived allocation and requires
-`budgetProfile` (see below). The controller meters active invocations live
-from their transcript
-tails each poll tick: a node whose observed input tokens pass its own cap is
-terminated immediately and labeled `exhausted` with `token_budget_exceeded`;
-once cumulative spend (persisted plus live-observed) reaches the contract
-budget, every running worker is stopped and pending nodes become `blocked`
-with `budget_exceeded`. A budget that cannot stop a running worker is not a
-budget. Usage is persisted before scope-gate evaluation, so kills, timeouts,
-stalls, and scope failures still report their real token cost — backfilled
-from the transcript when a provider died without a terminal usage event (agy
-and exec-jsonl only report at completion and meter as zero mid-run).
-
-### budgetProfile
-
-A node authored today that sets `maxInputTokens` must also declare a
-`budgetProfile`; persisted runs written before the field existed remain
-readable without it. A node `maxInputTokens` is only an explicit hard ceiling
-above the allocation derived from the profile — it is never the allocation
-itself. `budgetProfile` requires `progressPolicy`. The policy formulas,
-decision and state schemas, attention/liveness contract and the D33-D39
-evals are documented in [budget-governance.md](budget-governance.md).
-
-The usage policy stops new work at the campaign hard maximum while preserving
-the judge reserve. A soft phase limit rotates the provider session before the
-next node and seeds it with bounded deterministic summaries plus the current
-closed task packet; it never blocks the plan.
-
-Both limits are measured on a monotonic clock that does not advance while the
-host is suspended. A closed laptop lid pauses a run instead of killing whichever
-node happened to be executing, and stall detection uses output mtime only to
+The timeout clock is monotonic and does not advance while the host is
+suspended. A closed laptop lid pauses a run instead of killing whichever node
+happened to be executing, and stall detection uses output mtime only to
 notice change, never to measure how long the silence lasted.
 
 Set the stall limit from the selected runtime and phase. Reviewers composing a
@@ -690,7 +654,7 @@ logs/<id>.<attempt>.<worker|judge>[.r<n>].jsonl
 logs/<id>.<attempt>.<worker|judge>[.r<n>].err
 operations/<invocationId>.intent.json
 operations/<invocationId>.settlement.json
-capsules/<nodeId>.<attempt>.json
+usage.jsonl
 integration.jsonl
 events.jsonl
 STATUS.md
@@ -699,8 +663,13 @@ findings.json
 
 Use `STATUS.md` for normal status queries. Read logs only to diagnose an actionable failure. A provider or judge failure preserves the latest worker report in node state so completed work remains inspectable.
 `operations/` holds the exact-once intent and settlement records for every
-provider invocation; `capsules/` holds the portable continuation capsule
-written at each settled worker boundary. Both are state, not diagnostics.
+provider invocation; both are state, not diagnostics. `usage.jsonl` holds one
+reporting record per worker or judge invocation — runId, nodeId, attempt,
+role, runtime id and model, tokens by kind (uncached input, cache read,
+output; null when unknown), `costUsd` with provenance (`provider`, `priced`
+or `unknown`), and `startedAt`/`finishedAt` — appended at each settled
+invocation. It is read by `status`, `report`, `metrics`, the dashboard, and
+the status line; no control path reads it.
 
 ### Attempt worktrees and integration
 
@@ -710,9 +679,8 @@ Every worker attempt gets a linked worktree at
 `refs/intent-factory/<run-id>/run`, created at the recorded source `gitHead`.
 The node snapshot records `worktree.path`, `worktree.branch`,
 `worktree.baseSha`, and the sealed `worktree.commit`. Provider processes,
-scope snapshots, controller verification, progress checks, capsules, and
-judges use that path; `contract.cwd` remains the home of the run and control
-artifacts. A Codex-shaped worker writes its result to the attempt's
+scope snapshots, controller verification, and judges use that path;
+`contract.cwd` remains the home of the run and control artifacts. A Codex-shaped worker writes its result to the attempt's
 `.runs/results/<node>.json`; the controller copies it into the canonical run
 directory after the process closes.
 
@@ -806,10 +774,7 @@ Two states are stop boundaries that only an explicit flag crosses. A node
 `blocked` with `unknown_effect_reconciled` is re-dispatched only when resume is
 given `--reconcile <node-id>`, which records the acknowledgement in
 `events.jsonl`; without it resume lists the node as attention and leaves it
-untouched. When the run's cumulative ledger budget is exhausted, resume
-reports attention and exits non-zero unless `--max-input-tokens <n>` raises the
-contract-level ceiling; the extension is persisted in `run.json` with the
-previous value, the new value, and a timestamp.
+untouched.
 
 Resume accepts a current `HEAD` that is a descendant of the recorded `gitHead`
 — workers and the orchestrator commit between attempts, so a retry in place
@@ -832,9 +797,9 @@ simultaneous `resume` calls cannot double-run a node. `STATUS.md` treats a
 `running` node as an orphan when the lease is missing, expired, or invalid —
 the process is gone, so the node is not live work. `cancel` takes over a stale
 lease after confirming the previous controller is dead. The lease also
-serializes the handoff: intents, settlements, node transitions, and capsule
-writes are made only by the lease holder, so two controllers cannot double-run
-or double-settle a node.
+serializes the handoff: intents, settlements, and node transitions are made
+only by the lease holder, so two controllers cannot double-run or
+double-settle a node.
 
 ## Environment doctor
 
