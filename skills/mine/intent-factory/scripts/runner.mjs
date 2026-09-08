@@ -1996,6 +1996,15 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
     onAccepted: async (transaction) => {
       const state = states.get(transaction.node);
       if (!state) return;
+      // Once a `done` transition for this attempt was already durably
+      // recorded, every effect this transaction owns (ref move, done-write,
+      // cleanup, terminal event) was already fully applied — on some earlier
+      // resume, or in the same process that accepted it. A later reset of
+      // node status (recovery exercising a different concern for the same
+      // attempt) is not evidence that the crash this callback recovers from
+      // ever happened; forcing "done" again here would stomp that unrelated
+      // recovery outcome.
+      if (state.attempt === transaction.attempt && hasDoneEvent(runDir, state.id, state.attempt)) return;
       const path = state.attempt === transaction.attempt && state.worktree?.path
         ? state.worktree.path
         : attemptWorktreePath(runDir, contract.id, transaction.node, transaction.attempt);
@@ -5313,17 +5322,34 @@ function transition(runDir, state, status, patch = {}, lease = null) {
  * @param {LeaseHandle|null} [lease]
  */
 function ensureTerminalEvent(runDir, state, lease = null) {
+  if (!hasDoneEvent(runDir, state.id, state.attempt)) {
+    appendTransitionEvent(runDir, state, "done", "done", { recovery: "terminal side effects replayed" }, lease);
+  }
+}
+
+/**
+ * Whether a `done` transition for this node and attempt was already durably
+ * recorded, at any point in the past. This is the idempotent signal for "this
+ * attempt's integration effects were already fully applied at least once" —
+ * a later, unrelated change to the node's current status is not evidence
+ * that they need reapplying.
+ *
+ * @param {string} runDir
+ * @param {string} nodeId
+ * @param {number} attempt
+ * @returns {boolean}
+ */
+function hasDoneEvent(runDir, nodeId, attempt) {
   let text = "";
   try { text = readFileSync(join(runDir, "events.jsonl"), "utf8"); } catch {}
-  const found = text.split("\n").filter(Boolean).some((line) => {
+  return text.split("\n").filter(Boolean).some((line) => {
     try {
       const event = JSON.parse(line);
-      return event.node === state.id && event.to === "done" && event.attempt === state.attempt;
+      return event.node === nodeId && event.to === "done" && event.attempt === attempt;
     } catch {
       return false;
     }
   });
-  if (!found) appendTransitionEvent(runDir, state, "done", "done", { recovery: "terminal side effects replayed" }, lease);
 }
 
 /**

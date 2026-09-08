@@ -4,6 +4,19 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
 import { PROTOCOL_SCHEMA_VERSION } from "../scripts/contract.mjs";
+import { createAttemptWorktree } from "../scripts/worktree.mjs";
+
+// The suite must never pop a macOS desktop notification: when
+// INTENT_FACTORY_NOTIFY_BIN is unset the outbox drain falls back to the
+// platform adapter, which spawns osascript. Give every test a no-op
+// transport by default; tests that need a failing or absent transport set
+// INTENT_FACTORY_NOTIFY_BIN explicitly and restore it afterward.
+if (!process.env.INTENT_FACTORY_NOTIFY_BIN) {
+  const path = join(mkdtempSync(join(tmpdir(), "runner-noop-notify-")), "noop-notify.mjs");
+  writeFileSync(path, `#!${process.execPath}\nprocess.stdin.resume();\nprocess.stdin.on("end", () => process.exit(0));\n`);
+  chmodSync(path, 0o755);
+  process.env.INTENT_FACTORY_NOTIFY_BIN = path;
+}
 
 /**
  * @param {number} milliseconds
@@ -30,6 +43,30 @@ export async function waitForValue(read, timeoutMs = 5_000, intervalMs = 25) {
 }
 
 /**
+ * A genuinely orphaned node crashed mid-attempt: its isolated worktree is
+ * still on disk, not yet sealed and removed. Simulating that means
+ * recreating the worktree once it was already removed by a prior full
+ * completion, so recovery's re-integration path has a real workspace to
+ * seal and verify, exactly as an interrupted run would.
+ *
+ * @param {string} runDir
+ * @param {{id: string, attempt: number, worktree?: {status?: string, branch?: string}|null}} state
+ * @returns {{status?: string, branch?: string}|null|undefined} the worktree to persist on the node
+ */
+export function ensureAttemptWorktree(runDir, state) {
+  if (state.worktree?.status !== "removed" || !state.worktree.branch) return state.worktree;
+  const contract = JSON.parse(readFileSync(join(runDir, "contract.json"), "utf8"));
+  const recreated = createAttemptWorktree({
+    repo: contract.cwd,
+    runDir,
+    runId: contract.id,
+    nodeId: state.id,
+    attempt: state.attempt,
+  });
+  return { ...state.worktree, status: "ready", path: recreated.path, commit: recreated.commit };
+}
+
+/**
  * @param {string} runDir
  * @param {string} nodeId
  * @param {Record<string, unknown>} [patch]
@@ -38,6 +75,7 @@ export async function waitForValue(read, timeoutMs = 5_000, intervalMs = 25) {
 export function orphan(runDir, nodeId, patch = {}) {
   const path = join(runDir, "nodes", `${nodeId}.json`);
   const state = JSON.parse(readFileSync(path, "utf8"));
+  state.worktree = ensureAttemptWorktree(runDir, state);
   writeFileSync(path, JSON.stringify({
     ...state,
     status: "running",

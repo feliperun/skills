@@ -12,7 +12,7 @@
  * the override, the node transition — stays in runner.mjs, so this module can
  * be tested without a run directory, a lease, or a provider.
  */
-import { nextHop, nextSynthesizedRuntime } from "./failover.mjs";
+import { nextHop, nextSynthesizedRuntime, synthesizedChain } from "./failover.mjs";
 import { latestTimeoutSec, quotaResetSchedule } from "./supervisor.mjs";
 import { nextSameTierRuntime } from "./runtime-discovery.mjs";
 
@@ -290,6 +290,11 @@ export function planRoute(contract, node, state, role, error, current, schedule,
     && contract.runtimes[entry.runtime]?.fallback === entry.nextRuntime);
   const composedAssignment = role === "worker" ? state.routing?.assignments?.composedWorker === true : state.routing?.assignments?.composedJudge === true;
   const dynamicComposed = composedAssignment && !declaredFallback && !explicitFallbackUsed;
+  // The declared candidate is resolved unfiltered so an already-attempted
+  // edge is reported as a cycle rather than silently read back as "no edge
+  // declared" — nextSynthesizedRuntime's own attempted-filter would otherwise
+  // make that distinction unreachable.
+  const declaredCandidate = synthesizedChain(contract, role, current)[0] ?? null;
   const fallback = nextSynthesizedRuntime(contract, role, current, attempted)
     ?? (dynamicComposed ? nextSameTierRuntime(contract, routing, role, current, attempted) : null);
   const hop = nextHop(state, role, revision, schedule);
@@ -297,12 +302,12 @@ export function planRoute(contract, node, state, role, error, current, schedule,
   const blocked = schedule.kind === "reset"
     ? null
     : fallback === null
-      ? { code: dynamicComposed ? "runtime_tier_exhausted" : error.code, message: dynamicComposed ? `no available runtime remains in tier ${String(contract.runtimes[current]?.tier ?? "unknown")} for ${role}` : error.message }
-      : attempted.has(fallback)
-        ? { code: "provider_failover_cycle", message: `runtime ${fallback} was already attempted in ${role} revision ${revision}` }
-        : hop > 1 && !dynamicComposed
-          ? { code: "provider_failover_hop_cap", message: "provider failover exceeded the one-hop cap" }
-          : null;
+      ? declaredCandidate !== null && attempted.has(declaredCandidate)
+        ? { code: "provider_failover_cycle", message: `runtime ${declaredCandidate} was already attempted in ${role} revision ${revision}` }
+        : { code: dynamicComposed ? "runtime_tier_exhausted" : error.code, message: dynamicComposed ? `no available runtime remains in tier ${String(contract.runtimes[current]?.tier ?? "unknown")} for ${role}` : error.message }
+      : hop > 1 && !dynamicComposed
+        ? { code: "provider_failover_hop_cap", message: "provider failover exceeded the one-hop cap" }
+        : null;
   const backoffSec = schedule.kind === "reset"
     ? Math.max(0, (Date.parse(schedule.at) - now) / 1_000)
     : 0;

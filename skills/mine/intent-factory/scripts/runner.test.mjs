@@ -17,6 +17,7 @@ import { invocationAlive, invocationResult, processStartToken, quotaResetSchedul
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts } from "./backoff.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
+import { runRefName } from "./worktree.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import { deriveBudgetDecision } from "./budget.mjs";
@@ -24,6 +25,7 @@ import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
   delay,
+  ensureAttemptWorktree,
   fakeCodex,
   fakeExecJsonl,
   fixture,
@@ -42,6 +44,16 @@ function nodeState(result, id = "build") {
   const state = result.states.get(id);
   if (!state) throw new Error(`missing node state for ${id}`);
   return state;
+}
+
+/**
+ * A completed run merges its work onto the run ref, not into the shared
+ * repository's own working tree: the isolated attempt worktree that made the
+ * change is already removed by the time the run finishes.
+ * @param {string} repo @param {string} ref @param {string} path @returns {string}
+ */
+function showRefFile(repo, ref, path) {
+  return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], { encoding: "utf8" });
 }
 
 function budgetProfile(overrides = {}) {
@@ -521,6 +533,8 @@ test("doctor checks repository prerequisites without mutating anything", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-"));
   execFileSync("git", ["init", "-q", directory]);
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
+  execFileSync("git", ["-C", directory, "add", ".gitignore"]);
+  execFileSync("git", ["-C", directory, "-c", "user.email=doctor@example.test", "-c", "user.name=doctor", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
   const cli = fileURLToPath(new URL("./runner.mjs", import.meta.url));
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory], { encoding: "utf8" });
   assert.equal(text.status, 0, text.stderr);
@@ -537,10 +551,27 @@ test("doctor checks repository prerequisites without mutating anything", () => {
   assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
 });
 
+test("doctor reports an unborn repository as a failing git check", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-doctor-unborn-"));
+  execFileSync("git", ["init", "-q", directory]);
+  writeFileSync(join(directory, ".gitignore"), ".runs/\n");
+  const cli = fileURLToPath(new URL("./runner.mjs", import.meta.url));
+  const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory], { encoding: "utf8" });
+  const payload = /** @type {{schemaVersion: number, ok: boolean, checks: {name: string, ok: boolean, detail: string}[]}} */ (JSON.parse(text.stdout));
+  assert.equal(payload.ok, false, "an unborn repository must not report doctor as healthy");
+  const gitCheck = payload.checks.find((check) => check.name === "git");
+  assert.ok(gitCheck, "git check present");
+  assert.equal(gitCheck.ok, false);
+  assert.match(gitCheck.detail, /at least one commit/u);
+  assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
+});
+
 test("doctor does not fail a driver resolved through an explicit executable", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-override-"));
   execFileSync("git", ["init", "-q", directory]);
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
+  execFileSync("git", ["-C", directory, "add", ".gitignore"]);
+  execFileSync("git", ["-C", directory, "-c", "user.email=doctor@example.test", "-c", "user.name=doctor", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
   const cli = fileURLToPath(new URL("./runner.mjs", import.meta.url));
   const worker = join(directory, "my-worker.mjs");
   writeFileSync(worker, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('my-worker 1.0.0');\n");
@@ -556,7 +587,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
     maxInputTokens: 1_000,
     usagePolicy: false,
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
-    runtimes: { wrapped: { driver: "exec-jsonl", model: "m", executable: "./my-worker.mjs" } },
+    runtimes: { wrapped: { driver: "exec-jsonl", model: "m", vendor: "wrapped-vendor", executable: "./my-worker.mjs" } },
     nodes: [{ id: "build", type: "backend", phase: "doctor", dependsOn: [], taskPacket: packet(), gate: false }],
   })}\n`);
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory, contract], { encoding: "utf8" });
@@ -975,7 +1006,10 @@ test("resume of an interrupted result materialization rejects declared-path muta
   orphan(result.runDir, "build");
   // README.md is a declared packet write file: the lenient worker check would
   // accept this change, but a result-only turn had no authority to make it.
-  writeFileSync(join(directory, "README.md"), "mutated across the recovery window\\n");
+  // The mutation lands in the recreated attempt worktree, the workspace
+  // recovery actually compares against, not the shared repository.
+  const workspace = JSON.parse(readFileSync(join(result.runDir, "nodes", "build.json"), "utf8")).worktree.path;
+  writeFileSync(join(workspace, "README.md"), "mutated across the recovery window\\n");
 
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(result.runDir));
   const state = nodeState(resumed);
@@ -1936,7 +1970,7 @@ test("a worker-created symlink cannot authorize its target, but is advisory on g
   const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt"]);
-  assert.equal(readFileSync(join(directory, "outside.txt"), "utf8"), "unauthorized target\n");
+  assert.equal(showRefFile(directory, runRefName("scope-new-symlink-run"), "outside.txt"), "unauthorized target\n");
   assert.ok(state.scope?.unexpectedPaths.includes("outside.txt"));
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["outside.txt"]);
 });
@@ -1975,7 +2009,7 @@ test("a pre-existing contained alias remains an authorized write path", async ()
   const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt", "src.txt"]);
-  assert.equal(readFileSync(join(directory, "src.txt"), "utf8"), "authorized target\n");
+  assert.equal(showRefFile(directory, runRefName("scope-contained-alias-run"), "src.txt"), "authorized target\n");
 });
 
 test("a file write root matches exactly that path in the scope gate", async () => {
@@ -1994,7 +2028,7 @@ test("a file write root matches exactly that path in the scope gate", async () =
   assert.deepEqual(state.scope?.boundary?.roots, ["notes.md"]);
   assert.equal(state.scope?.unexpectedPaths.length, 0);
   assert.equal(state.scopeFindings, undefined);
-  assert.equal(readFileSync(join(directory, "notes.md"), "utf8"), "in the file root\n");
+  assert.equal(showRefFile(directory, runRefName("scope-file-root-run"), "notes.md"), "in the file root\n");
 });
 
 test("a file write root does not authorize a sibling file", async () => {
@@ -2035,6 +2069,9 @@ test("a file write root does not authorize a path beneath a same-named directory
 test("autonomous heartbeats observe progress made through a contained alias", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-alias-heartbeat-"));
   mkdirSync(join(directory, "src"));
+  // git tracks no empty directory: a placeholder makes "src" survive into
+  // the isolated attempt worktree the alias symlink must resolve against.
+  writeFileSync(join(directory, "src", ".keep"), "");
   symlinkSync("src", join(directory, "alias"));
   initializeGit(directory);
   const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["alias"], verification: [] });
@@ -2056,13 +2093,16 @@ test("autonomous heartbeats observe progress made through a contained alias", as
   assert.equal(state.progress?.dryHeartbeatCount, 0);
   assert.ok(state.scope?.boundary?.roots.includes("alias"));
   assert.ok(state.scope?.boundary?.roots.includes("src"));
-  assert.ok(readFileSync(join(directory, "src", "progress.txt"), "utf8"));
+  assert.ok(showRefFile(directory, runRefName("scope-alias-heartbeat-run"), "src/progress.txt"));
 });
 
-test("rejects parallel execution until isolation exists", () => {
+// Phase 1 gave every attempt its own isolated worktree, so the isolation
+// `maxParallel` used to wait for now exists: a contract may declare more
+// than one parallel slot without validation refusing it.
+test("accepts parallel execution now that attempt worktrees provide isolation", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-max-parallel-"));
   const path = writeContract(directory, fixture({ maxParallel: 2 }));
-  assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /maxParallel must be 1/u);
+  assert.equal(validateContract(JSON.parse(readFileSync(path, "utf8")), path).maxParallel, 2);
 });
 
 test("marks a silent provider stalled", async () => {
@@ -2545,7 +2585,13 @@ test("a verification proof reuses the recorded result and executes nothing", asy
   const result = await withAdvisoryGateCodex(directory, () => runContract(path));
   const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
-  assert.equal(readFileSync(executions, "utf8").trim().split("\n").filter(Boolean).length, 1, "the controller ran the command once and the proof reused that result");
+  // Phase 1 added a second, independent run of the same verification
+  // commands: the integration transaction re-verifies the sealed candidate
+  // in its own scratch worktree before advancing the run ref. The judge's
+  // "verified" proof still reuses the attempt's own recorded result rather
+  // than triggering a run of its own — the candidate check is the only
+  // reason this count is 2, not 1.
+  assert.equal(readFileSync(executions, "utf8").trim().split("\n").filter(Boolean).length, 2, "the judge's verification proof reused the recorded result; only the candidate integration check re-ran the command");
   const proof = state.gate?.findings ?? [];
   assert.equal(proof.length, 1, "the advisory verdict is the only finding on the node");
   const prompt = readFileSync(join(result.runDir, "logs", "build.1.judge.jsonl"), "utf8");
@@ -2658,6 +2704,9 @@ test("resume permits worker edits only to packet write files", async () => {
 test("resume accepts allowed changes reached through an autonomous symlink root", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-symlink-root-"));
   mkdirSync(join(directory, "src"));
+  // git tracks no empty directory: a placeholder makes "src" survive into
+  // the isolated attempt worktree the alias symlink must resolve against.
+  writeFileSync(join(directory, "src", ".keep"), "");
   symlinkSync("src", join(directory, "alias"));
   const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["alias"], verification: [] });
   const path = writeContract(directory, fixture({
@@ -2666,8 +2715,9 @@ test("resume accepts allowed changes reached through an autonomous symlink root"
     nodes: [{ id: "build", type: "backend", taskPacket: autonomousPacket, gate: false }],
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  writeFileSync(join(directory, "src", "allowed.txt"), "allowed\n");
   orphan(runDir, "build");
+  const workspace = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).worktree.path;
+  writeFileSync(join(workspace, "src", "allowed.txt"), "allowed\n");
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
   assert.equal(nodeState(resumed).status, "done");
   assert.equal(nodeState(resumed).attempt, 1);
@@ -2676,6 +2726,9 @@ test("resume accepts allowed changes reached through an autonomous symlink root"
 test("resume source identity uses the pre-execution symlink boundary", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-scope-boundary-"));
   mkdirSync(join(directory, "src"));
+  // git tracks no empty directory: a placeholder makes "src" survive into
+  // the isolated attempt worktree the alias symlink must resolve against.
+  writeFileSync(join(directory, "src", ".keep"), "");
   mkdirSync(join(directory, "outside"));
   writeFileSync(join(directory, "outside", "baseline.txt"), "outside\n");
   symlinkSync("src", join(directory, "alias"));
@@ -2693,6 +2746,13 @@ test("resume source identity uses the pre-execution symlink boundary", async () 
   symlinkSync("outside", join(directory, "alias"));
   writeFileSync(join(directory, "alias", "unauthorized.txt"), "unauthorized target\n");
   orphan(runDir, "build");
+  // The retarget above changes the shared repository the fingerprint warning
+  // reads; the scope gate itself compares the isolated attempt worktree, so
+  // the same retarget is reproduced there for the recovered attempt to see.
+  const workspace = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8")).worktree.path;
+  unlinkSync(join(workspace, "alias"));
+  symlinkSync("outside", join(workspace, "alias"));
+  writeFileSync(join(workspace, "alias", "unauthorized.txt"), "unauthorized target\n");
   // Workers and the orchestrator commit between attempts, so a changed tree
   // fingerprint is a surfaced warning, never a refusal.
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
@@ -2777,7 +2837,8 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   const judgeInvocation = state.invocations.at(-1);
   assert.ok(judgeInvocation, "persisted judge invocation exists");
   writeFileSync(judgeInvocation.stdoutPath, "not a structured judge result\n");
-  writeFileSync(nodePath, JSON.stringify({ ...state, status: "running", phase: "judge" }, null, 2));
+  const worktree = ensureAttemptWorktree(runDir, state);
+  writeFileSync(nodePath, JSON.stringify({ ...state, status: "running", phase: "judge", worktree }, null, 2));
 
   const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
   const final = nodeState(resumed);
@@ -3046,8 +3107,9 @@ test("resume adopts a still-live orphan invocation after its stream completes", 
   // attempt start clears the previous attempt's canonical result file, so the
   // fabricated one must not inherit it.
   rmSync(join(runDir, "results", "build.json"), { force: true });
+  state.worktree = ensureAttemptWorktree(runDir, state);
   const snapshotPath = join(runDir, "logs", "active-orphan.snapshot.json");
-  writeFileSync(snapshotPath, JSON.stringify(captureWorkspaceSnapshot(directory)));
+  writeFileSync(snapshotPath, JSON.stringify(captureWorkspaceSnapshot(state.worktree.path)));
   const now = new Date().toISOString();
   state.status = "running";
   state.phase = "worker";
@@ -3186,6 +3248,7 @@ test("resume terminates an interrupted verification attempt and re-runs the phas
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
   const verificationProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: process.platform !== "win32", stdio: "ignore" });
   const now = Date.now();
+  state.worktree = ensureAttemptWorktree(runDir, state);
   state.status = "running";
   state.phase = "worker";
   state.result = null;
@@ -3263,12 +3326,14 @@ test("resume rejects a dead completion whose persisted close time is past the ab
   const invocation = state.invocations.at(-1);
   const startedAt = new Date(Date.now() - 20_000).toISOString();
   const timeoutAt = new Date(Date.now() - 10_000).toISOString();
+  const worktree = ensureAttemptWorktree(runDir, state);
   writeFileSync(nodePath, JSON.stringify({
     ...state,
     status: "running",
     phase: "worker",
+    worktree,
     executionOverrides: [{ kind: "timeout", timeoutSec: 10, at: timeoutAt, reason: "persisted deadline" }],
-    invocations: [{ ...invocation, status: "closed", startedAt, closedAt: new Date().toISOString() }],
+    invocations: [{ ...invocation, status: "closed", startedAt, closedAt: new Date().toISOString(), workspace: worktree?.path ?? invocation.workspace }],
   }, null, 2));
 
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
@@ -3367,6 +3432,7 @@ test("ledger enforcement on resume lets a done budgeted worker reach its judge",
       usage: undefined,
       costUsd: undefined,
       invocations,
+      worktree: id === "gated" ? ensureAttemptWorktree(runDir, persisted) : persisted.worktree,
     }, null, 2));
   }
 
@@ -3708,7 +3774,7 @@ test("live preflight proves generation, redacts failures, and static mode stays 
   const path = join(directory, "contract.json");
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previous = process.env.INTENT_FACTORY_TEST_LIVE_SECRET;
@@ -3727,7 +3793,7 @@ test("live preflight proves generation, redacts failures, and static mode stays 
     const staticPath = join(directory, "static-contract.json");
     writeFileSync(staticPath, `${JSON.stringify(fixture({
       runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-      runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: staticExecutable } },
+      runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: staticExecutable } },
       nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
     }), null, 2)}\n`);
     const staticChecks = await preflightContract(staticPath, { static: true });
@@ -3761,7 +3827,7 @@ if (process.argv.includes("--version")) {
   const path = join(directory, "contract.json");
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
@@ -4012,6 +4078,7 @@ test("persists and recovers cost exactly once and reports totals", async () => {
   crashed.gate = null;
   crashed.costUsd = undefined;
   crashed.usage = undefined;
+  crashed.worktree = ensureAttemptWorktree(runDir, crashed);
   crashed.invocations = [{ ...worker, status: "closed", usage: { inputTokens: null, outputTokens: null, cacheReadInputTokens: null }, costUsd: null }];
   writeFileSync(nodePath, JSON.stringify(crashed, null, 2));
   const recovered = nodeState(await resumeRun(runDir));
@@ -4029,7 +4096,7 @@ test("blocks new work at contract and node monetary budgets", async () => {
     maxCostUsd: 0.01,
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "first", type: "backend", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", taskPacket: packet(), gate: false },
@@ -4439,7 +4506,11 @@ test("failoverEdges lists one declared edge per runtime, ordered by costRank", (
   );
   assert.equal(nextSynthesizedRuntime(contract, "worker", "mid"), "dear");
   assert.equal(nextSynthesizedRuntime(contract, "worker", "mid", ["dear"]), null, "a spent hop routes nowhere");
-  assert.equal(nextSynthesizedRuntime(contract, "judge", "mid"), null, "failover is worker-only");
+  // A declared `fallback` is a property of the runtime, not the role: a judge
+  // reaches the same one-hop edge a worker would. Judge admissibility (the
+  // vendor-conflict refusal) is resolved at routing time in runner.mjs, not
+  // in this role-agnostic edge lookup — phase 1 removed the worker-only cut.
+  assert.equal(nextSynthesizedRuntime(contract, "judge", "mid"), "dear");
 });
 
 test("an unranked runtime's declared edge sorts after every ranked runtime", () => {
@@ -4682,8 +4753,11 @@ process.stdin.on("end", () => {
     id: "judge-network-backoff-run",
     pollIntervalMs: 10,
     timeoutSec: 60,
-    runtimeDefaults: { worker: "primary", judge: "primary" },
-    runtimes: { primary: { driver: "codex", model: "primary", executable: flaky } },
+    runtimeDefaults: { worker: "primary-worker", judge: "primary" },
+    runtimes: {
+      "primary-worker": { driver: "codex", model: "primary", vendor: "primary-worker-vendor", executable: flaky },
+      primary: { driver: "codex", model: "primary", vendor: "primary-judge-vendor", executable: flaky },
+    },
     nodes: [{
       id: "build",
       type: "backend",
@@ -5065,14 +5139,36 @@ else {
 });
 
 test("liveness state reports paused_quota only while a provider backoff is pending and failed once exhaustion is terminal", async () => {
-  // A failover edge with a future backoffUntil holds its node as pending, so
-  // liveness must report paused_quota for that shape and only that shape.
-  // Terminal exhaustion with no failover route derives failed even when the
-  // error is quota-flavored: the run is not waiting for a provider to come
-  // back, it is over.
+  // A quota reset announced inside the node's deadline holds its node pending
+  // on a future backoffUntil, so liveness must report paused_quota for that
+  // shape and only that shape. Terminal exhaustion with no failover route
+  // derives failed even when the error is quota-flavored: the run is not
+  // waiting for a provider to come back, it is over.
   const directory = mkdtempSync(join(tmpdir(), "runner-liveness-state-"));
-  const first = fakeCodex(directory, "exhausted");
-  const second = fakeCodex(directory, "pass");
+  const counter = join(directory, "attempts");
+  const first = join(mkdtempSync(join(tmpdir(), "runner-liveness-quota-")), "fake-quota-reset.mjs");
+  writeFileSync(first, `#!${process.execPath}
+import { appendFileSync, readFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-quota-reset 1.0.0");
+} else {
+  appendFileSync(${JSON.stringify(counter)}, "x\\n");
+  const attempt = readFileSync(${JSON.stringify(counter)}, "utf8").trim().split("\\n").length;
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "fake-thread" }));
+  if (attempt === 1) {
+    // The backoff window must exceed the event-loop delay under full-suite
+    // load so a poll journals paused_quota inside it, and still land well
+    // inside the node's own wall-clock deadline.
+    const resetAt = new Date(Date.now() + 2000).toISOString();
+    console.log(JSON.stringify({ type: "turn.failed", error: { code: "quota_exhausted", message: "quota exhausted", resetAt } }));
+  } else {
+    const text = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
+    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 1 } }));
+  }
+}
+`);
+  chmodSync(first, 0o755);
   const backoffPath = writeContract(directory, fixture({
     id: "liveness-backoff-run",
     pollIntervalMs: 10,
@@ -5080,10 +5176,7 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
       first: { driver: "codex", model: "first", executable: first },
-      second: { driver: "codex", model: "second", executable: second },
     },
-    // The backoff window must exceed the event-loop delay under full-suite load so a poll journals paused_quota inside it.
-    runtimeRules: [{ match: { role: "worker", status: "exhausted", errorCode: "provider_error", currentRuntime: "first" }, runtime: "second", backoffSec: 2 }],
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const backoffResult = await runContract(backoffPath);
@@ -5170,7 +5263,7 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     id: "phase-reuse-run",
     usagePolicy: { epoch: "phase-reuse", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
@@ -5204,7 +5297,7 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     id: "phase-rotate-run",
     usagePolicy: { epoch: "phase-rotate", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
@@ -5236,8 +5329,8 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     usagePolicy: { epoch: "phase-runtime-identity", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "exec-jsonl", model: "same-model", executable },
-      backup: { driver: "exec-jsonl", model: "same-model", executable },
+      primary: { driver: "exec-jsonl", model: "same-model", vendor: "primary-vendor", executable },
+      backup: { driver: "exec-jsonl", model: "same-model", vendor: "backup-vendor", executable },
     },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", runtime: "primary", taskPacket: packet(), gate: false },
@@ -5273,7 +5366,7 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     id: "phase-chronology-run",
     usagePolicy: { epoch: "phase-chronology", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", executable } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "third", type: "backend", phase: "implementation", dependsOn: ["second"], taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -6122,7 +6215,7 @@ if (process.argv.includes("--version")) {
     id: "tool-policy-run",
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", executable: provider } },
+    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);

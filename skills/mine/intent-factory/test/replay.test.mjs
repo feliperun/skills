@@ -1014,11 +1014,27 @@ test("D30: a crash between the fact and the heartbeat write leaves the old heart
 
 test("D32: the replayed campaign inbox bounds event size, sets deliveredAt after append, and separates sync from ack", async () => {
   assertExecutable();
-  const replayed = await driveReplayedContract({
-    id: "d32-inbox",
-    worker: [{ envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }) }],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  });
+  // A configured transport delivers every event type, campaign.progress
+  // included (drainNotifications only filters by PUSH_EVENT_TYPES when no
+  // executable is configured) — so a transport that always fails leaves
+  // every event pending without ever reaching the platform notify adapter
+  // the suite's no-op default stands in for.
+  const failingTransport = join(mkdtempSync(join(tmpdir(), "d32-failing-transport-")), "fail.sh");
+  writeFileSync(failingTransport, "#!/bin/sh\ncat > /dev/null\nexit 1\n");
+  chmodSync(failingTransport, 0o755);
+  const previousDefaultNotifyBin = process.env.INTENT_FACTORY_NOTIFY_BIN;
+  process.env.INTENT_FACTORY_NOTIFY_BIN = failingTransport;
+  let replayed;
+  try {
+    replayed = await driveReplayedContract({
+      id: "d32-inbox",
+      worker: [{ envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }) }],
+      nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+    });
+  } finally {
+    if (previousDefaultNotifyBin === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
+    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousDefaultNotifyBin;
+  }
   const appended = readNotificationOutbox(replayed.campaignPath);
   assert.ok(appended.length > 0, "the run appended events to the inbox");
   for (const record of appended) {
