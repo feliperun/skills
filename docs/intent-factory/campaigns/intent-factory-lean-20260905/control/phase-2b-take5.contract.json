@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p2b-process-20260908-take5",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 2b process (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5, section 3 rules 4, 5 and 6, section 5 rows 2b). One controller with an atomic lock and files as state: lock.mjs replaces the supervisor lease, generations and lease-liveness; status.json per run and .runs/status.json are derived each tick; notifications go straight to INTENT_FACTORY_NOTIFY_BIN with receipts and bounded retry in notify.jsonl; heartbeat, liveness journal, outbox, cursors, projector and campaign autonomy are deleted after metrics, dashboard and the status line read the new records; campaign sync/ack key on journal event ids. Third node from this campaign's own evidence (decision rotation-loses-worktree-edits-20260908): attempt N+1 of a node continues from attempt N's sealed sha instead of discarding sealed work. Runtimes: claude-sonnet-5 workers with gate none, because DeepSeek (the only other admitted vendor) has no balance and a same-vendor judge is forbidden; the full suite and the orchestrator's diff review are the gate. Rotation no longer exists on this runner, so a Sonnet session is bounded only by timeoutSec and stallTimeoutSec. Take 2: controller-lock landed at 0f7c9cd (adopted by the orchestrator after the first non-empty seal of the campaign exposed a defect in sealAttempt, fixed in the same commit range); this take carries the two remaining nodes. Take 5: controller-lock (0f7c9cd) and status-and-notify (e6933c3) landed; this take carries the last node.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "runtimeDefaults": {
+    "worker": "sonnet"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "continue-from-sealed-attempt",
+      "type": "backend",
+      "phase": "p2b-continue",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "next-attempt-continues-sealed-work",
+          "text": "When a node is re-dispatched as attempt N+1 \u2014 after a gate rejection, a failed verification, a timeout, a stall, a cancel or a resume \u2014 its worktree and branch are cut from attempt N's sealed sha whenever attempt N left a sealed non-empty diff, so the worker continues its own work with the previous error and findings appended; only when attempt N sealed nothing does attempt N+1 start from the integration head; the recorded worktree.baseSha and the 'Previous attempt' section say which; observable in the retry dispatch, worktree.mjs and named replay tests for both cases.",
+          "judgment": true
+        },
+        {
+          "id": "integration-unchanged",
+          "text": "The integration transaction is untouched: the accepted candidate is still integration-head plus the attempt branch, verified on the candidate ref before the run ref moves, and a continued attempt's branch is cut from the sealed sha, which is itself a descendant of the integration head at the time of attempt N; observable in integrate.mjs unchanged and the existing integration tests green.",
+          "judgment": true
+        },
+        {
+          "id": "node-modules-linked",
+          "text": "An attempt worktree created from a repository that has node_modules receives a symlink to it, excluded from the workspace snapshot; observable in worktree.mjs and a named test.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Never discard sealed work: a re-dispatched attempt continues from the previous attempt's sealed sha instead of a fresh worktree cut from the integration head.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`, never the whole file in one command. Never run npm install, npm ci or any package install: the worktree has no node_modules by design (tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with the full suite in five parts \u2014 runner.test.mjs split by test-name pattern `^r`, `^a`, `^[b-oB-O]` and `^[p-zP-Z]` so each part fits the 600 s verification ceiling (a two-way split of the non-a/r tests overran it on 2026-09-08), then skills/mine/intent-factory/test/*.mjs \u2014 and a failed verification discards the attempt, so run the same five commands yourself before finishing, each in the foreground with an explicit timeout: `node --test --test-name-pattern='^r' skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 80`, the same with `'^a'`, `'^[b-oB-O]'` and `'^[p-zP-Z]'`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`. The repository-level test/*.mjs suite (ci-policy) needs node_modules for commitlint and is run by the orchestrator at phase close, not here.",
+          "Why this node exists, from this campaign's record. On 2026-09-08 a Sonnet worker had repaired fifteen root causes in 58 minutes when the runner re-dispatched the node as attempt 2 in a new worktree cut from the run ref; the edits stayed in the abandoned worktree and the fresh session began redoing them. The same happened to p1e attempt 3 the night before. The orchestrator had to salvage both by committing the old worktree's diff as a checkpoint and launching a new take. Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 rule 4 and the integration transaction paragraphs, and references/operations.md, before editing. Phase 2a closed at ad0a8a0 and the 2b nodes controller-lock (0f7c9cd) and status-and-notify (e6933c3, the HEAD of your worktree) landed on 2026-09-08: status.json per run and .runs/status.json are written each tick, notify.jsonl carries receipts, heartbeat.mjs, outbox.mjs, events.mjs and campaign-autonomy.mjs are gone (lease-liveness.mjs survives only because runner.mjs bootstrap helpers and store.mjs import it); scripts/lock.mjs holds the atomic controller lock with capture-and-verify takeover, supervisor.mjs, lease-liveness.mjs, the supervise command and the lease fields are gone, children run in their own process groups and resume's recovery pass reaps or adopts them (see references/operations.md 'Controller lock and takeover'); schema 3 (no ceilings, no progressPolicy, no capsule, no rotation, no handoff CLI), usage.jsonl per run written by appendUsageRecord in runner.mjs and read by render.mjs and metrics.mjs; full suite green in the installed checkout (547 tests, 545 pass, 0 fail, 2 skipped, 731 s); `npm run check` and `npm run typecheck` pass. Sizes at HEAD (lines): scripts/runner.mjs 5900, scripts/supervisor.mjs 694, scripts/lease-liveness.mjs 323, scripts/heartbeat.mjs 473, scripts/outbox.mjs 435, scripts/events.mjs 495, scripts/campaign-autonomy.mjs 1265, scripts/campaign.mjs 1309, scripts/campaign-cli.mjs 540, scripts/render.mjs 422, scripts/metrics.mjs 544, scripts/store.mjs 717, scripts/worktree.mjs 155, scripts/integrate.mjs 478, scripts/notify/index.mjs 125, dashboard/dashboard.mjs 617, statusline/claude-code.sh 413, scripts/runner.test.mjs 5245. test/helpers.mjs defaults INTENT_FACTORY_NOTIFY_BIN to a no-op transport at import; tests that need undelivered or failing deliveries set a failing transport explicitly.",
+          "Behaviour. In the retry dispatch (the path that creates attempt N+1's worktree for gate rejections, failed verification, timeout, stall, cancel and resume), seal attempt N first (sealAttempt in worktree.mjs already commits uncommitted edits onto the attempt branch and returns {sha, empty}); when the seal is non-empty, create attempt N+1's branch and worktree from that sealed sha and record worktree.baseSha = sealed sha and previousAttempt = N on the node; when it is empty, cut from the integration head as today. The 'Previous attempt' prompt section states which base was used and carries the previous error and findings. A rotation no longer exists after phase 2a; do not add one back.",
+          "Integration stays as it is: the accepted candidate is integration-head plus the attempt branch (fast-forward or merge), verified on the candidate ref before the run ref moves. Because a continued branch descends from a sha that descended from the integration head at attempt N, integration behaves exactly as for any attempt branch; add a replay test where attempt 2 continues attempt 1's sealed work after a failed verification and integrates, and one where attempt 1 sealed nothing and attempt 2 starts from the integration head.",
+          "Keep the old attempt worktree retained for inspection as today; only the base of the next attempt changes. Update references/operations.md ('Isolated attempts' and 'Recovery') to describe the continuation rule in two sentences.",
+          "Second small change in worktree.mjs while you are there: when the repository root has a node_modules directory, createAttemptWorktree links it into the new worktree as a symlink named node_modules (never copied), so repository-level tests that need installed binaries (test/ci-policy.test.mjs runs the commit-msg hook through commitlint) and `npm run typecheck` work inside an attempt worktree without any install; the snapshot already excludes node_modules at any depth, so confirm with a named test that the symlink is neither captured as an entry nor reported as a symlink escape.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/scripts/retry.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/integration.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "sealAttempt",
+          "createAttemptWorktree",
+          "integrateAttempt",
+          "resumeRun"
+        ],
+        "decisions": [
+          "Sealed work is never discarded: attempt N+1 continues from attempt N's sealed sha when there is one.",
+          "The integration transaction and the candidate verification are unchanged."
+        ],
+        "nonGoals": [
+          "Do not change the lock, notifications, status files or the scheduler.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p2b-process-20260908-take5",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

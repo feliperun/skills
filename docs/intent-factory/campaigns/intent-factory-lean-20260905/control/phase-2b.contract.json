@@ -1,0 +1,492 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p2b-process-20260908",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 2b process (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5, section 3 rules 4, 5 and 6, section 5 rows 2b). One controller with an atomic lock and files as state: lock.mjs replaces the supervisor lease, generations and lease-liveness; status.json per run and .runs/status.json are derived each tick; notifications go straight to INTENT_FACTORY_NOTIFY_BIN with receipts and bounded retry in notify.jsonl; heartbeat, liveness journal, outbox, cursors, projector and campaign autonomy are deleted after metrics, dashboard and the status line read the new records; campaign sync/ack key on journal event ids. Third node from this campaign's own evidence (decision rotation-loses-worktree-edits-20260908): attempt N+1 of a node continues from attempt N's sealed sha instead of discarding sealed work. Runtimes: claude-sonnet-5 workers with gate none, because DeepSeek (the only other admitted vendor) has no balance and a same-vendor judge is forbidden; the full suite and the orchestrator's diff review are the gate. Rotation no longer exists on this runner, so a Sonnet session is bounded only by timeoutSec and stallTimeoutSec.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "runtimeDefaults": {
+    "worker": "sonnet"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "controller-lock",
+      "type": "backend",
+      "phase": "p2b-lock",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "atomic-lock-and-takeover",
+          "text": "scripts/lock.mjs acquires <run-dir>/controller.lock by atomic exclusive create recording pid and process start time; a contender treats the lock as stale only when the pid is dead or its start time differs, and a takeover first terminates every invocation process group recorded in node state (the same list cancel uses), waits for them to exit, and only then dispatches; observable in lock.mjs and in the named replay tests for two contenders, pid reuse with a start-time mismatch, and an orphaned detached invocation reaped on takeover.",
+          "judgment": true
+        },
+        {
+          "id": "supervisor-removed",
+          "text": "scripts/supervisor.mjs, scripts/lease-liveness.mjs, the supervisor lease, lease generations, generation fencing and the `supervise` CLI command are deleted with their tests and references; run --detach starts the one controller, resume --detach recovers an orphaned run, and status shows a stale controller explicitly (pid, start time, last tick) instead of a lease; observable in the deleted files, runner.mjs, render.mjs and the status tests.",
+          "judgment": true
+        },
+        {
+          "id": "workers-in-own-process-groups",
+          "text": "Worker, judge and verification children run in their own detached process groups whose ids are recorded in node state, so a takeover or cancel can terminate them without racing the dead controller; observable in the dispatch code and in the reaped-orphan test.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Replace the supervisor lease, generations and lease-liveness with one atomic controller lock whose takeover reaps the dead controller's invocations before dispatching anything.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`, never the whole file in one command. Never run npm install, npm ci or any package install: the worktree has no node_modules by design (tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with the full suite in five parts \u2014 runner.test.mjs split by test-name pattern `^r`, `^a`, `^[b-oB-O]` and `^[p-zP-Z]` so each part fits the 600 s verification ceiling (a two-way split of the non-a/r tests overran it on 2026-09-08), then skills/mine/intent-factory/test/*.mjs \u2014 and a failed verification discards the attempt, so run the same five commands yourself before finishing, each in the foreground with an explicit timeout: `node --test --test-name-pattern='^r' skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 80`, the same with `'^a'`, `'^[b-oB-O]'` and `'^[p-zP-Z]'`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`. The repository-level test/*.mjs suite (ci-policy) needs node_modules for commitlint and is run by the orchestrator at phase close, not here.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 rule 5 and the module table (lock.mjs \u2264 120 lines) and section 5 row 2b controller-lock before editing. Phase 2a closed at ad0a8a0 on 2026-09-08, the HEAD of your worktree: schema 3 (no ceilings, no progressPolicy, no capsule, no rotation, no handoff CLI), usage.jsonl per run written by appendUsageRecord in runner.mjs and read by render.mjs and metrics.mjs; full suite green in the installed checkout (547 tests, 545 pass, 0 fail, 2 skipped, 731 s); `npm run check` and `npm run typecheck` pass. Sizes at HEAD (lines): scripts/runner.mjs 5900, scripts/supervisor.mjs 694, scripts/lease-liveness.mjs 323, scripts/heartbeat.mjs 473, scripts/outbox.mjs 435, scripts/events.mjs 495, scripts/campaign-autonomy.mjs 1265, scripts/campaign.mjs 1309, scripts/campaign-cli.mjs 540, scripts/render.mjs 422, scripts/metrics.mjs 544, scripts/store.mjs 717, scripts/worktree.mjs 155, scripts/integrate.mjs 478, scripts/notify/index.mjs 125, dashboard/dashboard.mjs 617, statusline/claude-code.sh 413, scripts/runner.test.mjs 5245. Still present and yours to delete or replace in this phase where the packet says so: supervisor.mjs (supervise --detach, lease, generations), lease-liveness.mjs, heartbeat.mjs (liveness journal facts, heartbeat.json, governance-metrics.json), outbox.mjs (notification-outbox.json, cursors, drain), events.mjs (projector), campaign-autonomy.mjs (plan.json, control-state.json, controller snapshots, repair synthesis). test/helpers.mjs defaults INTENT_FACTORY_NOTIFY_BIN to a no-op transport at import; tests that need undelivered or failing deliveries set a failing transport explicitly.",
+          "Lock. New module scripts/lock.mjs: acquire(runDir) creates <run-dir>/controller.lock with O_EXCL writing {pid, processStartToken, startedAt, hostname}; a contender that finds the file reads it and treats it as stale only when the pid is dead or the recorded process start token differs from the live process's token (pid reuse); a live lock is `controller_active` and the contender exits without touching anything; release removes the file on clean shutdown. Reuse processStartToken from the existing code (supervisor.mjs exports it today; move it to lock.mjs). Takeover: before dispatching, terminate every invocation process group recorded in node state (the same list cancel uses), wait for exit with a bounded timeout, then clear the recorded process ids and proceed; a test proves an orphaned detached invocation is reaped.",
+          "Delete supervisor.mjs, lease-liveness.mjs, the supervisor lease and lease generation fields in run.json and node state (leaseGeneration, leaseAcquiredAt, leaseRenewedAt, leaseExpiresAt, holderId, generation fencing), the `supervise` CLI command and `superviseRun`, and every test of that machinery (test/supervisor.test.mjs and the supervisor cases in runner.test.mjs), keeping `resume --detach` as the recovery path for an orphaned run. Move what other modules import from supervisor.mjs (invocationAlive, invocationResult, processStartToken, quotaResetSchedule and friends) to lock.mjs or to the module that owns the behaviour; grep for `from \"./supervisor.mjs\"` and `lease` before deleting.",
+          "Process groups. Worker, judge and verification children are spawned detached in their own process groups (verification.mjs already does this on non-Windows); record the process group id on the invocation in node state so cancel and takeover terminate the group, not just the pid.",
+          "Status. render.mjs shows the controller as `active pid N since T` or `stale pid N (dead|restarted) last tick T` from controller.lock and the newest node update instead of lease health; update statusline/claude-code.sh and dashboard.mjs only where they read lease fields (phase 3 redesigns them).",
+          "Docs: describe the lock and takeover in references/operations.md (replace the supervisor material in contract.md and operations.md; delete the lease material). Keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/supervisor.mjs",
+          "skills/mine/intent-factory/scripts/lease-liveness.mjs",
+          "skills/mine/intent-factory/scripts/store.mjs",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/scripts/verification.mjs",
+          "skills/mine/intent-factory/test/supervisor.test.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "superviseRun",
+          "processStartToken",
+          "leaseAdoption",
+          "cancelRun",
+          "readLease",
+          "leaseHealthy"
+        ],
+        "decisions": [
+          "One controller per run, held by an atomic lock file; staleness is pid death or a start-time mismatch, nothing else.",
+          "A takeover reaps every recorded invocation process group before dispatching; nothing runs twice.",
+          "The supervisor process, its lease and generations are deleted; an orphaned run is recovered by resume --detach."
+        ],
+        "nonGoals": [
+          "Do not touch heartbeat, outbox, events, campaign autonomy or notifications; the next node does that.",
+          "Do not redesign status output beyond the controller line; phase 3 does that.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "status-and-notify",
+      "type": "backend",
+      "phase": "p2b-notify",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "status-json-each-tick",
+          "text": "The controller writes <run-dir>/status.json (run id, contract id, campaign id, controller pid and start time, nodes with state, attempt, runtime, elapsed, tokens by kind and cost from usage.jsonl, verdict, one-line note, needs-you items with the command that resolves each) and .runs/status.json (pointer to the active run plus the same summary) atomically on every tick and on every terminal transition; status, the status line and the dashboard read those files; observable in render.mjs, statusline/claude-code.sh, dashboard/dashboard.mjs and their tests.",
+          "judgment": true
+        },
+        {
+          "id": "notify-with-receipts",
+          "text": "On node.terminal, run.terminal and attention the controller calls INTENT_FACTORY_NOTIFY_BIN once with a one-line message rendered from fixed templates (counters and identifiers only, never model text) and appends a receipt {eventId, type, at, delivered|failed, attempts, error} to <run-dir>/notify.jsonl; a failed delivery is retried on the next ticks up to three times with backoff and then recorded failed; when the variable is unset nothing is spawned and the receipt says no_transport; progress never notifies; observable in scripts/notify/index.mjs and named tests for delivered, failed-after-three, and no-transport.",
+          "judgment": true
+        },
+        {
+          "id": "heartbeat-outbox-autonomy-deleted",
+          "text": "heartbeat.mjs, the liveness journal facts, outbox.mjs, events.mjs (the projector), notification cursors, campaign-autonomy.mjs with plan.json, control-state.json and the campaign start/supervise/configure/drain CLI commands are deleted with their tests and references after metrics.mjs, dashboard.mjs and the status line were switched to status.json, usage.jsonl and notify.jsonl; campaign sync and ack key on journal event ids; campaign watch --wake prints one line per actionable change (run terminal, node attention, orphaned run, twenty minutes without an active run) by reading status.json files, and nothing for progress; observable in the deleted files, campaign.mjs, campaign-cli.mjs and their tests.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Derive status.json each tick, notify directly with receipts and bounded retry, and delete the heartbeat, outbox, projector and campaign-autonomy machinery after its readers moved to the new files.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`, never the whole file in one command. Never run npm install, npm ci or any package install: the worktree has no node_modules by design (tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with the full suite in five parts \u2014 runner.test.mjs split by test-name pattern `^r`, `^a`, `^[b-oB-O]` and `^[p-zP-Z]` so each part fits the 600 s verification ceiling (a two-way split of the non-a/r tests overran it on 2026-09-08), then skills/mine/intent-factory/test/*.mjs \u2014 and a failed verification discards the attempt, so run the same five commands yourself before finishing, each in the foreground with an explicit timeout: `node --test --test-name-pattern='^r' skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 80`, the same with `'^a'`, `'^[b-oB-O]'` and `'^[p-zP-Z]'`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`. The repository-level test/*.mjs suite (ci-policy) needs node_modules for commitlint and is run by the orchestrator at phase close, not here.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 rules 5 and 6, the module table (notify/* \u2264 200 lines, campaign.mjs \u2264 500) and the 'Deleted' paragraph, and section 5 row 2b status-and-notify before editing. Phase 2a closed at ad0a8a0 on 2026-09-08, the HEAD of your worktree: schema 3 (no ceilings, no progressPolicy, no capsule, no rotation, no handoff CLI), usage.jsonl per run written by appendUsageRecord in runner.mjs and read by render.mjs and metrics.mjs; full suite green in the installed checkout (547 tests, 545 pass, 0 fail, 2 skipped, 731 s); `npm run check` and `npm run typecheck` pass. Sizes at HEAD (lines): scripts/runner.mjs 5900, scripts/supervisor.mjs 694, scripts/lease-liveness.mjs 323, scripts/heartbeat.mjs 473, scripts/outbox.mjs 435, scripts/events.mjs 495, scripts/campaign-autonomy.mjs 1265, scripts/campaign.mjs 1309, scripts/campaign-cli.mjs 540, scripts/render.mjs 422, scripts/metrics.mjs 544, scripts/store.mjs 717, scripts/worktree.mjs 155, scripts/integrate.mjs 478, scripts/notify/index.mjs 125, dashboard/dashboard.mjs 617, statusline/claude-code.sh 413, scripts/runner.test.mjs 5245. Still present and yours to delete or replace in this phase where the packet says so: supervisor.mjs (supervise --detach, lease, generations), lease-liveness.mjs, heartbeat.mjs (liveness journal facts, heartbeat.json, governance-metrics.json), outbox.mjs (notification-outbox.json, cursors, drain), events.mjs (projector), campaign-autonomy.mjs (plan.json, control-state.json, controller snapshots, repair synthesis). test/helpers.mjs defaults INTENT_FACTORY_NOTIFY_BIN to a no-op transport at import; tests that need undelivered or failing deliveries set a failing transport explicitly.",
+          "Order of work, because every deletion must leave a working product: first write status.json (per run and .runs/status.json, atomic rename, \u2264 200 KB) and notify.jsonl from the controller tick; then switch the readers \u2014 render.mjs status/report, statusline/claude-code.sh, dashboard/dashboard.mjs, metrics.mjs and metrics-report.mjs \u2014 to status.json, usage.jsonl and notify.jsonl; then delete heartbeat.mjs, the liveness journal facts and governance-metrics.json, outbox.mjs, events.mjs, notification cursors and the projector, campaign-autonomy.mjs with plan.json, control-state.json, controller snapshots and the campaign start/supervise/configure/drain commands, and every test of that machinery; then rewrite campaign sync and ack to key on journal event ids. Delete references/release-1.md, references/campaign-autonomy.md, references/feedback.md and references/harness-feedback.md when nothing they describe exists any more and fold the surviving two paragraphs (notify bin contract, status.json shape) into operations.md; remove their SKILL.md router rows and keep SKILL.md under the byte ceiling.",
+          "Notify. scripts/notify/index.mjs becomes a one-line dispatcher: render(event) from fixed per-type templates using counters and identifiers only (node id, run id, state, attempt, error code, done/total), call INTENT_FACTORY_NOTIFY_BIN with the JSON event on stdin, append the receipt to <run-dir>/notify.jsonl, and schedule up to three retries with backoff on failure from the controller tick. Keep the macOS osascript adapter only as an explicit opt-in (INTENT_FACTORY_NOTIFY_BIN=os-macos), never as a default: the default with no variable is no transport, recorded as such, because the implicit fallback spammed the owner's desktop from the test suite.",
+          "campaign watch --wake <id> reads the campaign's linked runs' status.json files every 30 s and prints exactly one line per actionable change \u2014 run terminal, node attention (failed, exhausted, stalled, canceled, blocked for a reason other than a failed dependency), a non-terminal run whose controller lock is stale, and twenty minutes with no active run \u2014 and exits when the campaign is closed; nothing for progress. It replaces .runs/control/intent-factory-lean-20260905/watch-campaign.mjs, which you may read for the exact conditions but must not edit.",
+          "Tests, each named after its case: status.json written on tick and on terminal with the documented shape; .runs/status.json points at the active run; notify delivered receipt, failed-after-three receipt, no-transport receipt, progress never notifies; campaign sync/ack by journal event id; watch --wake emits one line per actionable change and none for progress; metrics and dashboard read the new files; no test or module references heartbeat, outbox, events.mjs, campaign-autonomy or the liveness journal any more.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/SKILL.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/references/campaign-autonomy.md",
+          "skills/mine/intent-factory/references/feedback.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/scripts/heartbeat.mjs",
+          "skills/mine/intent-factory/scripts/outbox.mjs",
+          "skills/mine/intent-factory/scripts/events.mjs",
+          "skills/mine/intent-factory/scripts/campaign.mjs",
+          "skills/mine/intent-factory/scripts/campaign-cli.mjs",
+          "skills/mine/intent-factory/scripts/campaign-autonomy.mjs",
+          "skills/mine/intent-factory/scripts/metrics.mjs",
+          "skills/mine/intent-factory/scripts/notify/index.mjs",
+          "skills/mine/intent-factory/scripts/notify/os-macos.mjs",
+          "skills/mine/intent-factory/dashboard/dashboard.mjs",
+          "skills/mine/intent-factory/statusline/claude-code.sh",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/test/campaign.test.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "recordLiveness",
+          "drainNotifications",
+          "projectEvent",
+          "renderStatusJson",
+          "campaignCli",
+          "loadNotifyAdapters"
+        ],
+        "decisions": [
+          "status.json per run and .runs/status.json are the only derived read surfaces; heartbeat, outbox and projector go.",
+          "Notifications are direct calls to INTENT_FACTORY_NOTIFY_BIN with receipts and three bounded retries; no transport means a recorded no_transport receipt, never an implicit desktop adapter.",
+          "Campaign autonomy (plan, control-state, supervise, repair synthesis) is deleted; the orchestrator session acts on watch --wake lines."
+        ],
+        "nonGoals": [
+          "Do not touch the controller lock or process groups; the previous node does that.",
+          "Do not redesign the dashboard page or the status line layout; phase 3 does that.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "continue-from-sealed-attempt",
+      "type": "backend",
+      "phase": "p2b-continue",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "next-attempt-continues-sealed-work",
+          "text": "When a node is re-dispatched as attempt N+1 \u2014 after a gate rejection, a failed verification, a timeout, a stall, a cancel or a resume \u2014 its worktree and branch are cut from attempt N's sealed sha whenever attempt N left a sealed non-empty diff, so the worker continues its own work with the previous error and findings appended; only when attempt N sealed nothing does attempt N+1 start from the integration head; the recorded worktree.baseSha and the 'Previous attempt' section say which; observable in the retry dispatch, worktree.mjs and named replay tests for both cases.",
+          "judgment": true
+        },
+        {
+          "id": "integration-unchanged",
+          "text": "The integration transaction is untouched: the accepted candidate is still integration-head plus the attempt branch, verified on the candidate ref before the run ref moves, and a continued attempt's branch is cut from the sealed sha, which is itself a descendant of the integration head at the time of attempt N; observable in integrate.mjs unchanged and the existing integration tests green.",
+          "judgment": true
+        },
+        {
+          "id": "node-modules-linked",
+          "text": "An attempt worktree created from a repository that has node_modules receives a symlink to it, excluded from the workspace snapshot; observable in worktree.mjs and a named test.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Never discard sealed work: a re-dispatched attempt continues from the previous attempt's sealed sha instead of a fresh worktree cut from the integration head.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`, never the whole file in one command. Never run npm install, npm ci or any package install: the worktree has no node_modules by design (tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with the full suite in five parts \u2014 runner.test.mjs split by test-name pattern `^r`, `^a`, `^[b-oB-O]` and `^[p-zP-Z]` so each part fits the 600 s verification ceiling (a two-way split of the non-a/r tests overran it on 2026-09-08), then skills/mine/intent-factory/test/*.mjs \u2014 and a failed verification discards the attempt, so run the same five commands yourself before finishing, each in the foreground with an explicit timeout: `node --test --test-name-pattern='^r' skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 80`, the same with `'^a'`, `'^[b-oB-O]'` and `'^[p-zP-Z]'`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`. The repository-level test/*.mjs suite (ci-policy) needs node_modules for commitlint and is run by the orchestrator at phase close, not here.",
+          "Why this node exists, from this campaign's record. On 2026-09-08 a Sonnet worker had repaired fifteen root causes in 58 minutes when the runner re-dispatched the node as attempt 2 in a new worktree cut from the run ref; the edits stayed in the abandoned worktree and the fresh session began redoing them. The same happened to p1e attempt 3 the night before. The orchestrator had to salvage both by committing the old worktree's diff as a checkpoint and launching a new take. Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 rule 4 and the integration transaction paragraphs, and references/operations.md, before editing. Phase 2a closed at ad0a8a0 on 2026-09-08, the HEAD of your worktree: schema 3 (no ceilings, no progressPolicy, no capsule, no rotation, no handoff CLI), usage.jsonl per run written by appendUsageRecord in runner.mjs and read by render.mjs and metrics.mjs; full suite green in the installed checkout (547 tests, 545 pass, 0 fail, 2 skipped, 731 s); `npm run check` and `npm run typecheck` pass. Sizes at HEAD (lines): scripts/runner.mjs 5900, scripts/supervisor.mjs 694, scripts/lease-liveness.mjs 323, scripts/heartbeat.mjs 473, scripts/outbox.mjs 435, scripts/events.mjs 495, scripts/campaign-autonomy.mjs 1265, scripts/campaign.mjs 1309, scripts/campaign-cli.mjs 540, scripts/render.mjs 422, scripts/metrics.mjs 544, scripts/store.mjs 717, scripts/worktree.mjs 155, scripts/integrate.mjs 478, scripts/notify/index.mjs 125, dashboard/dashboard.mjs 617, statusline/claude-code.sh 413, scripts/runner.test.mjs 5245. Still present and yours to delete or replace in this phase where the packet says so: supervisor.mjs (supervise --detach, lease, generations), lease-liveness.mjs, heartbeat.mjs (liveness journal facts, heartbeat.json, governance-metrics.json), outbox.mjs (notification-outbox.json, cursors, drain), events.mjs (projector), campaign-autonomy.mjs (plan.json, control-state.json, controller snapshots, repair synthesis). test/helpers.mjs defaults INTENT_FACTORY_NOTIFY_BIN to a no-op transport at import; tests that need undelivered or failing deliveries set a failing transport explicitly.",
+          "Behaviour. In the retry dispatch (the path that creates attempt N+1's worktree for gate rejections, failed verification, timeout, stall, cancel and resume), seal attempt N first (sealAttempt in worktree.mjs already commits uncommitted edits onto the attempt branch and returns {sha, empty}); when the seal is non-empty, create attempt N+1's branch and worktree from that sealed sha and record worktree.baseSha = sealed sha and previousAttempt = N on the node; when it is empty, cut from the integration head as today. The 'Previous attempt' prompt section states which base was used and carries the previous error and findings. A rotation no longer exists after phase 2a; do not add one back.",
+          "Integration stays as it is: the accepted candidate is integration-head plus the attempt branch (fast-forward or merge), verified on the candidate ref before the run ref moves. Because a continued branch descends from a sha that descended from the integration head at attempt N, integration behaves exactly as for any attempt branch; add a replay test where attempt 2 continues attempt 1's sealed work after a failed verification and integrates, and one where attempt 1 sealed nothing and attempt 2 starts from the integration head.",
+          "Keep the old attempt worktree retained for inspection as today; only the base of the next attempt changes. Update references/operations.md ('Isolated attempts' and 'Recovery') to describe the continuation rule in two sentences.",
+          "Second small change in worktree.mjs while you are there: when the repository root has a node_modules directory, createAttemptWorktree links it into the new worktree as a symlink named node_modules (never copied), so repository-level tests that need installed binaries (test/ci-policy.test.mjs runs the commit-msg hook through commitlint) and `npm run typecheck` work inside an attempt worktree without any install; the snapshot already excludes node_modules at any depth, so confirm with a named test that the symlink is neither captured as an entry nor reported as a symlink escape.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/scripts/retry.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/integration.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "sealAttempt",
+          "createAttemptWorktree",
+          "integrateAttempt",
+          "resumeRun"
+        ],
+        "decisions": [
+          "Sealed work is never discarded: attempt N+1 continues from attempt N's sealed sha when there is one.",
+          "The integration transaction and the candidate verification are unchanged."
+        ],
+        "nonGoals": [
+          "Do not change the lock, notifications, status files or the scheduler.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p2b-process-20260908",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

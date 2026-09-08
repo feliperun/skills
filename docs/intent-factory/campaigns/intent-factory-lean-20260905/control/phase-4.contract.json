@@ -1,0 +1,411 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p4-release-20260908-take2",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 4 release (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5, section 3 module table, section 5 rows 4, section 6 indicators). runner.mjs is split per the module table with no behaviour change (CLI only, scheduler.mjs, node.mjs, review.mjs, drivers/protocol.mjs), the docs shrink to SKILL.md \u2264 6 KB, contract.md \u2264 20 KB and operations.md \u2264 10 KB describing only what exists with history moved under docs/intent-factory/, and metrics computes the section-6 indicators over usage.jsonl, node attempts, notify.jsonl receipts and active intervals with a baseline fixture from this campaign's own records. Runtimes: claude-sonnet-5 workers with an advisory deepseek-v4-pro judge (the DeepSeek balance was restored on 2026-09-08 at 19:5xZ); the full suite with an unchanged pass count and the orchestrator's review are the gate.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 2,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "runtimeDefaults": {
+    "worker": "sonnet",
+    "judge": "deepseek-pro"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    },
+    "deepseek-pro": {
+      "driver": "codex",
+      "model": "deepseek-v4-pro",
+      "reasoning": "high",
+      "sandbox": "read-only",
+      "tier": 3,
+      "config": {
+        "model_provider": "deepseek",
+        "model_providers.deepseek.name": "DeepSeek",
+        "model_providers.deepseek.base_url": "https://api.deepseek.com/v1",
+        "model_providers.deepseek.env_key": "DEEPSEEK_API_KEY",
+        "model_providers.deepseek.wire_api": "responses",
+        "model_providers.deepseek.requires_openai_auth": false
+      }
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "runner-split",
+      "type": "backend",
+      "phase": "p4-split",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "modules-per-table",
+          "text": "runner.mjs is a CLI entry of at most about 300 lines that parses arguments and delegates; scheduler.mjs owns the DAG, slots, dispatch and retry in place; node.mjs owns one attempt (worktree, prompt, worker, verification, review handoff, result adoption); review.mjs owns the judge prompt, verdict candidates and the bounded re-ask; drivers/protocol.mjs holds the shared normalization and version parsing every driver imports (extracted from exec-jsonl.mjs, which keeps only the generic adapter); observable in the new files, their imports and `wc -l`.",
+          "judgment": true
+        },
+        {
+          "id": "no-behaviour-change",
+          "text": "The split changes no behaviour: every exported symbol other modules or tests imported from runner.mjs is re-exported or imported from its new home, the full suite passes with the same test count and pass count as before the node, and the diff contains moves, import rewrites and file headers only, with no logic edits; observable in the diff and the recorded verification.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "advisory",
+        "runtime": "deepseek-pro",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 1,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Split runner.mjs into the section-3 modules by moving code, without changing behaviour.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`. Never run npm install, npm ci or any package install: the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with runner.test.mjs in four name-pattern parts and `node --test 'skills/mine/intent-factory/test/*.mjs'`; run the same five commands yourself before finishing and record the test and pass counts in your summary next to the counts before your first edit.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3, the module table with its line targets and the 'Deleted' paragraph, and section 5 row 4 runner-split before editing. Phase 3 closed at 88064c4 on 2026-09-08 (HEAD of your worktree): dashboard v2 and status surfaces over status.json, usage.jsonl and notify.jsonl; schema 3; lock.mjs; continue-from-sealed-attempt; node_modules linked into worktrees. Full suite green in the installed checkout (see the phase-3 close note in the campaign journal for the counts). Sizes at HEAD (lines): scripts/runner.mjs 6088, scripts/contract.mjs 1592, scripts/verification.mjs 957, scripts/campaign.mjs 1425, scripts/metrics.mjs 558, scripts/metrics-report.mjs 98, scripts/drivers/exec-jsonl.mjs 1225, scripts/review-modes.mjs 144, scripts/judge-gate.mjs 356, scripts/retry.mjs 226, scripts/lock.mjs 237, scripts/integrate.mjs 478, scripts/worktree.mjs 196, scripts/runner.test.mjs 5036, SKILL.md 107, references/contract.md 900, references/operations.md 160, references/routing.md 512. Known leftovers: lease-liveness.mjs survives (runner.mjs bootstrap helpers and store.mjs import it), references/routing.md, session-memory.md, feedback.md, harness-feedback.md, release-1.md and campaign-autonomy.md still exist and describe deleted machinery (docs-v03 deletes or merges them), SKILL.md still mentions budgets.",
+          "Method: pure moves. Start with `npm run typecheck` and the five verification commands to record the baseline counts. Then, one module at a time \u2014 review.mjs first (judge prompt, verdict candidates, re-ask), then node.mjs (one attempt: worktree creation and sealing calls, prompt rendering, worker launch, result adoption, verification calls, review handoff), then scheduler.mjs (DAG, ready set, slots, dispatch, retry in place, resume's adopt-and-re-judge ordering), then drivers/protocol.mjs (the normalization and version parsing exec-jsonl.mjs exports to the other drivers) \u2014 cut the functions out of runner.mjs (or exec-jsonl.mjs) verbatim, paste them into the new module with the imports they need, and import them back where they were used. Typecheck after each module. Re-export from runner.mjs every symbol a test or another module still imports from it, then rewrite those imports to the new home and drop the re-export. No renames, no signature changes, no reordering of logic, no 'while I am here' fixes: if you find a defect, name it in your summary and leave it.",
+          "Line targets from the module table are review guidance: runner.mjs \u2264 300 as CLI only, scheduler.mjs \u2264 400, node.mjs \u2264 700, review.mjs \u2264 300, drivers/protocol.mjs as today; if a module lands above its target because the code it owns is bigger than the plan assumed, say so with the count in your summary rather than splitting further by invented boundaries. contract.mjs, verification.mjs and campaign.mjs stay as they are in this node.",
+          "Keep your context small: read by offset or grep, never whole large files; runner.mjs is large \u2014 map it first with `grep -n '^export\\|^async function\\|^function' skills/mine/intent-factory/scripts/runner.mjs` and move by ranges. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/drivers/exec-jsonl.mjs",
+          "skills/mine/intent-factory/scripts/drivers/index.mjs",
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/review-modes.mjs",
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "package.json"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "runContract",
+          "resumeRun",
+          "cancelRun",
+          "preflightContract"
+        ],
+        "decisions": [
+          "The split is a pure move; behaviour, names and signatures do not change.",
+          "Line targets are guidance; an honest count beats an invented boundary."
+        ],
+        "nonGoals": [
+          "Do not touch docs, metrics or the dashboard; sibling nodes own them after this node.",
+          "Do not fix defects you find; name them in the summary.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "docs-v03",
+      "type": "docs",
+      "phase": "p4-docs",
+      "runtime": "sonnet",
+      "dependsOn": [
+        "runner-split"
+      ],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "three-docs-within-ceilings",
+          "text": "SKILL.md is at most 6 KB, references/contract.md at most 20 KB and references/operations.md at most 10 KB, each describing only what exists at HEAD (schema 3, worktrees and the integration transaction, the lock, status.json, usage.jsonl, notify receipts, discovery and re-tiering, review modes, resume, the CLI commands that exist); every other file under references/ is deleted or merged into those three; observable in the files, `wc -c` and test/docs-diet.test.mjs, which now enforces the three byte ceilings.",
+          "judgment": true
+        },
+        {
+          "id": "history-moved-and-links-valid",
+          "text": "RETROSPECTIVE-*.md, PRD-RETROSPECTIVE-*.md, ADENDO-*.md and TECH-SPEC-2026-09-01.md move from the skill directory to docs/intent-factory/ with their links updated, and a link-check test proves every relative link in SKILL.md, references/*.md and docs/intent-factory/*.md resolves; observable in `git diff --stat`, the moved files and the new test.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "advisory",
+        "runtime": "deepseek-pro",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 1,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Shrink the skill's documentation to three files that describe only what exists, move history out of the skill, and enforce the ceilings and links with tests.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout. Never run npm install, npm ci or any package install.",
+          "The controller verifies this node with `node --test 'skills/mine/intent-factory/test/*.mjs'`; run it yourself before finishing. Another node (metrics-v03) may run at the same time on scripts/metrics.mjs, scripts/metrics-report.mjs, scripts/metrics-evals.mjs and test/metrics.test.mjs: do not edit those; your files are SKILL.md, references/*, the history files you move, docs/intent-factory/*, test/docs-diet.test.mjs and a new link-check test.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 rule 7 and section 5 row 4 docs-v03 before editing. Phase 3 closed at 88064c4 on 2026-09-08 (HEAD of your worktree): dashboard v2 and status surfaces over status.json, usage.jsonl and notify.jsonl; schema 3; lock.mjs; continue-from-sealed-attempt; node_modules linked into worktrees. Full suite green in the installed checkout (see the phase-3 close note in the campaign journal for the counts). Sizes at HEAD (lines): scripts/runner.mjs 6088, scripts/contract.mjs 1592, scripts/verification.mjs 957, scripts/campaign.mjs 1425, scripts/metrics.mjs 558, scripts/metrics-report.mjs 98, scripts/drivers/exec-jsonl.mjs 1225, scripts/review-modes.mjs 144, scripts/judge-gate.mjs 356, scripts/retry.mjs 226, scripts/lock.mjs 237, scripts/integrate.mjs 478, scripts/worktree.mjs 196, scripts/runner.test.mjs 5036, SKILL.md 107, references/contract.md 900, references/operations.md 160, references/routing.md 512. Known leftovers: lease-liveness.mjs survives (runner.mjs bootstrap helpers and store.mjs import it), references/routing.md, session-memory.md, feedback.md, harness-feedback.md, release-1.md and campaign-autonomy.md still exist and describe deleted machinery (docs-v03 deletes or merges them), SKILL.md still mentions budgets.",
+          "Write from the code, not from the old docs: for every command, field, file and state you describe, grep the source at HEAD and describe what it does today. SKILL.md (\u2264 6 KB): what the factory is, the router table to the two references, the session commands, the load-bearing rules that survived (campaign first, one contract per plan step, autonomous packets with writeRoots, verification is the gate with advisory review by default, detach and act only on terminal states, resume never restart, no spend ceiling \u2014 time and allowance are the limits, discovery and cross-vendor judging). references/contract.md (\u2264 20 KB): schema 3 contract shape with every accepted field, runtimes with vendor, tier, fallback and driver specifics, task packets, Definition of Done proofs, gates and review modes, node states, worker result protocol, resume semantics. references/operations.md (\u2264 10 KB): worktrees and the integration transaction, the controller lock and takeover, status.json and the status surfaces, usage.jsonl and notify.jsonl, runtime discovery and re-tiering, recovery. Delete routing.md, session-memory.md and any other file left under references/ after merging the sentences that still describe existing behaviour; remove SKILL.md router rows to deleted files.",
+          "Move RETROSPECTIVE-2026-08-28.md, RETROSPECTIVE-2026-09-01.md, RETROSPECTIVE-2026-09-05.md, PRD-RETROSPECTIVE-IMPLEMENTATION-2026-08-29.md, ADENDO-01-feedback-pull-only-liveness.md, ADENDO-02-budget-governance-continuations.md and TECH-SPEC-2026-09-01.md with `git mv` into docs/intent-factory/ (the lean spec already lives there) and fix links that pointed at them. Leave skills/mine/intent-factory/agents/ alone unless it documents deleted behaviour, in which case delete it and say so.",
+          "Tests: extend test/docs-diet.test.mjs to enforce the three byte ceilings (6144, 20480, 10240 bytes) and the absence of any other file under references/; add a link-check test that parses every relative markdown link in SKILL.md, references/*.md and docs/intent-factory/*.md and asserts the target exists.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/SKILL.md",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/references/routing.md",
+          "skills/mine/intent-factory/references/session-memory.md",
+          "skills/mine/intent-factory/test/docs-diet.test.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory",
+          "docs/intent-factory"
+        ],
+        "symbols": [],
+        "decisions": [
+          "Three documents describe only what exists; history lives under docs/intent-factory/.",
+          "Ceilings and links are enforced by tests, not by review."
+        ],
+        "nonGoals": [
+          "Do not edit scripts/metrics*.mjs or test/metrics.test.mjs; the sibling node owns them.",
+          "Do not change code to match old docs; change the docs.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "metrics-v03",
+      "type": "backend",
+      "phase": "p4-metrics",
+      "runtime": "sonnet",
+      "dependsOn": [
+        "runner-split"
+      ],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "section-6-indicators",
+          "text": "`metrics <campaign-id> [--json]` reports, over the campaign's linked runs, the section-6 indicators with their exact denominators: logical nodes done at any attempt over terminal logical nodes (pending ones censored), linked runs per closed checkpoint, runs per campaign, wall clock, tokensByKind (uncached input, cache read, output) per campaign and per runtime summed over usage.jsonl records, cost with provenance (provider, priced, unknown), blocking judge first-pass rate, notification receipts delivered or failed within 60 s over terminal and attention events from notify.jsonl, and active intervals from events.jsonl; ambientCoverage, silentStallRate and every weighted-token indicator are gone; observable in metrics.mjs, metrics-report.mjs and test/metrics.test.mjs.",
+          "judgment": true
+        },
+        {
+          "id": "baseline-fixture-from-this-campaign",
+          "text": "test/fixtures holds a baseline built from this campaign's own recorded runs (status.json, usage.jsonl, notify.jsonl, events.jsonl and node JSON reduced to the fields metrics reads, no prompts or logs) and a named test computes the indicators over it and asserts the recorded values, so the close report has a comparable baseline; observable in the fixture and the test.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "advisory",
+        "runtime": "deepseek-pro",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 1,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Compute the section-6 indicators from the v0.3 records, delete the weighted-token indicators, and pin a baseline from this campaign's own runs.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout. Never run npm install, npm ci or any package install.",
+          "The controller verifies this node with `node --test skills/mine/intent-factory/test/metrics.test.mjs` and `node --test 'skills/mine/intent-factory/test/*.mjs'`; run both yourself before finishing. Another node (docs-v03) may run at the same time on SKILL.md, references/ and docs/intent-factory/: do not edit those; your files are scripts/metrics.mjs, scripts/metrics-report.mjs, scripts/metrics-evals.mjs, test/metrics.test.mjs and test/fixtures.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 6 (denominators and the indicator table) and section 5 row 4 metrics-v03 before editing. Phase 3 closed at 88064c4 on 2026-09-08 (HEAD of your worktree): dashboard v2 and status surfaces over status.json, usage.jsonl and notify.jsonl; schema 3; lock.mjs; continue-from-sealed-attempt; node_modules linked into worktrees. Full suite green in the installed checkout (see the phase-3 close note in the campaign journal for the counts). Sizes at HEAD (lines): scripts/runner.mjs 6088, scripts/contract.mjs 1592, scripts/verification.mjs 957, scripts/campaign.mjs 1425, scripts/metrics.mjs 558, scripts/metrics-report.mjs 98, scripts/drivers/exec-jsonl.mjs 1225, scripts/review-modes.mjs 144, scripts/judge-gate.mjs 356, scripts/retry.mjs 226, scripts/lock.mjs 237, scripts/integrate.mjs 478, scripts/worktree.mjs 196, scripts/runner.test.mjs 5036, SKILL.md 107, references/contract.md 900, references/operations.md 160, references/routing.md 512. Known leftovers: lease-liveness.mjs survives (runner.mjs bootstrap helpers and store.mjs import it), references/routing.md, session-memory.md, feedback.md, harness-feedback.md, release-1.md and campaign-autonomy.md still exist and describe deleted machinery (docs-v03 deletes or merges them), SKILL.md still mentions budgets.",
+          "Sources at HEAD: <run-dir>/status.json and node JSON (states, attempts, revisions, verdicts), <run-dir>/usage.jsonl (one record per invocation with tokens by kind and costUsd with provenance), <run-dir>/notify.jsonl (receipts with deliveredAt or failure), <run-dir>/events.jsonl (transitions for active intervals), the campaign journal for linked run ids and checkpoints. Read the shapes from the code that writes them. Delete every reader of deleted records (usage-ledger, heartbeat, outbox, projection) and every indicator that needed weighted tokens, ambient coverage or silent stalls, with their tests.",
+          "Baseline fixture: from the recorded runs of intent-factory-lean-20260905 under /Users/frb/dev/frb/skills/.runs (read-only; you may read them with cat and jq but never write there), reduce each run to the fields metrics reads and store the reduction under test/fixtures/lean-campaign-baseline/ (no prompts, logs, worker output or secrets; keep it under 200 KB); a named test computes the indicators over the fixture and asserts the values you recorded, and `metrics --json` on the fixture equals that test's expectations.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/metrics.mjs",
+          "skills/mine/intent-factory/scripts/metrics-report.mjs",
+          "skills/mine/intent-factory/scripts/metrics-evals.mjs",
+          "skills/mine/intent-factory/test/metrics.test.mjs",
+          "skills/mine/intent-factory/scripts/campaign.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory/scripts",
+          "skills/mine/intent-factory/test"
+        ],
+        "symbols": [
+          "renderCampaignMetrics",
+          "renderMetricsJson",
+          "renderMetricsReport"
+        ],
+        "decisions": [
+          "Indicators are computed only from usage.jsonl, node state, notify.jsonl, events.jsonl and the journal; nothing weighted survives.",
+          "The baseline is this campaign's own reduced records, pinned by a test."
+        ],
+        "nonGoals": [
+          "Do not edit SKILL.md, references/ or docs/intent-factory/; the sibling node owns them.",
+          "Do not change what the controller records.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/metrics.test.mjs"
+            ],
+            "timeoutSec": 300,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p4-release-20260908-take2",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

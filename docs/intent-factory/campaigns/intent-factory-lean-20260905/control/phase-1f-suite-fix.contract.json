@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p1f-suite-fix-20260908",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 1 close (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5). Phase 1 landed attempt worktrees, the integration transaction, maxParallel, runtimes[].fallback, vendor identity and runtime discovery at 85d53c9, but its nodes verified only targeted suites and the phase was pushed without the full suite the close routine requires. On that tree npm test has 60 failures \u2014 58 in scripts/runner.test.mjs, one in test/campaign-autonomy.test.mjs and one in test/ci-policy.test.mjs \u2014 against the 594 tests / 592 pass / 2 skipped baseline recorded at the phase-0 close (b93e8b0). This run repairs the suite at its root causes so phase 1 can close green and phase 2a can start from a tree whose failures are its own.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 2000000000,
+  "usagePolicy": {
+    "epoch": "2026-09-lean-p1f",
+    "maxInputTokens": 2000000000,
+    "judgeReserveInputTokens": 1000000,
+    "maxPhaseInputTokens": 2000000000,
+    "maxInvocationTokens": 2000000000,
+    "cacheReadWeight": 0.1
+  },
+  "runtimeDefaults": {
+    "worker": "sonnet",
+    "judge": "deepseek-pro"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    },
+    "deepseek-pro": {
+      "driver": "codex",
+      "model": "deepseek-v4-pro",
+      "reasoning": "high",
+      "sandbox": "read-only",
+      "tier": 3,
+      "config": {
+        "model_provider": "deepseek",
+        "model_providers.deepseek.name": "DeepSeek",
+        "model_providers.deepseek.base_url": "https://api.deepseek.com/v1",
+        "model_providers.deepseek.env_key": "DEEPSEEK_API_KEY",
+        "model_providers.deepseek.wire_api": "responses",
+        "model_providers.deepseek.requires_openai_auth": false
+      }
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "suite-fix-phase1",
+      "type": "backend",
+      "phase": "p1f-suite-fix",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": {
+        "graceSec": 7200,
+        "intervalSec": 300,
+        "maxDryHeartbeats": 12
+      },
+      "definitionOfDone": [
+        {
+          "id": "root-causes-not-symptoms",
+          "text": "Every failing test in scripts/runner.test.mjs was repaired at its root cause and no assertion was weakened, skipped, marked todo or deleted to make it pass. Fixtures that still assume the pre-worktree model (an unborn fixture repository, worker edits at the repository root, the canonical result read from a path the runner no longer uses) were moved onto the attempt-worktree model; where a test exposed a real runner defect introduced by the phase-1 worktree and integration work, the runner was fixed and the test kept. The only admissible deletion is a test whose asserted behaviour the phase-1 spec explicitly removed (for example rejecting maxParallel above one), and each such deletion is named with its reason in the worker result summary. The suite pops no desktop notification: test/helpers.mjs defaults INTENT_FACTORY_NOTIFY_BIN to a no-op transport when it is unset, so no test reaches the osascript adapter. Observable in the diff of scripts/runner.test.mjs, test/helpers.mjs and scripts/*.mjs and in the worker result summary, which names each root cause once.",
+          "judgment": true
+        },
+        {
+          "id": "canonical-result-primary",
+          "text": "On resume, the canonical worker result file under <run-dir>/results/<node>.json remains the primary evidence for adoption, exactly as references/contract.md states, with the attempt-local .runs/results sidecar only the transport the controller copies from; observable in the resume adoption tests passing unchanged in intent and in scripts/runner.mjs.",
+          "judgment": true
+        },
+        {
+          "id": "no-phase-2-work",
+          "text": "Nothing that later phases delete or redesign \u2014 budget ledger and ceilings, progressPolicy and its watchdog, capsule, heartbeat, outbox, supervisor lease, campaign autonomy, dashboard, docs diet \u2014 is removed or redesigned in this node; observable in the diff touching only what the failing tests required.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "advisory",
+        "runtime": "deepseek-pro",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 1,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Make the full test suite green again on the phase-1 tree by repairing every failing runner test at its root cause, so phase 1 can close and phase 2a starts from a green baseline.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200.",
+          "Do this first, before running any test file: the suite must never pop a macOS desktop notification again. When INTENT_FACTORY_NOTIFY_BIN is unset, the outbox drain (scripts/outbox.mjs, around line 116) falls back to the platform adapter scripts/notify/os-macos.mjs, which spawns osascript, and every test run that reaches a terminal run state spams the owner's screen \u2014 the owner asked for this to stop. In test/helpers.mjs, at import time, default process.env.INTENT_FACTORY_NOTIFY_BIN to a no-op transport when it is unset (a tiny executable script written once under a temp dir that reads stdin and exits 0, or /usr/bin/true), so every test that spawns the runner or drains an outbox inherits it. Tests that assert the platform adapter keep injecting a fake spawn as test/heartbeat.test.mjs already does; a test that needs a failing or absent transport sets INTENT_FACTORY_NOTIFY_BIN explicitly as the tests around runner.test.mjs:3553, 3767, 4963, 5036, 5424 and 5602 already do. Verify by grepping the suite output for osascript and by running one resume test while watching for a notification.",
+          "The controller verifies this node with the full suite in five parts (runner.test.mjs split by test-name pattern ^r, ^a and ^[^ar] so each part fits the 600 s verification ceiling, then skills/mine/intent-factory/test/*.mjs, then test/*.mjs) and a failed verification discards the attempt, so run the same three commands yourself in the foreground before finishing, each with a generous tool timeout (they take several minutes; that is expected): `node --test skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 150`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`, then `node --test 'test/*.mjs' 2>&1 | tail -n 40`. While iterating, run single tests with `node --test --test-name-pattern='<name>' skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 60`.",
+          "The tree's real condition, measured by the orchestrator at 85d53c9 on 2026-09-08: `npm run check` and `npm run typecheck` pass; the full suite is 621 tests, 559 pass, 60 fail, 2 skipped; npm test has 60 failing tests (58 in scripts/runner.test.mjs, `public campaign CLI continues a detached controller after the launcher exits` in test/campaign-autonomy.test.mjs, and `empty catch blocks in production scripts never increase` in test/ci-policy.test.mjs), listed below with the first line of each error. Phase 1 introduced attempt worktrees (every attempt runs in .runs/worktrees/<run>/<node>.<attempt> on branch if/<run>/<node>/<attempt> cut from refs/intent-factory/<run>/run), the journalled integration transaction (scripts/integrate.mjs, scripts/worktree.mjs), an execution repository that must have at least one commit, the attempt-local .runs/results sidecar that the controller copies to the canonical <run-dir>/results/<node>.json, maxParallel above one, runtimes[].fallback with resolved vendor identity and doctor --discover; scripts/runner.test.mjs received 129 insertions and 155 deletions in that work and the rest of it was never re-run. Read references/operations.md (isolated attempts, integration transaction, recovery) and the 'Runtime resolution' and 'Gates' sections of references/contract.md before editing.",
+          "Failing tests at 85d53c9 (60 of 621; 852 s wall clock under load; 2 skipped), by name [file:line] with the orchestrator's one-line hint where the log gave one: doctor checks repository prerequisites without mutating anything [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 doctor does not fail a driver resolved through an explicit executable [AssertionError [ERR_ASSERTION]: {] \u00b7 resume adoption treats the canonical result file as primary evidence [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 resume adoption follows the canonical file when the provider stream is gone [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 resume judge recovery surfaces an invalid canonical result file [AssertionError [ERR_ASSERTION]: the transcript result must not be adopted through judge recovery] \u00b7 resume of an interrupted result materialization adopts the file with strict scope [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 resume of an interrupted result materialization rejects declared-path mutation [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 a second unparseable worker result takes the failover edge before it blocks with attention [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 a worker-created symlink cannot authorize its target, but is advisory on green verification [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 a pre-existing contained alias remains an authorized write path [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 a file write root matches exactly that path in the scope gate [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 autonomous heartbeats observe progress made through a contained alias [AssertionError [ERR_ASSERTION]: cannot resolve workspace symlink alias: ENOENT: no such file or directory, stat '/private/var/folders/pd/wv58kqjj4_3391wk4b0ksvn40000gp/T/runner-scope-alias-heartbeat-5AArZt/.runs/worktrees/scope-alias-heartbeat-run/build.1/alias'] \u00b7 rejects parallel execution until isolation exists [AssertionError [ERR_ASSERTION]: Missing expected exception.] \u00b7 a verification proof reuses the recorded result and executes nothing [AssertionError [ERR_ASSERTION]: the controller ran the command once and the proof reused that result] \u00b7 resume adopts an orphaned worker result instead of repeating the work [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 resume accepts allowed changes reached through an autonomous symlink root [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 resume source identity uses the pre-execution symlink boundary [AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:]: deep-equal mismatch (+ actual - expected) \u00b7 resume adopts a completed orphan judge without running it twice [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 invalid orphan judge output is rejudged without charging worker usage twice [AssertionError [ERR_ASSERTION]: worker usage is not added again while rejudging] \u00b7 invalid orphan judge usage survives a full worker restart exactly once [AssertionError [ERR_ASSERTION]: an unusable worker forces a full worker restart] \u00b7 resume adopts a still-live orphan invocation after its stream completes [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 resume applies the persisted progress heartbeat to a noisy live worker [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 resume terminates an interrupted verification attempt and re-runs the phase [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 resume rejects a dead completion whose persisted close time is past the absolute deadline [AssertionError [ERR_ASSERTION]: an overdue completion is restarted rather than adopted] \u00b7 ledger enforcement on resume lets a done budgeted worker reach its judge [AssertionError [ERR_ASSERTION]: the re-dispatched judge records a verdict] \u00b7 preflight reports a missing credential by variable name only [AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:]: deep-equal mismatch (+ actual - expected) \u00b7 preflight preserves conflicting runtime and node capability requirements [AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:]: deep-equal mismatch (+ actual - expected) \u00b7 live preflight proves generation, redacts failures, and static mode stays mutation-free [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 live preflight providers never receive the controller-only notification transport [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 provider exhaustion without a rule is terminal and cycles do not reuse a runtime [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 recovered provider exhaustion does not charge persisted usage or cost twice [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 persists and recovers cost exactly once and reports totals [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 blocks new work at contract and node monetary budgets [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 failoverEdges lists one declared edge per runtime, ordered by costRank [AssertionError [ERR_ASSERTION]: failover is worker-only] \u00b7 a judge that lost its socket takes the network backoff, not its one judge_unavailable re-dispatch [TypeError: nodes[0] worker runtime primary and judge runtime primary share vendor openai]: thrown by validateContract (contract.mjs:281) \u00b7 liveness state reports paused_quota only while a provider backoff is pending and failed once exhaustion is terminal [TypeError: contract has unexpected field runtimeRules]: thrown by rejectUnknown (contract.mjs:1266): a fixture uses a field schema 2 no longer accepts \u00b7 reuses one worker continuation per ordered phase and charges the campaign ledger once [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 rotates a phase continuation at the soft boundary with a deterministic handoff [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 does not reuse a phase continuation after a runtime identity change [TypeError: runtime primary has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 selects the latest phase continuation by invocation chronology [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 retains a live Codex continuation before capped logs are truncated [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:]: deep-equal mismatch (+ actual - expected) \u00b7 automatic rotation turns a fat worker session over at 80 observed turns [Error: ENOENT: no such file or directory, open '/var/folders/pd/wv58kqjj4_3391wk4b0ksvn40000gp/T/runner-rotation-turns-iBvQCV/.runs/rotation-turns-run/rotations/build.1.1.md']: ENOENT from readFileSync: the fixture reads a file at a path the runner no longer writes \u00b7 resume continues a commissioned rotation handoff in a fresh session [AssertionError [ERR_ASSERTION]: the resumed fresh session consumed the handoff exactly once]: deep-equal mismatch (+ actual - expected) \u00b7 a continuation attempt adopts an existing canonical worker result instead of deleting it [TypeError: Cannot read properties of null (reading 'summary')] \u00b7 an advise-fresh override forces the next continuation into a fresh session [AssertionError [ERR_ASSERTION]: the fresh continuation starts a new invocation rather than resuming the bloated one] \u00b7 worker invocations send no tool policy to a driver that cannot enforce it [TypeError: runtime jsonl has no resolvable vendor]: thrown by validateRuntime (contract.mjs:514): the fixture runtime has no resolvable vendor \u00b7 resume retries stalled and canceled nodes in place [AssertionError [ERR_ASSERTION]: a stalled node is re-dispatched as attempt plus one] \u00b7 resume --node limits the retry to the node and the nodes that depend on it [AssertionError [ERR_ASSERTION]: a node outside the target keeps its failure] \u00b7 resume leaves unknown_effect_reconciled alone and retries it only with --reconcile [AssertionError [ERR_ASSERTION]: the stop boundary holds without the flag] \u00b7 public campaign CLI continues a detached controller after the launcher exits [Error: condition was not reached within 30000ms] \u00b7 handoff routes the next worker attempt to claude and composes its prompt from the capsule [AssertionError [ERR_ASSERTION]: the cross-harness replay must be a fresh attempt] \u00b7 handoff routes the next worker attempt back to codex symmetrically [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 handoff keeps a same-runtime replay fresh and schedules it on resume [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 an intent withheld from settlement classifies unknown_effect and resolves through adoption proof exactly once [Error: ENOENT: no such file or directory, open '/var/folders/pd/wv58kqjj4_3391wk4b0ksvn40000gp/T/runner-intent-adopt-RzHklV/.runs/intent-adopt-run/operations/d3d4b8fa-ac35-4a7d-99e2-a534b7b2fa2c.settlement.json']: ENOENT from readFileSync: the fixture reads a file at a path the runner no longer writes \u00b7 a controller-loss safe replay settlement persists the provider receipt from the surviving stream tail [AssertionError [ERR_ASSERTION]: the fresh replay attempt must be a new attempt] \u00b7 safe replay retries exactly once after deterministic verification passes [AssertionError [ERR_ASSERTION]: the fresh replay attempt must be a new attempt] \u00b7 declared workspace writes across the ambiguous window reconcile instead of safe replay [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 a persisted worker checkpoint is adopted when the provider stream is unavailable [Error: ENOENT: no such file or directory, open '/var/folders/pd/wv58kqjj4_3391wk4b0ksvn40000gp/T/runner-intent-checkpoint-ckSpzF/.runs/intent-checkpoint-run/operations/b1cce353-50e3-4cea-b199-260849720de8.settlement.json']: ENOENT from readFileSync: the fixture reads a file at a path the runner no longer writes \u00b7 replayPolicy never forces the reconcile outcome without an automatic retry [AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:] \u00b7 empty catch blocks in production scripts never increase [AssertionError [ERR_ASSERTION]: 34 empty catch blocks exceed ceiling 32]",
+          "Two root causes the orchestrator already confirmed. (1) `doctor checks repository prerequisites without mutating anything` and `doctor does not fail a driver resolved through an explicit executable` create a fixture repository with git init and no commit; the phase-1 runner requires at least one commit (git_head_required) and doctor now exits 1 there while the same doctor call is ok in a repository with a commit. Decision: doctor must report an unborn repository as a failing `git` check with a detail that says a commit is required, the two fixtures gain one commit (use `-c commit.gpgSign=false` like test/helpers.mjs does, the host signs commits by default), and a new named test proves the unborn case. (2) `resume adoption treats the canonical result file as primary evidence` rewrites <run-dir>/results/build.json, orphans the node and expects adoption to follow that file; after resume nodeState.result is null. Find out whether adoption now reads the attempt sidecar or the attempt worktree instead of the canonical run-directory file \u2014 that would be a runner defect to fix, because the canonical file is the documented primary evidence \u2014 or whether the orphan()/nodeState() helpers no longer match the worktree-era node snapshot; fix the real cause. Expect several of the listed failures to share these two causes and the worktree relocation of paths the fixtures inspect.",
+          "Third confirmed cause: `empty catch blocks in production scripts never increase` (test/ci-policy.test.mjs) counts `catch {}` blocks with an empty body across skills/mine/intent-factory production scripts against EMPTY_CATCH_CEILING = 32; the tree has 34 (runner.mjs 12, verification.mjs 6, supervisor.mjs 4, drivers/exec-jsonl.mjs 3, contract.mjs 2, and one each in campaign-autonomy.mjs, env-preflight.mjs, integrate.mjs, lib.mjs, notify/os-macos.mjs, outbox.mjs, tool-policy-hook.mjs). Phase 1 added them. Never raise the ceiling: give at least two of the phase-1 catches a real body (return or record the specific failure) or restructure them so the swallowed error is handled explicitly. The campaign-autonomy failure `public campaign CLI continues a detached controller after the launcher exits` timed out in waitFor (test/campaign-autonomy.test.mjs:155) under a loaded machine; reproduce it alone before deciding whether it is timing or a regression from the worktree changes to detached controller startup.",
+          "Triage every failing test by name before editing: classify it as a stale fixture (worktree paths, unborn repository, sidecar versus canonical file, maxParallel now accepted) or as a runner defect; fix fixtures by moving them onto the worktree model and defects in the runner; keep every assertion's intent. Do not add try/catch, optional chaining or default values whose only purpose is to make a null pass. Do not add `skip`, `todo` or `only`.",
+          "Keep your context small: read by offset or grep, never whole large files. scripts/runner.mjs is over 7700 lines and scripts/runner.test.mjs over 6500; grep for the test name to find its line, then read a bounded range.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/references/operations.md",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/scripts/worker-result.mjs",
+          "skills/mine/intent-factory/scripts/verification.mjs",
+          "skills/mine/intent-factory/scripts/store.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "recoverOrphan",
+          "adoptWorkerResult",
+          "sealAttempt",
+          "integrateAttempt",
+          "createAttemptWorktree",
+          "doctor"
+        ],
+        "decisions": [
+          "A failing test is fixed at its root cause; assertions are never weakened, skipped or deleted, except a test whose behaviour the phase-1 spec explicitly removed, named with its reason.",
+          "doctor reports an unborn execution repository as a failing git check because an execution repository must have at least one commit.",
+          "The canonical run-directory result file stays the primary adoption evidence; the attempt-local sidecar is transport only."
+        ],
+        "nonGoals": [
+          "Do not delete or redesign budget, progressPolicy, capsule, heartbeat, outbox, supervisor, campaign autonomy, dashboard or docs; later phases own those.",
+          "Do not change drivers, the worker result protocol or the contract schema.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[^ar]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "test/*.mjs"
+            ],
+            "timeoutSec": 300,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p1f-suite-fix-20260908",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

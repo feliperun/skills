@@ -1,0 +1,293 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p1-isolation-20260907",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 1 of the lean campaign (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 4): isolate attempts. Every attempt runs in its own git worktree on its own branch created from the run's integration ref, the controller seals the attempt's diff into a commit, and integration becomes a journalled transaction that verifies a candidate ref before the run ref moves under a conditional update. Then maxParallel above one schedules independent nodes concurrently and runtimes[].fallback replaces runtimeRules with an explicit enumeration of reachable routing states whose worker/judge pairs are cross-vendor. Two chained nodes on the runner shipped by phase 0, with the twelve findings of Astra round 4 folded in. glm is not declared: the Z.ai allowance is exhausted until 2026-09-10T02:10Z, so this phase runs the worker assignment of section 5 (luna, then sonnet).",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 6000000,
+  "usagePolicy": {
+    "epoch": "2026-09-lean-p1",
+    "maxInputTokens": 6000000,
+    "judgeReserveInputTokens": 1000000,
+    "maxPhaseInputTokens": 3000000,
+    "maxInvocationTokens": 4000000,
+    "cacheReadWeight": 0.1
+  },
+  "runtimeDefaults": {
+    "worker": "sonnet",
+    "judge": "sol"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions"
+    },
+    "luna": {
+      "driver": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoning": "xhigh",
+      "sandbox": "workspace-write"
+    },
+    "sol": {
+      "driver": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning": "medium",
+      "sandbox": "read-only",
+      "config": {
+        "features.code_mode_host": true
+      }
+    },
+    "opus": {
+      "driver": "claude",
+      "model": "claude-opus-5",
+      "permissionMode": "bypassPermissions"
+    }
+  },
+  "runtimeRules": [
+    {
+      "match": { "role": "worker", "currentRuntime": "opus" },
+      "runtime": "sonnet"
+    }
+  ],
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "attempt-worktrees",
+      "type": "backend",
+      "phase": "p1-isolation",
+      "runtime": "luna",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "worktree-per-attempt",
+          "text": "Every attempt runs in its own git worktree at .runs/worktrees/<run>/<node>.<attempt> on branch if/<run>/<node>/<attempt> created from the run's integration ref, and the whole attempt context moves with it: the worker, the node's verification, the command proofs, the workspace snapshot and scope comparison, the materialization and reconciliation checks, the progress monitor and the judge's inspection all read that worktree, while the run directory, the campaign journal and contract.cwd itself are untouched. Provider continuations are keyed by node, attempt and worktree so a session is never reused across worktrees. The worktree and branch are recorded on the node snapshot; a done attempt's worktree is removed and its branch kept, a failed one is kept for inspection. Proven by named tests, including one that fails if a consumer still reads the main tree.",
+          "judgment": true
+        },
+        {
+          "id": "sealed-attempt-diff",
+          "text": "The controller seals a completed attempt before integration: the attempt worktree's diff is committed onto the attempt branch by the controller (a worker that committed its own work is accepted as it stands, and an attempt with an empty diff is recorded as such rather than treated as an error), so the attempt branch actually carries the edits the candidate will merge. Proven by a named test whose worker only writes a file and whose integrated branch must contain that file.",
+          "judgment": true
+        },
+        {
+          "id": "integration-transaction",
+          "text": "Integration is serialized by the controller, journalled before it moves anything, and never touches the run ref until the candidate is accepted. The transaction record — node, attempt, attempt sha, previous run-ref tip, candidate sha and the verification evidence — is written durably first; the candidate is built on refs/intent-factory/<run>/candidate in a scratch worktree and the node's verification runs there; on success the run ref is advanced by a conditional update against the recorded previous tip, followed by exactly one node state write in which the node becomes done carrying integratedHead. A failed candidate verification deletes the candidate ref and its scratch worktree, leaves the run ref exactly where it was and records the failure; a conflict marks the node attention with the conflicting paths, cleans the scratch worktree so the next node can integrate, and auto-resolves nothing. Proven by named tests including failed-candidate-leaves-the-ref-unchanged and conflict-then-another-node-integrates.",
+          "judgment": true
+        },
+        {
+          "id": "recovery-is-journal-driven",
+          "text": "Recovery replays the journalled transaction rather than guessing from ancestry: on startup an unfinished transaction record is completed idempotently, including the case where the accepted candidate changed nothing and the run ref tip is unchanged, and a crash during candidate preparation or verification leaves no candidate ref or scratch worktree that blocks the next integration. Post-write side effects — worktree removal and the terminal event — are completed idempotently when a crash lands between the state write and them. The integration invariant is that every accepted candidate sha stays an ancestor of the run ref tip, never that the tip equals the newest integratedHead, so an orchestrator commit on the branch and a reopened node both remain legal. Proven by named tests that interrupt before the ref update, between the ref update and the state write, and after the state write.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": { "kind": "command", "ref": "npm run check" }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": { "kind": "command", "ref": "npm run typecheck" }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "blocking",
+        "runtime": "opus",
+        "failOn": ["major", "critical"],
+        "maxRevisions": 2,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Give every attempt its own branch and worktree, move the whole attempt context into it, seal the attempt diff into a commit, and make integration a journalled transaction that verifies a candidate ref before the run ref moves under a conditional update, with recovery driven by the journal rather than by ancestry.",
+        "instructions": [
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 (rule 1, rule 2, the 'Integration transaction' paragraph and the 'Verification once per attempt' paragraph) and section 10 before changing code. This node implements rule 1 and the integration transaction for the runner shipped by phase 0. A read-only review of this plan (Astra round 4) produced twelve findings that are already folded into the instructions below; treat each numbered instruction as a requirement, not as background.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Run only the declared verification commands, in the foreground, with output bounded by | tail -n 200. Do not run the full npm test at all; the orchestrator runs it at phase close. Keep your context small: runner.mjs is over 7000 lines, so grep for the symbol you need and read around it, never whole large files. You have 120 minutes.",
+          "Seal the attempt before integrating it. The current runner leaves a worker's edits uncommitted in the working tree, and the replay driver writes files without committing, so creating a branch does not put the edits on it. After a completed attempt and before the candidate is built, the controller commits the attempt worktree's diff onto the attempt branch with a message naming run, node and attempt. A worker that already committed its own work is accepted as it stands; an attempt whose diff is empty is recorded as an empty attempt, not an error. Test it with a worker that only writes a file and assert the integrated branch contains that file.",
+          "Attempt isolation, whole context. Add a worktree per attempt: git worktree add .runs/worktrees/<run-id>/<node-id>.<attempt> -b if/<run-id>/<node-id>/<attempt> <integration-head>. The worker invocation, the node's verification, the command proofs, the workspace snapshot and scope comparison, the materialization and reconciliation checks, the capsule capture, the progress monitor and the judge's inspection must all use that worktree. Grep for contract.cwd — runner.mjs around lines 1917, 2026, 2688, 3005, 3053 and 3108 and supervisor.mjs around 467 and 532 are the known consumers, and the judge process inherits the same cwd. Thread an explicit attempt workspace through them; never mutate contract.cwd, which stays the home of the run directory, the campaign journal and the control artifacts. Provider continuation selection (runner.mjs around 1607) currently ignores node, attempt and worktree identity, so a session could be reused across worktrees: key it by them. Record the worktree path, the branch and the base sha on the node snapshot and extend the node snapshot validation in contract.mjs for any field you add. Write at least one test that fails if a consumer still reads the main tree.",
+          "Integration transaction, journal first. Serialize integration in the controller and record the transaction durably before anything moves: node, attempt, attempt sha, previous run-ref tip, candidate sha and the verification evidence. Then build the candidate on refs/intent-factory/<run-id>/candidate in a scratch worktree at .runs/worktrees/<run-id>/.candidate, fast-forwarding or merging the attempt branch into the integration head, and run the node's verification there. Only when it passes, advance the run ref with a conditional update against the recorded previous tip (git update-ref <ref> <new> <old>, which fails instead of clobbering a concurrent move), and then perform exactly one node state write making the node done and carrying integratedHead. Never write done before the ref has moved. On verification failure delete the candidate ref and scratch worktree, leave the run ref untouched, keep the attempt worktree and record the failure as a failed verification is recorded today. On a merge conflict mark the node attention with the conflicting paths, clean the scratch worktree so the next node can integrate, keep the attempt worktree and auto-resolve nothing.",
+          "Use an explicit run ref, refs/intent-factory/<run-id>/run, created at the run's recorded gitHead when the run starts; that ref, not whatever branch happens to be checked out, is the integration head, and attempt branches are created from it. Do not assert that the tip equals the newest integratedHead among done nodes: there is no done node at the start or after the first node fails, the orchestrator may legally commit between attempts (resume already accepts a descendant HEAD, runner.mjs around 5889), and handoffRun (around 7297) can reopen a done node. The invariant is weaker and true: every accepted candidate sha recorded in the integration journal stays an ancestor of the run ref tip. Keep the accepted records keyed by node and attempt, independent of the node's current status.",
+          "Recovery replays the journal, never ancestry. Ancestry cannot identify which transaction to repair: several retained attempt branches can be ancestors of the tip, a failed attempt's branch never advanced past its base, an accepted no-change attempt leaves the tip unchanged so an ancestry probe misses it entirely, and an unrelated orchestrator commit satisfies the same predicate without any candidate having been verified. On startup, find the unfinished transaction record and complete exactly it, idempotently, including the unchanged-tip case. A crash during candidate preparation or verification must leave no candidate ref or scratch worktree that blocks the next integration: clean or reuse it deterministically. A crash between the state write and its side effects must still remove the done attempt's worktree and emit the terminal event — note that transition writes the node before appending the event (runner.mjs around 4953), so those side effects need to be idempotent and re-driven on startup.",
+          "Fix the ignore-integrity guard for linked worktrees before you rely on it. verification.mjs around line 356 fingerprints .git/config and .git/info/exclude relative to the workspace; in a linked worktree .git is a file, both paths fail with ENOTDIR and are silently skipped, so changes to the shared ignore settings would escape the guard entirely. Resolve the effective paths through git (git rev-parse --git-path config and --git-path info/exclude) and fingerprint those, keeping every existing integrity check. Add a linked-worktree regression test.",
+          "Keep the canonical result file writable. workerResultPath (runner.mjs around 5274) stays under the run directory, which is outside the attempt worktree, and the codex driver passes --sandbox workspace-write with no additional writable root (drivers/codex.mjs around 61), so changing cwd alone would make the required result write fail for a Codex worker. Either grant a narrowly scoped writable root for the designated results directory or write the result inside the attempt worktree and have the controller move it. Test result materialization and a resume from an isolated Codex-shaped worker.",
+          "Give the execution fixtures a first commit. test/helpers.mjs around line 160 calls initializeGit with commit: false, so the replay fixtures are unborn repositories with no sha to branch from and worktree creation cannot start those nodes; env-preflight.mjs around 113 currently accepts an unborn HEAD on purpose. Convert the execution fixtures to repositories with an initial commit, adapting their setup rather than exempting them from isolation, and state the production prerequisite — a repository with at least one commit — where preflight checks it.",
+          "Prefer new modules, skills/mine/intent-factory/scripts/integrate.mjs for the transaction, the journal and the recovery (target 250 lines per the section 3 module table) and a small worktree helper, over growing runner.mjs, which is already past its review budget. runner.mjs keeps the call sites only.",
+          "Tests, each named after its case, on the replay driver or the existing fake providers, in isolated temporary git repositories where the case is git-level: an attempt runs in its own worktree on its own branch from the integration ref; a worker that only writes a file has that file on the integrated branch; a consumer of the attempt workspace reads the worktree and not the main tree; two sequential nodes with disjoint writes both integrate and the second is based on the first's integrated head; a failed candidate verification leaves the run ref unchanged and deletes the candidate ref; a conflict marks the node attention and the next node still integrates; an interruption before the ref update, between the ref update and the state write, and after the state write each recover idempotently; an accepted no-change attempt recovers although the tip did not move; a repeated integration produces no duplicate effect; a linked worktree still fingerprints the shared git config and exclude; a Codex-shaped worker materializes its result file; a done node's worktree is removed and a failed node's is kept. No sleeps.",
+          "Update the worktree and integration material in skills/mine/intent-factory/references/contract.md and references/operations.md, describing only what you implemented, and keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit on the campaign branch. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/verification.mjs",
+          "skills/mine/intent-factory/scripts/supervisor.mjs",
+          "skills/mine/intent-factory/scripts/drivers/codex.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/references/contract.md"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["captureWorktreeIdentity", "captureWorkspaceSnapshot", "workerResultPath", "initializeGit"],
+        "decisions": [
+          "Integration never touches the run ref until the candidate has passed the node's verification, and the ref moves under a conditional update against the tip recorded in the transaction journal (TECH-SPEC lean section 3, findings F18 and round 4 F3).",
+          "Recovery replays the journalled transaction; ancestry is not evidence that a candidate was verified (round 4 F3).",
+          "The integration invariant is that every accepted candidate sha remains an ancestor of the run ref tip, not that the tip equals the newest integratedHead (round 4 F2)."
+        ],
+        "nonGoals": [
+          "Do not raise maxParallel or change scheduling concurrency; the next node does that.",
+          "Do not change review modes, scope findings, retry in place or provider routing."
+        ],
+        "verification": [
+          {
+            "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/verification.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=180000", "--test-name-pattern=worktree|integrat|candidate|conflict|branch|seal", "skills/mine/intent-factory/scripts/runner.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "parallel-and-fallback",
+      "type": "backend",
+      "phase": "p1-isolation",
+      "runtime": "sonnet",
+      "dependsOn": ["attempt-worktrees"],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "parallel-scheduling",
+          "text": "maxParallel above one is accepted by validation and ready nodes without dependency edges are dispatched concurrently, each in its own attempt worktree, while integration stays serialized by the controller so two attempts finishing together integrate one after the other and the second candidate is rebuilt on the head the first produced; proven by a named test in which three independent replay nodes are in flight at the same time and all three integrate.",
+          "judgment": true
+        },
+        {
+          "id": "runtime-fallback",
+          "text": "runtimes[].fallback declares the single failover hop for workers and judges and replaces runtimeRules, which is removed from the schema, the code, the tests and the references together with the synthesized chain it suppressed. Routing is decided from an explicit enumeration of the reachable states — runtime, role, hop count bounded at one, and the worker runtime actually used for the attempt — and that same enumeration drives validation and the capability preflight, so preflight no longer probes a second hop no node can reach. Validation rejects a contract whose primary worker and judge share a vendor; a judge fallback that would share the worker's vendor is not a validation error but is refused at runtime, leaving the node attention. Proven by named tests for a worker fallback, an admissible judge fallback, a refused same-vendor judge fallback and a rejected primary pair.",
+          "judgment": true
+        },
+        {
+          "id": "vendor-identity",
+          "text": "Vendor identity is an explicit property of a runtime rather than a guess from the driver name: a codex runtime configured with another model_provider (the flash fixture in test/helpers.mjs uses model_provider deepseek) is not OpenAI, and replay and exec-jsonl runtimes carry a declared vendor. An unresolvable vendor is a validation error naming the runtime. Proven by named tests covering a Codex runtime with a custom provider and two replay runtimes with distinct declared vendors.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": { "kind": "command", "ref": "npm run check" }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": { "kind": "command", "ref": "npm run typecheck" }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "review": "advisory",
+        "runtime": "sol",
+        "failOn": ["major", "critical"],
+        "maxRevisions": 2,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Schedule independent nodes concurrently in their attempt worktrees, and replace runtimeRules with a per-runtime single-hop fallback whose reachable states are enumerated explicitly and whose worker/judge pairs are cross-vendor by an explicit vendor identity.",
+        "instructions": [
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 (rule 1) and section 5 (the worker-assignment and fallback paragraph) before changing code. The attempt-worktrees node is done and its work is in the tree: every attempt already has its own worktree and branch, the controller seals the attempt diff, and integration is a journalled transaction. Build on it; do not rewrite it.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Run only the declared verification commands, in the foreground, with output bounded by | tail -n 200. Do not run the full npm test at all; the orchestrator runs it at phase close. Keep your context small: read by offset or grep, never whole large files. You have 120 minutes.",
+          "Concurrency. The scheduler already computes free slots from contract.maxParallel (grep runner.mjs for maxParallel). Accept maxParallel above one in contract validation and dispatch every ready node whose dependencies are met, up to the slot count, each in its own attempt worktree. Integration stays serialized: only one candidate is built and verified at a time and the run ref moves under that serialization, so two attempts that finish together integrate one after the other and the second candidate is rebuilt on the head the first produced.",
+          "Fallback. Replace the runtimeRules array with a per-runtime field runtimes[<id>].fallback naming at most one other runtime id. Remove runtimeRules from the schema, from contract validation, from the synthesis paths in scripts/failover.mjs and from the tests and references that mention it. Do not decide routing ad hoc: build an explicit enumeration of the reachable routing states — the runtime, the role, a hop count bounded at one, and the worker runtime actually used for the attempt — and drive both validation and the capability preflight from that enumeration. env-preflight.mjs around line 205 currently walks fallback targets recursively, so with A.fallback=B and B.fallback=C it probes C for a node assigned A even though that node can only take one hop; the enumeration must stop it.",
+          "Vendor split. A judge must never share the vendor of the worker runtime actually used for the attempt. Validation rejects a contract whose primary worker and judge share a vendor, naming both. A judge fallback that would share the worker's vendor is a different case: it is not a validation error, because whether it is reachable depends on which worker actually ran, so it is refused at runtime and the node goes to attention. Keep those two cases distinct, or the required same-vendor-judge-fallback test cannot be constructed without the contract being rejected first.",
+          "Vendor identity is not the driver name. The schema supports replay and exec-jsonl drivers and provider configuration overrides: the flash fixture in test/helpers.mjs around line 107 is a codex runtime with model_provider deepseek, and calling it OpenAI is wrong. Make vendor an explicit runtime property, resolved from the driver together with its provider configuration and declared outright for replay and exec-jsonl runtimes; an unresolvable vendor is a validation error naming the runtime. The replay-driver tests you write for the vendor guard need declared vendors to be meaningful.",
+          "Keep the capability preflight enforcing what it enforces today; only its traversal changes, from a recursive walk of fallback targets to the enumeration of reachable states.",
+          "Tests, each named after its case, on the replay driver: three independent nodes in flight at the same time with maxParallel 3, all three integrating, and the second integration rebuilt on the first's head; a worker exhaustion failing over one hop with the fallback runtime recorded on the attempt; an admissible judge fallback across vendors; a judge fallback refused because it shares the vendor of the worker that actually ran, leaving the node attention; a contract whose primary worker and judge share a vendor rejected by validation with a named message; a codex runtime with a custom model_provider resolving to that provider's vendor; two replay runtimes with distinct declared vendors; a runtime with no resolvable vendor rejected; preflight not probing an unreachable second hop. No sleeps.",
+          "Update the routing and fallback material in skills/mine/intent-factory/references/contract.md so it describes runtimes[].fallback, vendor identity and the reachable-state enumeration, and no longer describes runtimeRules; keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit on the campaign branch. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/failover.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/contract.test.mjs",
+          "skills/mine/intent-factory/test/preflight.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/references/contract.md"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["rankedRuntimeIds", "synthesizedChain", "failoverTargets", "runtimeSnapshot"],
+        "decisions": [
+          "Failover is one hop declared per runtime; runtimeRules and the synthesized chain are removed (TECH-SPEC lean section 5).",
+          "Routing, validation and preflight all read one explicit enumeration of reachable states bounded at one hop (round 4 F10).",
+          "Vendor is a resolved runtime property, not the driver name; a same-vendor primary pair is a validation error and a same-vendor judge fallback is a runtime refusal (round 4 F10, F11)."
+        ],
+        "nonGoals": [
+          "Do not change the integration transaction, the transaction journal or the worktree layout.",
+          "Do not change budgets, review modes or retry in place."
+        ],
+        "verification": [
+          {
+            "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/preflight.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": ["node", "--test", "--test-timeout=180000", "--test-name-pattern=parallel|fallback|failover|vendor|judge", "skills/mine/intent-factory/scripts/runner.test.mjs"],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p1-isolation-20260907",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

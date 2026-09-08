@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p1d-recovery-20260907",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Finish the preserved phase-1 implementation on the current tree, repair the isolated-worktree and routing regressions exposed by verification, and leave the phase ready for close.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 2000000000,
+  "usagePolicy": false,
+  "runtimeDefaults": { "worker": "luna", "judge": "astra" },
+  "runtimes": {
+    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "high", "sandbox": "workspace-write" },
+    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "sandbox": "read-only", "vendor": "openai-sol", "config": { "features.code_mode_host": true } },
+    "astra": { "driver": "codex", "model": "gpt-6-astra", "reasoning": "xhigh", "sandbox": "read-only", "vendor": "openai-astra", "config": { "features.code_mode_host": true } }
+  },
+  "nodes": [
+    {
+      "id": "phase-1-recovery",
+      "type": "backend",
+      "phase": "p1-recovery",
+      "runtime": "luna",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        { "id": "phase-1-behavior", "text": "The preserved phase-1 implementation satisfies the routing, fallback, vendor identity, isolated worktree, integration, and discovery requirements described in the task packet, with the named targeted tests passing.", "judgment": true },
+        { "id": "check", "text": "npm run check passes.", "proof": { "kind": "command", "ref": "npm run check" } },
+        { "id": "typecheck", "text": "npm run typecheck passes.", "proof": { "kind": "command", "ref": "npm run typecheck" } }
+      ],
+      "gate": { "enabled": true, "review": "advisory", "runtime": "astra", "failOn": ["major", "critical"], "maxRevisions": 2, "requiredCapabilities": {} },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Complete the existing phase-1 implementation and repair every regression needed for a green phase gate. Preserve the architecture and decisions already recorded in the campaign handoff.",
+        "instructions": [
+          "Read the campaign handoff and the phase-1 task packets in .runs/control/intent-factory-lean-20260905 only for context; do not modify any .runs control or campaign artifact.",
+          "Inspect the current dirty tree and the existing implementation before editing. The current branch contains preserved phase-1 work; build on it and remove obsolete paths instead of adding compatibility layers.",
+          "Run targeted tests in the foreground while working. Before declaring the work done, run every command proof in this node's Definition of Done — npm run check and npm run typecheck — in the foreground and fix what they report. Do not run commands in the background or through task tools, and keep output bounded with | tail -n 200.",
+          "Fix the failures already observed in isolated worktree and resume handling, preflight diagnostics, fallback edge reporting, network backoff classification, and continuation selection. Then verify routing, fallback, vendor identity, worktree integration, and discovery behavior from the named tests.",
+          "Keep context small: read runner.mjs by symbol or offset, never the whole file. Do not commit; the controller owns phase integration and close.",
+          "Write the canonical worker result file designated by the controller."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/failover.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/contract.test.mjs",
+          "skills/mine/intent-factory/test/preflight.test.mjs",
+          "skills/mine/intent-factory/test/supervisor.test.mjs"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["failoverEdges", "runtimeSnapshot", "resumeRun", "createAttemptWorkspace", "integrateAttempt"],
+        "decisions": ["Use the current runtimes[].fallback schema and resolved vendor identity; do not restore runtimeRules.", "Keep integration serialized and attempts isolated.", "Do not weaken tsconfig or remove tests to make the gate green."],
+        "nonGoals": ["Do not modify .runs/control or .runs/campaigns.", "Do not commit or push from the worker."],
+        "verification": [
+          { "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/preflight.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] }
+        ]
+      }
+    }
+  ]
+}

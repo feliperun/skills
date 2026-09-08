@@ -1,0 +1,212 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p2a-diet-20260908-take2",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 2a diet (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5, section 3 rule 3 and section 5 row 2a). Delete every spend ceiling from intent-factory: contract schema 3 has no maxInputTokens, maxCostUsd, usagePolicy or budgetProfile, and no progressPolicy with its file-change watchdog; budget.mjs, capsule.mjs, the usage ledger with its epochs and judge reserve, budget continuation segments and cache-read session rotation go with their tests. Usage stays recorded per invocation in <run-dir>/usage.jsonl for reporting only, and status, report, metrics and the dashboard read it. Time (timeoutSec, stallTimeoutSec) and the provider's own allowance (rule 8) are the only limits. Owner decision of 2026-09-07 (no-spend-ceiling): ceilings in USD or tokens deliver no value and have interrupted several campaigns; two phase failures of this campaign were budget_exceeded and none was real overspend. Take 2: take 1 ran on deepseek-v4-pro until the provider answered 402 Insufficient Balance after forty minutes; its partial diet (22 files, 266 insertions, 4664 deletions) is checkpoint a1370ac on campaign/lean-v03 and this take finishes it on claude-sonnet-5 with no judge, because DeepSeek was the only cross-vendor judge left and a same-vendor judge is forbidden; the full suite is the gate.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 2000000000,
+  "usagePolicy": {
+    "epoch": "2026-09-lean-p2a-take2",
+    "maxInputTokens": 2000000000,
+    "judgeReserveInputTokens": 1000000,
+    "maxPhaseInputTokens": 2000000000,
+    "maxInvocationTokens": 2000000000,
+    "cacheReadWeight": 0.1
+  },
+  "runtimeDefaults": {
+    "worker": "sonnet"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "budget-removal-schema3",
+      "type": "backend",
+      "phase": "p2a-diet",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": {
+        "graceSec": 7200,
+        "intervalSec": 300,
+        "maxDryHeartbeats": 12
+      },
+      "definitionOfDone": [
+        {
+          "id": "ceilings-deleted",
+          "text": "Contract schema 3 has no spend ceiling: maxInputTokens, maxCostUsd, usagePolicy, budgetProfile and progressPolicy are rejected by validation at contract and node level with an error naming the field, and budget.mjs, capsule.mjs, the usage ledger with its epochs and lock, the judge reserve, budget continuation segments, cache-read session rotation with its capsule handoff, and the file-change progress watchdog with its dry heartbeats are deleted together with their tests and their reference documentation; observable in scripts/contract.mjs, the deleted files, test/contract.test.mjs and references/contract.md.",
+          "judgment": true
+        },
+        {
+          "id": "usage-recorded-for-reporting",
+          "text": "Every worker and judge invocation appends one record to <run-dir>/usage.jsonl \u2014 node, attempt, role, runtime id and model, tokens by kind (uncached input, cache read, output), cost with provenance (provider-reported, priced or unknown), started and finished timestamps \u2014 and nothing reads it for control; status, report, metrics and the dashboard read usage.jsonl and node state instead of the ledger and show raw tokens by kind and cost, never weighted input, remaining budget or judge reserve; observable in a usage.jsonl written by the replay tests and in the metrics, dashboard, statusline and render tests.",
+          "judgment": true
+        },
+        {
+          "id": "time-and-allowance-are-the-limits",
+          "text": "An attempt ends only by completion, timeoutSec, stallTimeoutSec, cancellation or a provider exhaustion handled by rule 8 (exhaustedUntil, same-tier re-tier, attention); every budget_exceeded path, the resume --max-input-tokens extension, the rotation handoff and the `handoff` command are gone. Provider session continuation (rule 4) is kept in substance: continuationId and the reuse-versus-fresh decision on resume are unchanged, and a fresh continuation prompt is composed from node state \u2014 the previous attempt's error, findings and changed-files summary appended as a bounded 'Previous attempt' section \u2014 instead of from a capsule. Rule-8 handling is untouched. Observable in scripts/runner.mjs, scripts/failover.mjs and the replay suite.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Remove every spend ceiling and the machinery that enforced it, keep per-invocation usage as a reporting record in usage.jsonl, and leave every reader (status, report, metrics, dashboard, status line) and the full suite green.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and the controller treats a missing canonical result file as a protocol failure that discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the three name-pattern splits `--test-name-pattern='^r'`, `'^a'`, `'^[^ar]'`, never the whole file in one command. Never run npm install, npm ci or any package install: the worktree has no node_modules by design (tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check. The controller rotates a Claude session after 600 observed turns and the rotation loses the worktree's uncommitted edits, so aim to finish well under 500 turns: batch related edits before testing, run whole files or pattern splits instead of many single-test runs, never re-read a range you already read, and run the full five-part suite at most twice.",
+          "The controller verifies this node with the full suite in five parts (runner.test.mjs split by test-name pattern ^r, ^a and ^[^ar] so each part fits the 600 s verification ceiling, then skills/mine/intent-factory/test/*.mjs, then test/*.mjs) and a failed verification discards the attempt, so run the same three commands yourself in the foreground before finishing, each with a generous tool timeout (they take several minutes; that is expected): `node --test skills/mine/intent-factory/scripts/runner.test.mjs 2>&1 | tail -n 150`, then `node --test 'skills/mine/intent-factory/test/*.mjs' 2>&1 | tail -n 80`, then `node --test 'test/*.mjs' 2>&1 | tail -n 40`. While iterating, run single files or `--test-name-pattern` selections.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 (rule 3, rule 8, the module table and the 'Deleted' paragraph) and section 5 row '2a diet' before editing. The tree's real condition at checkpoint a1370ac (HEAD of your worktree), measured by the orchestrator on 2026-09-08 at 09:05Z: the previous take already deleted scripts/budget.mjs, scripts/capsule.mjs, test/budget.test.mjs, test/capsule.test.mjs and test/handoff.test.mjs, removed about 2,150 lines from scripts/runner.mjs (ledger, rotation, capsule handoff, handoff CLI, budget decisions), and began adapting contract.mjs, drivers/*, env-preflight.mjs, heartbeat.mjs, metrics.mjs, metrics-evals.mjs, render.mjs, supervisor.mjs, campaign.mjs and campaign-autonomy.mjs; `npm run check` passes; `npm run typecheck` fails with 57 errors: test/metrics.test.mjs 21, scripts/runner.test.mjs 18, test/contract.test.mjs 9, test/heartbeat.test.mjs 5, test/replay.test.mjs 4 \u2014 the first ones verbatim: runner.test.mjs(15,93) TS2305 Module './runner.mjs' has no exported member 'rotationTrigger' (and ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_MIN_TURNS_FOR_AVERAGE on the same line); runner.test.mjs(23,38) TS2307 Cannot find module './budget.mjs'; runner.test.mjs(4315,22) and (4896,22) TS2339 Property 'budgetDecision' does not exist on type 'NodeSnapshot'; runner.test.mjs(4933,22), (4959,54), (4960,48) TS2339 Property 'budgetState' does not exist on type 'NodeSnapshot'. The tests of the deleted behaviour still exist in those files and must be deleted or rewritten, not skipped. The full suite has not been run on this checkpoint; before the previous take it was 622 tests, 620 pass, 2 skipped at 0657afa. Start with `git diff 0657afa HEAD --stat` to see the previous take's map, then `npm run typecheck 2>&1 | tail -n 80`.",
+          "What to delete, by name. Contract level: maxInputTokens, maxCostUsd, usagePolicy (epoch, maxInputTokens, judgeReserveInputTokens, maxPhaseInputTokens, maxInvocationTokens, cacheReadWeight). Node level: maxInputTokens, maxCostUsd, budgetProfile, progressPolicy (graceSec, intervalSec, maxDryHeartbeats) and the dry-heartbeat file-change watchdog that consumes it. Modules: scripts/budget.mjs (validateBudgetProfile, validateBudgetDecision, validateBudgetState, deriveBudgetDecision and every caller), scripts/capsule.mjs with everything that composes or consumes a portable continuation capsule in scripts/runner.mjs (buildCapsule, parseCapsule, DEFAULT_CAPSULE_BYTES, loadLatestCapsule around line 2917, capsuleHandoffPrompt around line 2955, the budgetRemaining computed around line 2853 for the capsule, the capsule branch of phaseInvocationPlan around line 1661) and the `handoff <run-dir> --node --runtime` CLI command (handoffRun around line 7620) with test/handoff.test.mjs, because handoff exists only to route a node to another harness through a capsule and rule 8 re-tiering plus resume now cover re-routing. The usage ledger in scripts/runner.mjs (USAGE_LEDGER_NAME usage-ledger.json and USAGE_LOCK_NAME under .runs/campaigns/<campaignId>/, epochs, judge reserve, weighted input, cacheReadWeight) and its readers. Budget continuation segments. Automatic session rotation (ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_MIN_TURNS_FOR_AVERAGE, ROTATION_HANDOFF_MAX_BYTES and the rotation handoff turn), because it is a cost control fed by cacheReadWeight and it rotated a healthy worker every twelve minutes on 2026-09-07. Driver plumbing: options.maxCostUsd (claude and glm pass --max-budget-usd) and maxInvocationTokens in the exec-jsonl run.request. Resume: the --max-input-tokens extension and the budgetExtension field of run.json. Metrics that only the ledger could feed: weightedPerClosedCheckpoint, budgetDecisionAge, budgetHeadroomAtDispatch, budgetExtensionRate and budgetAttentionLatencyP95 in scripts/metrics.mjs and scripts/metrics-report.mjs, and the weightedUsed/weightedCap fields of the liveness records in scripts/heartbeat.mjs, each with its tests. Tests: test/budget.test.mjs, test/capsule.test.mjs, test/handoff.test.mjs and every test of the deleted behaviour. Docs: references/budget-governance.md and its SKILL.md router row; the budget, usage-policy, budget-profile, progress-policy, capsule, handoff and rotation sections of references/contract.md, which then documents schemaVersion 3 and usage.jsonl. Schema: set PROTOCOL_SCHEMA_VERSION in scripts/drivers/index.mjs to 3 (validation compares against that constant), reject a schema-2 contract by name, and leave INTENT_FACTORY_VERSION at 0.1.0 \u2014 the release phase bumps it. One unrelated one-line hardening while you are in verification.mjs: exclude `.husky/_` from captureIgnoreSources and the entries snapshot the same way `.claude` and `.codex` are excluded, with a named test, because a package install creates .husky/_/.gitignore mid-node.",
+          "What to keep, by name. Provider session continuation is rule 4, not a ceiling: continuationId, resume's adopt-and-re-judge and the fresh-versus-reuse decision stay; a fresh continuation prompt is composed from node state (the previous attempt's error, findings and changed-files summary as a bounded 'Previous attempt' section, which the resume path already renders) instead of from a capsule. Rule 8 stays untouched: doctor --discover, tiers, composed assignment, runtimes[].fallback, exhaustedUntil, same-tier re-tiering, runtime_tier_exhausted. timeoutSec and stallTimeoutSec stay the only controls on an attempt. Heartbeat, outbox, events, lease-liveness, supervisor and campaign-autonomy stay in this phase \u2014 phase 2b deletes them \u2014 but adapt them where they read a deleted field so their tests pass, without redesign: scripts/campaign-autonomy.mjs has about 32 references to deleted fields (the plan authority's maxInputTokens and maxCostUsd, the usagePolicy, budgetProfile and progressPolicy it copies into synthesized repair contracts, its own USAGE_LEDGER_NAME and readLedgerTotals reader) \u2014 remove them and the plan/authority validation of those fields; scripts/supervisor.mjs reads progressPolicy and dryHeartbeat; scripts/heartbeat.mjs records weightedUsed and weightedCap. Fixtures in test/helpers.mjs and test/campaign-autonomy.test.mjs that declare deleted fields lose them. Campaign journal compatibility with the campaign's own history is mandatory: the journal under .runs/campaigns/<id>/journal.jsonl already holds liveness facts shaped like {\"type\":\"liveness\",\"eventId\":\"\u2026\",\"at\":\"2026-09-06T06:39:16.604Z\",\"campaignId\":\"\u2026\",\"runId\":\"\u2026\",\"nodeId\":\"scope-advisory\",\"phase\":\"worker\",\"checkpointsDone\":0,\"checkpointsTotal\":3,\"runtime\":\"sonnet\",\"state\":\"running\",\"weightedUsed\":0,\"weightedCap\":6000000,\"lastProgressAt\":\"\u2026\",\"attention\":null}; at the checkpoint the runner rejects that whole journal with 'journal line 10 is invalid: journal entry liveness has unexpected field weightedUsed', which breaks campaign note/show/attach for the live campaign. Make readJournal skip or ignore the deleted fields on historical liveness facts (a named test feeds exactly that line) instead of rejecting the file; phase 2b deletes liveness facts altogether.",
+          "Usage for reporting. Introduce <run-dir>/usage.jsonl: one JSON line per worker or judge invocation with runId, nodeId, attempt, role, runtime id and model, tokens by kind exactly as the driver reports them \u2014 uncached input, cache read, output; null when unknown \u2014 costUsd with provenance ('provider', 'priced' or 'unknown'), startedAt and finishedAt. Append it at the point where the campaign ledger under .runs/campaigns/<campaignId>/usage-ledger.json used to be written, but on the run directory, never on the attempt worktree and never under .runs/campaigns. Switch render.mjs (status and report), metrics.mjs and metrics-report.mjs, dashboard/dashboard.mjs and statusline/claude-code.sh from usage-ledger.json, epochs and weighted input to usage.jsonl and node state: show tokens by kind (uncached input, cache read, output) and cost, drop the weighted, remaining-budget and judge-reserve columns and the metrics named above. Phase 4 redesigns the indicators; here they only need to read the new records and stay green.",
+          "Tests, each named after its case: schema 3 rejects each deleted field by name at contract and node level and rejects schemaVersion 2 by name; a replay run writes usage.jsonl with one record per worker and judge invocation carrying tokens by kind and cost provenance; metrics reads usage.jsonl and reports tokens by kind; status and report render tokens by kind and cost without weighted input; a replay node whose recorded usage exceeds any former ceiling completes done; timeoutSec still ends an attempt; the existing rule-8 tests are untouched and green; no test references usagePolicy, budgetProfile, progressPolicy or the ledger any more.",
+          "The controller running this node is the phase-1 runner from an immutable snapshot under .runs/control, so deleting schema-2 fields from the tree cannot affect this run; the contract you are running under is schema 2 by design. Do not try to keep schema 2 readable \u2014 no compatibility layer, no migration, no fallback.",
+          "Keep your context small: read by offset or grep, never whole large files. scripts/runner.mjs is over 7700 lines; grep for the symbol, then read a bounded range. Keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/SKILL.md",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/references/budget-governance.md",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/scripts/metrics.mjs",
+          "skills/mine/intent-factory/scripts/metrics-report.mjs",
+          "skills/mine/intent-factory/scripts/task-packet.mjs",
+          "skills/mine/intent-factory/scripts/campaign-autonomy.mjs",
+          "skills/mine/intent-factory/scripts/supervisor.mjs",
+          "skills/mine/intent-factory/scripts/heartbeat.mjs",
+          "skills/mine/intent-factory/scripts/drivers/index.mjs",
+          "skills/mine/intent-factory/scripts/drivers/exec-jsonl.mjs",
+          "skills/mine/intent-factory/dashboard/dashboard.mjs",
+          "skills/mine/intent-factory/statusline/claude-code.sh",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/test/contract.test.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/metrics.test.mjs",
+          "skills/mine/intent-factory/test/dashboard.test.mjs",
+          "skills/mine/intent-factory/test/statusline.test.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "validateContract",
+          "deriveBudgetDecision",
+          "buildCapsule",
+          "USAGE_LEDGER_NAME",
+          "ROTATION_AVG_CACHE_READ_TOKENS",
+          "renderStatusJson",
+          "renderCampaignMetrics"
+        ],
+        "decisions": [
+          "No spend ceiling of any kind survives; time and the provider's own allowance are the limits.",
+          "Session rotation is deleted with the capsule: it was a cost control fed by cacheReadWeight, and a worker session now ends only by completion, timeout, stall, cancellation or provider exhaustion.",
+          "Usage is recorded per invocation in usage.jsonl for reporting and read by no control path.",
+          "Provider session continuation (rule 4) and runtime discovery with re-tiering (rule 8) are untouched."
+        ],
+        "nonGoals": [
+          "Do not delete heartbeat, outbox, events, lease-liveness, supervisor or campaign-autonomy, and do not implement the controller lock or status.json; phase 2b does that.",
+          "Do not redesign the dashboard page, the status line layout or the metrics indicators; phases 3 and 4 do that.",
+          "Do not split runner.mjs and do not change drivers beyond removing the ceiling plumbing.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[^ar]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "test/*.mjs"
+            ],
+            "timeoutSec": 300,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p2a-diet-20260908-take2",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

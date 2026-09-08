@@ -1,0 +1,366 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p0-unblock-20260907-take6-continuation",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 0 of the lean campaign (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 2): remove the three failure classes that cost the last campaign most of its nodes. Scope findings become advisory on completed attempts, review gains none|advisory|blocking modes with judge-protocol recovery that never degrades blocking silently, and resume retries nodes in place with explicit reconciliation and budget boundaries. Three chained autonomous nodes on the 0.2.0 runner from an immutable snapshot. Take 6: review-modes has two partial attempts in the tree (58 min killed by the 3600 s wall clock, then 34 min killed by a 900 s stall while the provider was silent on a long context); stall window raised to 2400 s, wall clock 7200 s, workers glm-5.3-flash[1m]. Continuation: a targeted fix for the three cross-node regressions the full suite found (status note format, a fixture relying on the old blocking default, the D25 fixture failOn), then retry-in-place; fresh budget epoch 2026-09-lean-p0-retry.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 6000000,
+  "usagePolicy": {
+    "epoch": "2026-09-lean-p0-retry",
+    "maxInputTokens": 6000000,
+    "judgeReserveInputTokens": 1000000,
+    "maxPhaseInputTokens": 2000000,
+    "maxInvocationTokens": 4000000,
+    "cacheReadWeight": 0.1
+  },
+  "runtimeDefaults": {
+    "worker": "glm",
+    "judge": "sol"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions"
+    },
+    "luna": {
+      "driver": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoning": "xhigh",
+      "sandbox": "workspace-write"
+    },
+    "glm": {
+      "driver": "glm",
+      "model": "glm-5.3-flash[1m]",
+      "permissionMode": "bypassPermissions",
+      "config": {
+        "auth_token.env_key": "ZAI_API_KEY"
+      }
+    },
+    "sol": {
+      "driver": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning": "medium",
+      "sandbox": "read-only",
+      "config": {
+        "features.code_mode_host": true
+      }
+    },
+    "opus": {
+      "driver": "claude",
+      "model": "claude-opus-5",
+      "permissionMode": "bypassPermissions"
+    }
+  },
+  "runtimeRules": [],
+  "pollIntervalMs": 1000,
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p0-unblock-20260907-take6-continuation",
+    "campaignId": "intent-factory-lean-20260905"
+  },
+  "nodes": [
+    {
+      "id": "phase0-suite-fix",
+      "type": "backend",
+      "phase": "p0-suite-fix",
+      "runtime": "glm",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": {
+        "graceSec": 1800,
+        "intervalSec": 300,
+        "maxDryHeartbeats": 12
+      },
+      "definitionOfDone": [
+        {
+          "id": "three-regressions",
+          "text": "The three named tests pass with the behaviour of the two finished nodes preserved: the advisory scope note in STATUS.md and status --json keeps one stable format and the scope-advisory test asserts that format; the resume/findings.json test drives a blocking review so the run still exhausts and writes the artifact; the D25 replay fixture declares failOn [major, critical] (or advisory review) so validation accepts it while the case still proves an uncited rejection is invalid.",
+          "judgment": true
+        },
+        {
+          "id": "no-behaviour-change",
+          "text": "No production behaviour of scope findings, review modes, verdict-candidate counting, judge_unavailable attention or proof reuse changed; only test expectations and fixtures moved, unless a production defect is proven by a failing test, in which case the fix is minimal and named in the result summary.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "runtime": "sol",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 2
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Fix the three cross-node regressions that the full suite found after scope-advisory and review-modes both landed in the tree, without changing the behaviour either node delivered.",
+        "instructions": [
+          "The two earlier nodes of this phase, scope-advisory and review-modes, are done and their work is uncommitted in the tree (git status shows 20 files). Their targeted suites pass; the full npm test (587 tests) fails exactly three tests because the two changes interact. Fix only those three, quoted verbatim.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop. Run only the declared verification commands in the foreground with output bounded by | tail -n 200. Do not run the full npm test; the orchestrator runs it at phase close. Keep your context small: read by offset or grep, never whole large files. You have 120 minutes.",
+          "(1) scripts/runner.test.mjs:1689 'an unexpected write on green verification is an advisory finding, not a terminal failure': AssertionError, the STATUS.md note did not match /scope: 1 unexpected path \u00b7 minor advisory/u; the actual note is 'scope: 1 unexpected path \u00b7 advisory: 1 fin..' because review-modes now renders an advisory gate note after the scope note. Decide one stable format for a node that carries both a scope finding and an advisory verdict (for example 'scope: 1 unexpected path \u00b7 advisory: 1 finding'), make renderStatus, renderStatusJson, renderReport and STATUS.md agree, and update the scope-advisory test to assert that format.",
+          "(2) scripts/runner.test.mjs:4076 'resume removes a stale findings.json after driving the run to done': AssertionError 'the exhausted run wrote the artifact', false !== true. The fixture relied on a rejected gate exhausting the run; with review defaulting to advisory the node now settles done and never writes findings.json. Give the fixture an explicit blocking review (gate.review 'blocking' with failOn [major, critical]) so it exhausts as before; do not change the production default.",
+          "(3) test/replay.test.mjs:468 'D25: a gate rejection citing no Definition of Done item is invalid': TypeError from contract.mjs validateGate, 'gate.review blocking requires major in gate.failOn'. The D25 fixture declares a blocking gate whose failOn lacks major, which the new validation rule rejects by design. Update the fixture (failOn [major, critical], or review advisory if the case only needs the uncited-rejection protocol) so the deterministic case still proves that an uncited rejection is invalid.",
+          "Run the declared verification: the three test files with the named patterns, then npm run check and npm run typecheck. Then write the canonical worker result file the controller designates under .runs/<run>/results/ and return exactly one worker-result JSON object as the only content of the final message. Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit."
+        ],
+        "readFiles": [
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/review-modes.mjs",
+          "skills/mine/intent-factory/scripts/scope-findings.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "statusNote",
+          "scopeFindingsNote",
+          "validateGate"
+        ],
+        "decisions": [
+          "Both finished nodes keep their behaviour; this node reconciles tests and fixtures (TECH-SPEC lean, phase-close protocol)."
+        ],
+        "nonGoals": [
+          "Do not implement retry-in-place, worktrees or budgets.",
+          "Do not change the advisory default of gate.review."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "--test-name-pattern=advisory finding|stale findings.json|scope|review",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600
+          },
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "skills/mine/intent-factory/test/replay.test.mjs"
+            ],
+            "timeoutSec": 600
+          },
+          {
+            "argv": [
+              "npm",
+              "run",
+              "check"
+            ],
+            "timeoutSec": 180
+          },
+          {
+            "argv": [
+              "npm",
+              "run",
+              "typecheck"
+            ],
+            "timeoutSec": 180
+          }
+        ]
+      }
+    },
+    {
+      "id": "retry-in-place",
+      "type": "backend",
+      "phase": "p0-retry",
+      "runtime": "glm",
+      "dependsOn": [
+        "phase0-suite-fix"
+      ],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "retry-transitions",
+          "text": "resume adopts and re-judges completed work first: orphaned running nodes as today, and nodes blocked with judge_unavailable (accepted worker result and verification recorded, review unresolved) are re-judged with the gate's judge and never re-dispatched to a worker; then it re-dispatches failed, stalled, canceled, timeout-exhausted and dependency_failed nodes in the same run directory as attempt plus one whose prompt carries a 'Previous attempt' section (error, findings, scope findings, failing verification tail) bounded to 8 KiB; unknown_effect_reconciled is re-dispatched only with --reconcile <node>; an exhausted run budget is reported as attention and continued only with an explicit --max-input-tokens extension recorded in the run; --node <id> limits the retry to that node and its dependents; each proven by a named test on the replay driver.",
+          "judgment": true
+        },
+        {
+          "id": "descendant-head-accepted",
+          "text": "resume accepts a working tree whose HEAD is a descendant of the recorded gitHead and records the new head, still refuses a non-descendant, and treats a dirtyTreeFingerprint mismatch as a status warning rather than a refusal; each proven by a named test.",
+          "judgment": true
+        },
+        {
+          "id": "prune-removed",
+          "text": "contract prune, contract-prune.mjs, the targetedFix field and the single-node-contract warning are gone from code, tests and references; validate accepts a single-node contract silently; SKILL.md no longer lists contract prune and passes test/docs-diet.test.mjs.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": {
+        "enabled": true,
+        "runtime": "opus",
+        "failOn": [
+          "major",
+          "critical"
+        ],
+        "maxRevisions": 2,
+        "requiredCapabilities": {}
+      },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Retry in place: resume adopts completed work first, then re-dispatches ordinary failures as attempt plus one with the previous error and findings appended, in the same run directory, accepting a HEAD that descends from the recorded gitHead; unresolved effects need explicit reconciliation and an exhausted budget needs an explicit extension. contract prune and --targeted-fix are removed.",
+        "instructions": [
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md sections 1 (item 4), 3 (rule 4) and 9 (decision 3) before changing code. This node implements rule 4 for the 0.2.0 runner.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Run only the declared verification commands, in the foreground, with output bounded by | tail -n 200. Do not run the full npm test at all; the orchestrator runs it at phase close.",
+          "The two earlier nodes of this phase, scope-advisory and review-modes, are done and their work is in the tree (committed as the phase-0 checkpoint if git log shows it, otherwise uncommitted): review modes, verdict-candidate counting, judge_unavailable attention, proof reuse by reference and scope findings all exist now. Build on them; do not rewrite them. Keep your context small: read by offset or grep, never whole large files; run tests with --test-name-pattern and bounded output. You have 120 minutes.",
+          "Recovery first, extended: keep the existing adoption of orphaned running nodes and the re-judge of finished work, and add one transition to that recovery path: a node blocked with error code judge_unavailable (introduced by the review-modes node: accepted worker result and verification records on disk, review unresolved) is re-judged by the gate's judge on resume and is never reset to pending or re-dispatched to a worker. Today recoverOrphan ignores blocked nodes and resume would reset them to pending; change that for this code only, with a test. Then, for nodes whose status is failed, stalled, canceled, exhausted by wall clock, or blocked with dependency_failed: return them to pending and dispatch them as attempt plus one (attempt is the worker-start counter; revisions, the gate-rejection counter, is not reset). A node blocked with dependency_failed becomes pending when the dependency it waited on is retried. --node <id> limits the retry to that node and the nodes that depend on it.",
+          "Stop boundaries. A node in unknown_effect_reconciled is re-dispatched only when resume is given --reconcile <node-id>, which records the acknowledgement in events.jsonl; without it resume lists the node as attention and leaves it. When the run's cumulative ledger budget is exhausted (search runner.mjs for budget_exceeded and the cumulative spend check), resume reports attention and exits non-zero unless --max-input-tokens <n> raises the contract-level ceiling; the extension is persisted in run.json with the previous value, the new value and a timestamp. Do not change budget derivation otherwise.",
+          "The regenerated worker prompt for a retried attempt appends a 'Previous attempt' section: error code and message, judge findings (severity and text), scope findings if present, and the failing verification commands with a bounded output tail; the whole section is bounded to 8 KiB. The judge prompt for that attempt receives the same section under the same heading.",
+          "Source identity on resume (search runner.mjs for 'source identity is incomplete; resume refused' and the gitHead comparison): accept a current HEAD that is a descendant of the recorded gitHead (git merge-base --is-ancestor <recorded> <current>) and record the new head in run.json; still refuse a non-descendant HEAD with the existing message. A dirtyTreeFingerprint mismatch becomes a warning surfaced in status, not a refusal, because workers and the orchestrator commit between attempts.",
+          "Remove contract prune: delete skills/mine/intent-factory/scripts/contract-prune.mjs, the 'contract prune' CLI branch, the targetedFix node field and its validation, the single-node-contract warning in validate, their tests, and their paragraphs in references/contract.md and references/release-1.md. A single-node contract is simply valid. Remove the 'Continue a partly finished run' row from SKILL.md and keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Node snapshot validation in contract.mjs rejects unknown fields; extend it for any field you add (for example a reconciliation acknowledgement or a budget extension record) and cover it with a test.",
+          "Tests, each named after its case, using the replay driver or the existing fake providers: judge_unavailable node re-judged on resume without a worker dispatch; failed node retried as attempt 2 with the 'Previous attempt' section present and bounded; stalled and canceled nodes retried; dependency_failed node pending after its dependency is retried; --node targeting; unknown_effect_reconciled left alone without --reconcile and retried with it; exhausted budget reported as attention without --max-input-tokens and continued with it, extension persisted; descendant HEAD accepted and recorded; non-descendant HEAD refused; dirty fingerprint mismatch warns; contract prune CLI and targetedFix gone and a single-node contract validates without warning. No sleeps.",
+          "Update the 'Resume' section of skills/mine/intent-factory/references/contract.md and the 'Detached launch and waiting discipline' paragraph that mentions single-node contracts.",
+          "Prefer a new module (for example skills/mine/intent-factory/scripts/retry.mjs) over growing runner.mjs. From the worker, run only the declared verification commands with bounded output; the orchestrator runs the full suite at phase close.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates under .runs/<run>/results/ is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/task-packet.mjs",
+          "skills/mine/intent-factory/scripts/contract-prune.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/test/resume-probe.test.mjs",
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/test/docs-diet.test.mjs",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/references/release-1.md",
+          "skills/mine/intent-factory/SKILL.md"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory"
+        ],
+        "symbols": [
+          "renderWorkerPrompt",
+          "validateContractFile",
+          "assertTargetedFix"
+        ],
+        "decisions": [
+          "A retry is the same run and the same node, attempt plus one, with the failure attached; instructions are frozen per run (TECH-SPEC lean, rule 4 and 9.3).",
+          "unknown_effect_reconciled and an exhausted budget are stop boundaries that only an explicit flag crosses."
+        ],
+        "nonGoals": [
+          "Do not change scope evaluation, review modes, worktrees or provider routing.",
+          "Do not change the adoption of orphaned running nodes beyond adding the judge_unavailable re-judge transition."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "skills/mine/intent-factory/test/resume-probe.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "skills/mine/intent-factory/test/contract.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "--test-name-pattern=resume|prune|targeted|attempt|adopt|reconcile|budget",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "node",
+              "--test",
+              "--test-timeout=120000",
+              "skills/mine/intent-factory/test/docs-diet.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "npm",
+              "run",
+              "check"
+            ],
+            "timeoutSec": 180,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "npm",
+              "run",
+              "typecheck"
+            ],
+            "timeoutSec": 180,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      },
+      "progressPolicy": {
+        "graceSec": 1800,
+        "intervalSec": 300,
+        "maxDryHeartbeats": 12
+      },
+      "requiredCapabilities": {},
+      "replayPolicy": "safe",
+      "targetedFix": true
+    }
+  ]
+}

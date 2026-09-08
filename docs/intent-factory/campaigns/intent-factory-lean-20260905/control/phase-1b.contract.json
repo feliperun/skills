@@ -1,0 +1,256 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p1b-routing-20260907",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 1 continued (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 4). The first take left attempt-worktrees about 85 percent done in the tree — integrate.mjs, worktree.mjs and 673 insertions with the replay suite green at 29 of 29 — and 116 typecheck errors that its gate correctly rejected, then died on a weighted-token ceiling that cache reads dominate. This take lands that work, then ships routing: runtimes[].fallback with resolved vendor identity and concurrent scheduling, and on top of it the capability the owner asked for, runtime discovery with tiered role-based assignment so the factory picks strong models for judging and planning and cheap ones for execution, and re-tiers instead of stalling when an allowance is spent. The weighted ledger is off for this take by owner decision: timeoutSec per node is the limit.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 2000000000,
+  "usagePolicy": false,
+  "runtimeDefaults": { "worker": "sonnet", "judge": "sol" },
+  "runtimes": {
+    "sonnet": { "driver": "claude", "model": "claude-sonnet-5", "permissionMode": "bypassPermissions" },
+    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh", "sandbox": "workspace-write" },
+    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "medium", "sandbox": "read-only", "config": { "features.code_mode_host": true } },
+    "opus": { "driver": "claude", "model": "claude-opus-5", "permissionMode": "bypassPermissions" }
+  },
+  "runtimeRules": [
+    { "match": { "role": "worker", "currentRuntime": "opus" }, "runtime": "sonnet" }
+  ],
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "worktrees-typecheck-fix",
+      "type": "backend",
+      "phase": "p1b-routing",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "typecheck-clean-without-weakening",
+          "text": "npm run typecheck reports zero errors, and it was fixed by adding the missing JSDoc types and null guards, not by weakening the check: tsconfig.json is unchanged, no @ts-ignore, @ts-expect-error, @ts-nocheck or any-typed escape hatch was introduced, and the replay suite still passes 29 of 29 with the worktree and integration behaviour unchanged.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": { "kind": "command", "ref": "npm run check" }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": { "kind": "command", "ref": "npm run typecheck" }
+        }
+      ],
+      "gate": { "enabled": true, "review": "blocking", "runtime": "sol", "failOn": ["major", "critical"], "maxRevisions": 2, "requiredCapabilities": {} },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Land the attempt-worktrees work already in the tree by clearing its 116 typecheck errors without weakening the type check or changing behaviour.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done — `npm run check` and `npm run typecheck` — in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs a full revision. This is the single most common way a node in this campaign has failed.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. Do not run the full npm test; the orchestrator runs it at phase close.",
+          "The tree already contains a previous worker's implementation of attempt worktrees and the integration transaction: skills/mine/intent-factory/scripts/integrate.mjs (470 lines) and scripts/worktree.mjs (126 lines) are new, and 673 lines were inserted across runner.mjs, contract.mjs, verification.mjs, supervisor.mjs, env-preflight.mjs and their tests. That work is correct and tested — node --test skills/mine/intent-factory/test/replay.test.mjs passes 29 of 29. Do not redesign it, do not rewrite it, do not change its behaviour. Your job is only to make it typecheck.",
+          "npm run typecheck currently reports 116 errors: 48 in scripts/worktree.mjs, 38 in test/replay.test.mjs, 27 in scripts/runner.mjs, 2 in scripts/verification.mjs and 1 in scripts/integrate.mjs. Most are TS7006 (parameter implicitly has an any type) from missing JSDoc, and the rest are null-safety errors such as TS18047. Fix them by adding accurate JSDoc @param and @returns annotations and real null guards.",
+          "Do not weaken the check to make it pass. tsconfig.json stays exactly as it is. Do not add @ts-ignore, @ts-expect-error or @ts-nocheck, and do not annotate anything as `any` or cast through `any` to silence an error — if a type is genuinely hard, write the accurate union and guard it. A judge will read the diff for exactly this.",
+          "When you are done, re-run node --test --test-timeout=180000 skills/mine/intent-factory/test/replay.test.mjs and confirm it still passes 29 of 29, then run npm run check and npm run typecheck.",
+          "Keep your context small: read by offset or grep, never whole large files. runner.mjs is over 7000 lines; use the typecheck output's line numbers to go straight to each site.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "skills/mine/intent-factory/scripts/integrate.mjs",
+          "skills/mine/intent-factory/scripts/worktree.mjs",
+          "skills/mine/intent-factory/scripts/verification.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "tsconfig.json"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": [],
+        "decisions": [
+          "The attempt-worktrees implementation in the tree is accepted as it stands; this node only types it."
+        ],
+        "nonGoals": [
+          "Do not change worktree, integration or verification behaviour.",
+          "Do not touch routing, budgets or scheduling."
+        ],
+        "verification": [
+          { "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/verification.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] }
+        ]
+      }
+    },
+    {
+      "id": "parallel-and-fallback",
+      "type": "backend",
+      "phase": "p1b-routing",
+      "runtime": "sonnet",
+      "dependsOn": ["worktrees-typecheck-fix"],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "parallel-scheduling",
+          "text": "maxParallel above one is accepted by validation and ready nodes without dependency edges are dispatched concurrently, each in its own attempt worktree, while integration stays serialized so two attempts finishing together integrate one after the other and the second candidate is rebuilt on the head the first produced; proven by a named test with three independent replay nodes in flight at once that all integrate.",
+          "judgment": true
+        },
+        {
+          "id": "single-hop-fallback",
+          "text": "runtimes[].fallback declares the single failover hop for workers and judges and replaces runtimeRules, which is removed from the schema, the code, the tests and the references together with the synthesis it suppressed. Routing, validation and the capability preflight all read one explicit enumeration of the reachable states — runtime, role, hop count bounded at one, and the worker runtime actually used — so preflight no longer probes a second hop no node can reach. A contract whose primary worker and judge share a vendor is a validation error; a judge fallback that would share the vendor of the worker that actually ran is refused at runtime and the node goes to attention. Proven by named tests for each of those four cases.",
+          "judgment": true
+        },
+        {
+          "id": "vendor-identity",
+          "text": "Vendor is a resolved property of a runtime, not the driver name: a codex runtime configured with another model_provider (the flash fixture in test/helpers.mjs uses deepseek) resolves to that provider, replay and exec-jsonl runtimes carry a declared vendor, and an unresolvable vendor is a validation error naming the runtime. Proven by named tests covering a codex runtime with a custom provider, two replay runtimes with distinct declared vendors, and a runtime with no resolvable vendor.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": { "kind": "command", "ref": "npm run check" }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": { "kind": "command", "ref": "npm run typecheck" }
+        }
+      ],
+      "gate": { "enabled": true, "review": "advisory", "runtime": "sol", "failOn": ["major", "critical"], "maxRevisions": 2, "requiredCapabilities": {} },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Schedule independent nodes concurrently in their attempt worktrees, and replace runtimeRules with a per-runtime single-hop fallback whose reachable states are enumerated explicitly and whose worker/judge pairs are cross-vendor by a resolved vendor identity.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done — `npm run check` and `npm run typecheck` — in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs a full revision. This is the single most common way a node in this campaign has failed.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. Do not run the full npm test; the orchestrator runs it at phase close.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 3 (rule 1) and section 5 (the worker-assignment and fallback paragraph) before changing code. The attempt-worktrees work is already in the tree and typechecks: every attempt has its own worktree and branch, the controller seals the attempt diff, and integration is a journalled transaction. Build on it; do not rewrite it.",
+          "Concurrency. The scheduler already computes free slots from contract.maxParallel (grep runner.mjs for maxParallel). Accept maxParallel above one in validation and dispatch every ready node whose dependencies are met, up to the slot count, each in its own attempt worktree. Integration stays serialized: only one candidate is built and verified at a time and the run ref moves under that serialization.",
+          "Fallback. Replace the runtimeRules array with a per-runtime field runtimes[<id>].fallback naming at most one other runtime id. Remove runtimeRules from the schema, from contract validation, from the synthesis paths in scripts/failover.mjs and from the tests and references that mention it. Do not decide routing ad hoc: build an explicit enumeration of the reachable routing states — runtime, role, hop count bounded at one, and the worker runtime actually used for the attempt — and drive routing, validation and the capability preflight from that one enumeration. env-preflight.mjs around line 205 currently walks fallback targets recursively, so with A.fallback=B and B.fallback=C it probes C for a node assigned A even though that node can take only one hop; the enumeration must stop it. Keep the preflight enforcing exactly what it enforces today; only its traversal changes.",
+          "Vendor split, two distinct cases. A contract whose primary worker and judge share a vendor is a validation error naming both. A judge fallback that would share the vendor of the worker that actually ran is not a validation error — whether it is reachable depends on which worker ran — so it is refused at runtime and the node goes to attention. Keep them distinct, or the same-vendor-judge-fallback test cannot be constructed without the contract being rejected first.",
+          "Vendor identity is not the driver name. The schema supports replay and exec-jsonl drivers and provider configuration overrides: the flash fixture in test/helpers.mjs around line 107 is a codex runtime with model_provider deepseek, and calling it OpenAI is wrong. Make vendor an explicit resolved property — from the driver together with its provider configuration, and declared outright for replay and exec-jsonl runtimes; an unresolvable vendor is a validation error naming the runtime. Export the resolver: the next node builds its tier catalog on it.",
+          "Tests, each named after its case, on the replay driver: three independent nodes in flight at once with maxParallel 3, all integrating, the second integration rebuilt on the first's head; a worker exhaustion failing over one hop with the fallback recorded on the attempt; an admissible cross-vendor judge fallback; a judge fallback refused because it shares the vendor of the worker that actually ran, leaving the node attention; a contract whose primary worker and judge share a vendor rejected by validation with a named message; a codex runtime with a custom model_provider resolving to that provider; two replay runtimes with distinct declared vendors; a runtime with no resolvable vendor rejected; preflight not probing an unreachable second hop. No sleeps.",
+          "Update the routing and fallback material in skills/mine/intent-factory/references/contract.md so it describes runtimes[].fallback, vendor identity and the reachable-state enumeration and no longer describes runtimeRules; keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Keep your context small: read by offset or grep, never whole large files.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/failover.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/test/contract.test.mjs",
+          "skills/mine/intent-factory/test/preflight.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs",
+          "skills/mine/intent-factory/references/contract.md"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["rankedRuntimeIds", "synthesizedChain", "failoverTargets", "runtimeSnapshot"],
+        "decisions": [
+          "Failover is one hop declared per runtime; runtimeRules and the synthesized chain are removed.",
+          "Routing, validation and preflight read one enumeration of reachable states bounded at one hop.",
+          "Vendor is a resolved runtime property, exported for the discovery node to build tiers on."
+        ],
+        "nonGoals": [
+          "Do not change the integration transaction, the transaction journal or the worktree layout.",
+          "Do not implement discovery, tiers or role-based assignment; the next node does that."
+        ],
+        "verification": [
+          { "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/preflight.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] }
+        ]
+      }
+    },
+    {
+      "id": "runtime-discovery",
+      "type": "backend",
+      "phase": "p1b-routing",
+      "runtime": "luna",
+      "dependsOn": ["parallel-and-fallback"],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "discovery-reports-availability",
+          "text": "doctor --discover [--json] reports, per installed driver and model, a normalized availability record {available, exhaustedUntil, reason} rather than a raw provider error: each driver maps its own exhaustion signal into it, and the Z.ai code 1310 with its reset timestamp is parsed into exhaustedUntil. A driver whose CLI is not installed is reported absent, not failed. Proven by named tests per driver against recorded provider responses, including the 1310 payload.",
+          "judgment": true
+        },
+        {
+          "id": "tiered-role-assignment",
+          "text": "A runtime carries a tier (strong, balanced or cheap) alongside the vendor identity the previous node resolved, and a contract that declares runtimes and runtimeDefaults is honoured unchanged. A contract that omits them has them composed from discovery: the worker is the cheapest available runtime and the judge is the strongest available runtime of a different vendor than that worker; when no cross-vendor judge is available the composition fails with a named error instead of pairing same-vendor. The composed assignment is recorded in the run so it is auditable. Proven by named tests for the declared case, the composed case and the no-admissible-judge case.",
+          "judgment": true
+        },
+        {
+          "id": "exhaustion-retiers",
+          "text": "When a runtime's allowance is spent mid-run the factory re-tiers rather than descending a cost-ordered list: it selects another runtime of the same tier whose vendor stays admissible against the judge that will actually judge the attempt, records the substitution on the attempt, and when no such runtime exists puts the node in attention carrying exhaustedUntil so status shows when it can resume. Proven by named tests on the replay driver for a successful re-tier, a re-tier refused for vendor, and exhaustion with no candidate.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": { "kind": "command", "ref": "npm run check" }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": { "kind": "command", "ref": "npm run typecheck" }
+        }
+      ],
+      "gate": { "enabled": true, "review": "blocking", "runtime": "opus", "failOn": ["major", "critical"], "maxRevisions": 2, "requiredCapabilities": {} },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Make the factory discover which models are actually available and assign them by role — strong for judging and planning, cheap for execution — honouring an explicit declaration when the operator gives one, and re-tiering across vendors when an allowance is spent instead of stalling.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done — `npm run check` and `npm run typecheck` — in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs a full revision. This is the single most common way a node in this campaign has failed.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the harness denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. Do not run the full npm test; the orchestrator runs it at phase close.",
+          "Why this node exists, from this campaign's own record. On 2026-09-07 the Z.ai coding plan answered error 1310, 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-10 02:10:06', and the campaign discovered it only because a phase preflight failed after the contract had already been authored around GLM; earlier, every 'GLM 5.3 flash' node had silently run the larger glm-5.3 because the raw endpoint rejects the [1m] suffix and the harness strips it. The factory must find this out by asking, before it plans, and must route around it by itself.",
+          "The previous node exported a resolved vendor identity for a runtime (driver plus provider configuration, declared for replay and exec-jsonl). Build on that export; do not reimplement vendor resolution.",
+          "Discovery. Add `doctor --discover [--json]`, which enumerates the drivers whose CLI is installed and, for each declared or known model, returns a normalized record {available: boolean, exhaustedUntil: string|null, reason: string|null}. Normalization belongs in each driver, next to the code that already knows that provider's error shape: the glm driver parses Z.ai code 1310 and its 'reset at' timestamp into exhaustedUntil; the codex and claude drivers map their own quota and auth failures. A driver whose CLI is absent is reported absent, which is not a failure. Do not invent live network calls in tests: drive the driver-level tests from recorded provider responses, the way the existing driver tests do.",
+          "Tiers and assignment. Give a runtime a tier of strong, balanced or cheap, next to its vendor. When a contract declares runtimes and runtimeDefaults, honour them exactly and change nothing — an operator who names models gets those models. When a contract omits them, compose them from discovery: the worker is the cheapest available runtime, and the judge is the strongest available runtime whose vendor differs from that worker's. If no cross-vendor judge is available, fail the composition with a named error; never pair same-vendor to make it work. Record the composed assignment in the run so a reader can audit which models the factory chose and why.",
+          "Re-tier on exhaustion. Today failover descends a list. Instead, when a runtime's allowance is spent mid-run, select another runtime of the same tier whose vendor stays admissible against the judge that will actually judge that attempt, and record the substitution on the attempt. When no such runtime exists, put the node in attention carrying exhaustedUntil so status shows when the work can resume rather than only that it stopped. This composes with the single-hop fallback the previous node shipped: an explicitly declared fallback still wins over a re-tier.",
+          "Prefer a new module, for example skills/mine/intent-factory/scripts/discovery.mjs for the probe and the catalog and a small assignment helper, over growing runner.mjs, which is past its review budget.",
+          "Tests, each named after its case: the glm driver parsing a recorded 1310 payload into exhaustedUntil; the codex and claude drivers mapping their own quota failures; an absent CLI reported absent rather than failed; a contract that declares runtimes left untouched; a contract that omits them composed with the cheapest worker and the strongest cross-vendor judge; composition failing by name when no cross-vendor judge is available; a mid-run exhaustion re-tiering within the same tier; a re-tier refused because it would share the judge's vendor; exhaustion with no candidate leaving the node attention with exhaustedUntil visible in status. No sleeps, no live network calls.",
+          "Document the new behaviour in skills/mine/intent-factory/references/contract.md and operations.md, describing only what you implemented, and keep SKILL.md under the byte ceiling enforced by test/docs-diet.test.mjs.",
+          "Keep your context small: read by offset or grep, never whole large files.",
+          "Do not modify campaign control artifacts under .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required, and tests may create isolated temporary directories."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/failover.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/scripts/drivers/glm.mjs",
+          "skills/mine/intent-factory/scripts/drivers/codex.mjs",
+          "skills/mine/intent-factory/scripts/drivers/index.mjs",
+          "skills/mine/intent-factory/test/drivers.test.mjs",
+          "skills/mine/intent-factory/test/preflight.test.mjs",
+          "skills/mine/intent-factory/references/contract.md"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["probeRuntime", "failoverTargets"],
+        "decisions": [
+          "An operator's explicit runtime declaration is always honoured; discovery only composes what was omitted.",
+          "A judge is never paired with a worker of its own vendor, even when that means failing the composition with a named error.",
+          "Exhaustion re-tiers within a tier across an admissible vendor and otherwise reports attention with exhaustedUntil, never a silent descent to a weaker or same-vendor model."
+        ],
+        "nonGoals": [
+          "Do not change the integration transaction, worktrees or scheduling.",
+          "Do not add live network calls to the test suite."
+        ],
+        "verification": [
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/drivers.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/preflight.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p1b-routing-20260907",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}

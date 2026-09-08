@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p1e-runtime-discovery-20260907",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Implement the missing runtime discovery, tiered assignment, and exhaustion re-tiering required by phase 1, with the campaign routing policy of Luna workers, Sol reviewers, and Astra judges.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 1,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "maxInputTokens": 2000000000,
+  "usagePolicy": false,
+  "runtimeDefaults": { "worker": "luna", "judge": "astra" },
+  "runtimes": {
+    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "high", "sandbox": "workspace-write" },
+    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "sandbox": "read-only", "vendor": "openai-sol", "config": { "features.code_mode_host": true } },
+    "astra": { "driver": "codex", "model": "gpt-6-astra", "reasoning": "xhigh", "sandbox": "read-only", "vendor": "openai-astra", "config": { "features.code_mode_host": true } }
+  },
+  "nodes": [
+    {
+      "id": "runtime-discovery",
+      "type": "backend",
+      "phase": "p1e-runtime-discovery",
+      "runtime": "luna",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "progressPolicy": { "graceSec": 7200, "intervalSec": 300, "maxDryHeartbeats": 12 },
+      "definitionOfDone": [
+        {
+          "id": "discovery-reports-availability",
+          "text": "doctor --discover [--json] reports each installed driver and model as {available, exhaustedUntil, reason}; provider exhaustion is normalized per driver, including Z.ai code 1310 with its reset timestamp, and an absent CLI is reported absent rather than failed.",
+          "judgment": true
+        },
+        {
+          "id": "tiered-role-assignment",
+          "text": "Runtimes carry a tier beside their resolved vendor; explicit runtimes and defaults are preserved, omitted assignments compose a cheapest available worker and strongest available cross-vendor judge, and the chosen assignment is persisted for audit.",
+          "judgment": true
+        },
+        {
+          "id": "exhaustion-retiers",
+          "text": "Provider exhaustion re-tiers within the same tier only when the replacement remains admissible against the judge that will actually run; otherwise the node reaches attention with exhaustedUntil and never silently descends to a weaker or same-vendor runtime.",
+          "judgment": true
+        },
+        { "id": "check", "text": "npm run check passes.", "proof": { "kind": "command", "ref": "npm run check" } },
+        { "id": "typecheck", "text": "npm run typecheck passes.", "proof": { "kind": "command", "ref": "npm run typecheck" } }
+      ],
+      "gate": { "enabled": true, "review": "blocking", "runtime": "astra", "failOn": ["major", "critical"], "maxRevisions": 2, "requiredCapabilities": {} },
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Implement runtime discovery, tiered role assignment, and same-tier exhaustion re-tiering that the previous recovery run left missing.",
+        "instructions": [
+          "Inspect the current implementation and the failed p1d-recovery evidence before editing. Build on the existing resolved-vendor and runtimes[].fallback architecture; do not restore runtimeRules.",
+          "Add doctor --discover [--json] and normalize provider availability per driver. Cover Z.ai code 1310 reset timestamps, Codex quota/auth failures, Claude quota/auth failures, and absent CLIs without live network calls in tests.",
+          "Add runtime tiers and explicit-vs-composed assignment. Explicit runtimes and runtimeDefaults must remain unchanged; omitted assignments choose the cheapest available worker and strongest available judge from a different resolved vendor, or fail with a named error. Persist the composed assignment in run state.",
+          "Implement exhaustion re-tiering within the same tier, preserving vendor admissibility against the actual judge. If no candidate exists, transition to attention with exhaustedUntil. Keep explicit single-hop fallback precedence and do not silently switch providers for budget, scope, permission, or authority failures.",
+          "Prefer focused modules over growing runner.mjs. Add named tests for every behavior and update only the relevant contract/operations documentation.",
+          "Before declaring the work done, run every command proof in the Definition of Done — npm run check and npm run typecheck — in the foreground, with output bounded by | tail -n 200. Do not run commands in the background or use sleep loops.",
+          "Do not modify .runs/control or .runs/campaigns and do not commit. Write the canonical worker result file designated by the controller."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/failover.mjs",
+          "skills/mine/intent-factory/scripts/env-preflight.mjs",
+          "skills/mine/intent-factory/scripts/drivers/glm.mjs",
+          "skills/mine/intent-factory/scripts/drivers/codex.mjs",
+          "skills/mine/intent-factory/scripts/drivers/claude.mjs",
+          "skills/mine/intent-factory/scripts/drivers/index.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/contract.mjs",
+          "skills/mine/intent-factory/test/drivers.test.mjs",
+          "skills/mine/intent-factory/test/preflight.test.mjs",
+          "skills/mine/intent-factory/test/contract.test.mjs",
+          "skills/mine/intent-factory/test/replay.test.mjs",
+          "skills/mine/intent-factory/references/contract.md",
+          "skills/mine/intent-factory/references/operations.md"
+        ],
+        "writeRoots": ["skills/mine/intent-factory"],
+        "symbols": ["probeRuntime", "failoverTargets", "routeRuntime", "handleProviderExhaustion"],
+        "decisions": [
+          "Explicit operator runtime declarations are always honored; discovery composes only omitted assignments.",
+          "Judge selection must remain cross-vendor against the worker runtime actually used.",
+          "Exhaustion re-tiers within the same tier and otherwise reports attention with exhaustedUntil."
+        ],
+        "nonGoals": ["integration transaction, worktrees, and scheduling changes", "live network calls in tests", "budget or provider policy changes"],
+        "verification": [
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/drivers.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/preflight.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=120000", "skills/mine/intent-factory/test/contract.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] },
+          { "argv": ["node", "--test", "--test-timeout=180000", "skills/mine/intent-factory/test/replay.test.mjs"], "timeoutSec": 600, "repeat": 1, "env": [] }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": { "kind": "contract", "id": "intent-factory-lean-p1e-runtime-discovery-20260907", "campaignId": "intent-factory-lean-20260905" }
+}

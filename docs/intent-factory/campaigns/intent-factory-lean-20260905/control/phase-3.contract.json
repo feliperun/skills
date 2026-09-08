@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 3,
+  "contractVersion": "0.1.0",
+  "id": "intent-factory-lean-p3-visibility-20260908",
+  "campaignId": "intent-factory-lean-20260905",
+  "goal": "Phase 3 visibility (docs/intent-factory/TECH-SPEC-2026-09-05-lean.md, revision 5, section 4 dashboard brief and section 5 rows 3). The dashboard page and server are rebuilt over status.json, node JSON, events.jsonl, usage.jsonl and notify.jsonl in the section-4 order (now strip, needs-you banner, runs table, run drawer, handoff tab), and the status surfaces follow the same order: the status CLI, a status line of at most 40 lines reading .runs/status.json, and one-line notify templates. Two independent leaf nodes on disjoint files, scheduled in parallel. Runtimes: claude-sonnet-5 workers with gate none while DeepSeek has no balance; the full suite and the orchestrator's review are the gate.",
+  "cwd": "/Users/frb/dev/frb/skills",
+  "maxParallel": 2,
+  "stallTimeoutSec": 2400,
+  "timeoutSec": 7200,
+  "runtimeDefaults": {
+    "worker": "sonnet"
+  },
+  "runtimes": {
+    "sonnet": {
+      "driver": "claude",
+      "model": "claude-sonnet-5",
+      "permissionMode": "bypassPermissions",
+      "tier": 2
+    }
+  },
+  "pollIntervalMs": 1000,
+  "nodes": [
+    {
+      "id": "dashboard-v2",
+      "type": "frontend",
+      "phase": "p3-dashboard",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "page-order-and-sources",
+          "text": "dashboard/index.html renders one column of at most 1100 px, light and dark, in the section-4 order: a now strip (active run, state, running node with elapsed, USD so far, updated N s ago; when idle 'Idle \u00b7 last run <id> finished <ago>'), a needs-you banner only when attention exists with the copyable command that resolves each item, a runs table for the campaign chosen in a header dropdown (status pill, run id, one-line goal, nodes done/total, attempts, elapsed, USD, updated), a run drawer with node rows and per-node tabs (worker log tail of 200 lines streaming, verification per command, diff --stat and file list, findings, prompt), and a handoff tab rendering the campaign HANDOFF.md; the live feed, ledger epochs, weighted tokens, decisions, questions, constraints, intents, outcomes, sessions, notifications list and heartbeat-derived state are gone; observable in index.html and a DOM test on a rendered snapshot.",
+          "judgment": true
+        },
+        {
+          "id": "server-reads-new-records",
+          "text": "dashboard/dashboard.mjs serves the page and its SSE stream from status.json (per run and .runs/status.json), node JSON, events.jsonl, usage.jsonl, notify.jsonl and the campaign HANDOFF.md only \u2014 no heartbeat, outbox, ledger or projection \u2014 with a snapshot payload of at most 200 KB; observable in dashboard.mjs and server API tests that serve a recorded run directory.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Rebuild the dashboard page and server over the v0.3 records in the section-4 order, deleting every surface that read deleted machinery.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes. Never run npm install, npm ci or any package install: the worktree links the repository's node_modules (or has none; tsc is global), and the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with `node --test skills/mine/intent-factory/test/dashboard.test.mjs` and `node --test 'skills/mine/intent-factory/test/*.mjs'`; run both yourself before finishing (`2>&1 | tail -n 80`). Another node runs at the same time on render.mjs, statusline/claude-code.sh, scripts/notify/index.mjs and their tests: do not edit those files; your files are dashboard/dashboard.mjs, dashboard/index.html and test/dashboard.test.mjs (plus a fixture directory under test/fixtures if you need a recorded run).",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 4 (the dashboard brief, every numbered item) and the module table (server \u2264 300 lines, page \u2264 450 lines) before editing. Phase 2b closed at f39fcca on 2026-09-08, the HEAD of your worktree: schema 3, one controller per run behind controller.lock, status.json per run and .runs/status.json written each tick, usage.jsonl per invocation, notify.jsonl receipts (delivered, failed, no_transport), heartbeat/outbox/events/campaign-autonomy/supervisor gone, attempt N+1 continues from the sealed attempt N, node_modules symlinked into attempt worktrees. Full suite 481 tests, 479 pass, 0 fail, 2 skipped; check and typecheck pass. Sizes at HEAD (lines): scripts/runner.mjs 6088, scripts/render.mjs 567, scripts/notify/index.mjs 231, statusline/claude-code.sh 402, dashboard/dashboard.mjs 634, dashboard/index.html 555, test/dashboard.test.mjs 327, test/statusline.test.mjs 226, scripts/campaign.mjs 1425, scripts/metrics.mjs 558. Read the exact shapes of status.json, .runs/status.json, usage.jsonl and notify.jsonl from the code that writes them (grep runner.mjs for status.json and appendUsageRecord, scripts/notify/index.mjs for the receipt) and from the recorded run .runs/intent-factory-lean-p2b-process-20260908-take5 (read-only), the first run integrated by this runner.",
+          "Sources. status.json per run (written each tick by the controller: run id, contract id, campaign id, controller pid and start, nodes with state, attempt, runtime, elapsed, tokens by kind and cost, verdict, note, needs-you items with the resolving command) and .runs/status.json (pointer to the active run plus the same summary); node JSON under <run-dir>/nodes; events.jsonl; usage.jsonl (one record per invocation: runId, nodeId, attempt, role, runtime, model, tokens by kind, costUsd with provenance, startedAt, finishedAt); notify.jsonl (receipts); .runs/campaigns/<id>/HANDOFF.md. Read their shapes from the code that writes them (grep runner.mjs for status.json, appendUsageRecord and notify.jsonl) and from the recorded runs under .runs/ \u2014 build one small recorded run directory as a test fixture from the shapes, never by copying a real run.",
+          "Page. One column, max-width 1100 px, light and dark via prefers-color-scheme, SSE as today for updates, no framework, no external assets. Order exactly: (1) now strip; (2) needs-you banner only when attention exists, one line per item with the copyable command (`resume <run-dir>`, `resume <run-dir> --reconcile <node>`, `cancel <run-dir>`, or the question to answer); (3) runs table newest first for the campaign selected in a header dropdown, no left column; (4) run drawer on click with node rows (state, attempt, model, elapsed, USD, verdict pill, one-line note) and per-node tabs: worker log tail (200 lines, streaming), verification (per command pass/fail with output tail), diff (--stat and file list), findings (severity, text), prompt; (5) handoff tab. Delete the live feed, ledger epochs, weighted tokens anywhere, decisions/questions/constraints/intents/outcomes, sessions, notifications list and anything derived from heartbeat.json. Snapshot payload at most 200 KB: truncate log tails and prompts server-side.",
+          "Tests, each named after its case: the server serves the snapshot for a recorded run directory with the documented sources and none of the deleted ones; the payload stays under 200 KB with a long log; the DOM test renders the snapshot into the page (a minimal DOM shim or string assertions on the rendered HTML) and finds the five sections in order, the needs-you banner only with attention, and no weighted-token text; the SSE endpoint emits an update when status.json changes.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/dashboard/dashboard.mjs",
+          "skills/mine/intent-factory/dashboard/index.html",
+          "skills/mine/intent-factory/test/dashboard.test.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/campaign.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory/dashboard",
+          "skills/mine/intent-factory/test"
+        ],
+        "symbols": [
+          "discoverCampaigns",
+          "renderStatusJson"
+        ],
+        "decisions": [
+          "The page reads status.json, node JSON, events.jsonl, usage.jsonl, notify.jsonl and HANDOFF.md, nothing else.",
+          "Section-4 order is the contract of the page; removed surfaces do not come back under another name."
+        ],
+        "nonGoals": [
+          "Do not edit render.mjs, statusline/claude-code.sh, scripts/notify or runner.mjs; the sibling node owns the status surfaces.",
+          "Do not add a framework, a build step or external assets.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/dashboard.test.mjs"
+            ],
+            "timeoutSec": 300,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "status-surfaces",
+      "type": "backend",
+      "phase": "p3-status",
+      "runtime": "sonnet",
+      "dependsOn": [],
+      "timeoutSec": 7200,
+      "definitionOfDone": [
+        {
+          "id": "status-cli-order",
+          "text": "`status <run-dir>` prints, from status.json, exactly the page order \u2014 needs-you first (one line per item with the resolving command), then the now strip, then the node table (state, attempt, runtime, elapsed, tokens by kind, USD, verdict, one-line note), then cost totals \u2014 and `report` keeps its JSON stable; nothing mentions weighted input, budgets, judge reserve or leases; observable in render.mjs and the status tests in runner.test.mjs.",
+          "judgment": true
+        },
+        {
+          "id": "status-line-forty-lines",
+          "text": "statusline/claude-code.sh is at most 40 lines, reads .runs/status.json only, prints one line (active run, state, running node, elapsed, USD, needs-you count) or nothing when no run is active, and runs in well under 100 ms without node; observable in the script and test/statusline.test.mjs.",
+          "judgment": true
+        },
+        {
+          "id": "notify-one-line-templates",
+          "text": "Every notify template renders one line under 200 characters from counters and identifiers only (run id, node id, state, attempt, done/total, error code) with no model text, for node.terminal, run.terminal and attention; observable in scripts/notify/index.mjs and its tests.",
+          "judgment": true
+        },
+        {
+          "id": "check",
+          "text": "npm run check passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run check"
+          }
+        },
+        {
+          "id": "typecheck",
+          "text": "npm run typecheck passes.",
+          "proof": {
+            "kind": "command",
+            "ref": "npm run typecheck"
+          }
+        }
+      ],
+      "gate": false,
+      "taskPacket": {
+        "mode": "autonomous",
+        "objective": "Make the status CLI, the status line and the notify templates read status.json and follow the page order, deleting every mention of deleted machinery.",
+        "instructions": [
+          "Before you declare the work done, run every command proof in this node's Definition of Done \u2014 `npm run check` and `npm run typecheck` \u2014 in the foreground and fix what they report. The controller runs them again at the gate and a failure there costs the whole attempt. Your worker result lists at most 32 changedFiles (the protocol rejects a longer list and discards the attempt): when the diff touches more files, name directories or the most important paths and say so in the summary.",
+          "Never start a command in the background or through a task tool, and never wait on one with a sleep loop: the tool policy denies background Bash and the controller reads silence as a stall. Bound output with | tail -n 200. You are a headless session: ending your turn ends the session, nobody resumes you, and a missing canonical result file discards the attempt \u2014 never 'pause to wait'; run every command in the foreground with an explicit tool timeout (the Bash tool's timeout parameter, up to 600000 ms) and keep each command under eight minutes: runner.test.mjs only through the name-pattern splits `^r`, `^a`, `^[b-oB-O]`, `^[p-zP-Z]`. Never run npm install, npm ci or any package install: the husky prepare hook would write .husky/_/.gitignore and fail the node's snapshot-integrity check.",
+          "The controller verifies this node with runner.test.mjs in four name-pattern parts and `node --test 'skills/mine/intent-factory/test/*.mjs'`; run the same five commands yourself before finishing. Another node runs at the same time on dashboard/dashboard.mjs, dashboard/index.html and test/dashboard.test.mjs: do not edit those files; your files are scripts/render.mjs, statusline/claude-code.sh, scripts/notify/index.mjs, test/statusline.test.mjs, the status and report tests in scripts/runner.test.mjs and the notify tests.",
+          "Read docs/intent-factory/TECH-SPEC-2026-09-05-lean.md section 4 (last paragraph: `status <run-dir>` prints the same order as the page) and section 5 row 3 status-surfaces before editing. Phase 2b closed at f39fcca on 2026-09-08, the HEAD of your worktree: schema 3, one controller per run behind controller.lock, status.json per run and .runs/status.json written each tick, usage.jsonl per invocation, notify.jsonl receipts (delivered, failed, no_transport), heartbeat/outbox/events/campaign-autonomy/supervisor gone, attempt N+1 continues from the sealed attempt N, node_modules symlinked into attempt worktrees. Full suite 481 tests, 479 pass, 0 fail, 2 skipped; check and typecheck pass. Sizes at HEAD (lines): scripts/runner.mjs 6088, scripts/render.mjs 567, scripts/notify/index.mjs 231, statusline/claude-code.sh 402, dashboard/dashboard.mjs 634, dashboard/index.html 555, test/dashboard.test.mjs 327, test/statusline.test.mjs 226, scripts/campaign.mjs 1425, scripts/metrics.mjs 558. Read the exact shapes of status.json, .runs/status.json, usage.jsonl and notify.jsonl from the code that writes them (grep runner.mjs for status.json and appendUsageRecord, scripts/notify/index.mjs for the receipt) and from the recorded run .runs/intent-factory-lean-p2b-process-20260908-take5 (read-only), the first run integrated by this runner.",
+          "Status CLI. render.mjs derives everything from <run-dir>/status.json (fall back to node JSON only for the fields status.json does not carry, and say so in a comment); order: needs-you, now, nodes, cost. Column set: state, attempt, runtime, elapsed, uncached input, cache read, output, USD, verdict, note. Remove every column, note and total that mentioned weighted input, workers allowance, judge reserve or lease health. Keep `report --json` and `status --json` stable machine-readable payloads and update their tests.",
+          "Status line. Rewrite statusline/claude-code.sh to at most 40 lines: read .runs/status.json (jq if present, otherwise sed/grep on the compact JSON the controller writes), print one line \u2014 `<run-id> \u00b7 <state> \u00b7 <node> <elapsed> \u00b7 $<usd> \u00b7 needs you: <n>` \u2014 or nothing when there is no active run; no node process, no heartbeat.json. Update test/statusline.test.mjs with fixtures for active, idle and needs-you.",
+          "Notify templates. In scripts/notify/index.mjs render one line per event type from fixed templates using counters and identifiers only \u2014 for example `run <id> done \u00b7 3/3 nodes \u00b7 $4.21`, `node <id> failed \u00b7 verification_failed \u00b7 attempt 2 \u00b7 resume <run-dir>`, `node <id> needs you \u00b7 <error code>` \u2014 under 200 characters, never model text; tests for each template and the length bound.",
+          "Keep your context small: read by offset or grep, never whole large files. Do not modify .runs/control or .runs/campaigns and do not commit. Writing the canonical result file the controller designates is required."
+        ],
+        "readFiles": [
+          "docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+          "skills/mine/intent-factory/scripts/render.mjs",
+          "skills/mine/intent-factory/statusline/claude-code.sh",
+          "skills/mine/intent-factory/scripts/notify/index.mjs",
+          "skills/mine/intent-factory/test/statusline.test.mjs",
+          "skills/mine/intent-factory/scripts/runner.mjs",
+          "skills/mine/intent-factory/scripts/runner.test.mjs",
+          "skills/mine/intent-factory/test/helpers.mjs"
+        ],
+        "writeRoots": [
+          "skills/mine/intent-factory/scripts",
+          "skills/mine/intent-factory/statusline",
+          "skills/mine/intent-factory/test"
+        ],
+        "symbols": [
+          "renderStatusJson",
+          "renderReportJson",
+          "statusNote"
+        ],
+        "decisions": [
+          "status.json is the single source for the status CLI and the status line.",
+          "Notify lines are templates over counters and identifiers, never model text."
+        ],
+        "nonGoals": [
+          "Do not edit dashboard/dashboard.mjs, dashboard/index.html or test/dashboard.test.mjs; the sibling node owns the page.",
+          "Do not change what the controller writes to status.json beyond adding a missing field the surfaces need.",
+          "Do not commit."
+        ],
+        "verification": [
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^r",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^a",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[b-oB-O]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "--test-name-pattern=^[p-zP-Z]",
+              "skills/mine/intent-factory/scripts/runner.test.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          },
+          {
+            "argv": [
+              "/Users/frb/.asdf/installs/nodejs/26.8.1/bin/node",
+              "--test",
+              "--test-timeout=180000",
+              "skills/mine/intent-factory/test/*.mjs"
+            ],
+            "timeoutSec": 600,
+            "repeat": 1,
+            "env": []
+          }
+        ]
+      }
+    }
+  ],
+  "sourceIdentity": {
+    "kind": "contract",
+    "id": "intent-factory-lean-p3-visibility-20260908",
+    "campaignId": "intent-factory-lean-20260905"
+  }
+}
