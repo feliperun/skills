@@ -246,12 +246,6 @@ if (process.argv.includes("--version")) {
     };
     const protocolModes = new Set(["write-result", "write-unexpected", "write-unexpected-judge-prompt", "write-unexpected-long-review", "new-symlink-escape", "retargeted-symlink-escape", "write-outside-file-root", "write-under-file-root"]);
     if (mode !== "exhausted") console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
-    if (mode === "thread-large-timeout" && process.argv.includes("resume")) {
-      appendFileSync(${JSON.stringify(join(directory, ".runs", "resume-continuation.txt"))}, process.argv.join(" ") + "\\n");
-      console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "resumed worker", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
-      console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));
-      return;
-    }
     if (mode === "write-allowed" && !judge) writeFileSync("README.md", "worker output\\n");
     if (mode === "write-unexpected" && !judge) writeFileSync("unexpected.txt", "out of scope\\n");
     if (mode === "new-symlink-escape" && !judge) {
@@ -349,6 +343,18 @@ if (process.argv.includes("--version")) {
       for (let index = 0; index < 7000; index += 1) console.error("E".repeat(100));
     }
     if (mode === "thread-large-timeout") {
+      // Attempt isolation (phase 1) makes a resumed invocation a fresh attempt
+      // in a fresh worktree, never a continuation of the timed-out one: only
+      // the first invocation hangs past its wall-clock deadline, and every
+      // invocation after it completes normally.
+      const counterPath = ${JSON.stringify(join(directory, ".runs", "thread-large-timeout-invocations"))};
+      appendFileSync(counterPath, "x\\n");
+      const call = readFileSync(counterPath, "utf8").trim().split("\\n").length;
+      if (call > 1) {
+        console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({ status: "done", summary: "fresh attempt after the capped timeout", changedFiles: [], verification: [], artifacts: [], missingContext: [] })}}));
+        console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));
+        return;
+      }
       for (let index = 0; index < 7000; index += 1) console.log(JSON.stringify({ type: "progress", text: "A".repeat(100) }));
       console.log(JSON.stringify({type:"turn.failed",error:{message:"still running after partial accounting",usage:{input_tokens:5,output_tokens:2,cached_input_tokens:1}}}));
       setInterval(() => {}, 60_000);

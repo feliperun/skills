@@ -3356,10 +3356,12 @@ test("resume adopts a dead completion closed before its deadline after downtime"
   const invocation = state.invocations.at(-1);
   const startedAt = new Date(Date.now() - 20_000).toISOString();
   const closedAt = new Date(Date.now() - 19_000).toISOString();
+  const worktree = ensureAttemptWorktree(runDir, state);
   writeFileSync(nodePath, JSON.stringify({
     ...state,
     status: "running",
     phase: "worker",
+    worktree,
     executionOverrides: [{ kind: "timeout", timeoutSec: 10, at: new Date(Date.now() - 20_000).toISOString(), reason: "persisted deadline" }],
     invocations: [{ ...invocation, status: "closed", startedAt, closedAt }],
   }, null, 2));
@@ -3382,10 +3384,12 @@ test("resume preserves a durable pending judge phase instead of resetting to wor
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   const nodePath = join(runDir, "nodes", "build.json");
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
+  const worktree = ensureAttemptWorktree(runDir, state);
   writeFileSync(nodePath, JSON.stringify({
     ...state,
     status: "pending",
     phase: "judge",
+    worktree,
     result: { status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] },
     gate: null,
   }, null, 2));
@@ -5467,7 +5471,11 @@ test("Claude and GLM receive the smallest positive remaining monetary allowance"
   }
 });
 
-test("retains a live Codex continuation before capped logs are truncated", async () => {
+test("resume re-dispatches a capped live continuation as a fresh attempt in a fresh worktree", async () => {
+  // Attempt isolation (TECH-SPEC lean v0.3, F23) ties continuation identity to
+  // the attempt's own worktree: a timed-out invocation's continuation never
+  // survives into the next attempt's fresh worktree, so resume re-dispatches
+  // it as attempt plus one instead of resuming the capped provider session.
   const directory = mkdtempSync(join(tmpdir(), "runner-live-continuation-"));
   const path = writeContract(directory, fixture({
     id: "live-continuation-run",
@@ -5487,10 +5495,12 @@ test("retains a live Codex continuation before capped logs are truncated", async
     const firstLedger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
     assert.equal(Object.keys(firstLedger.epochs["live-continuation"].invocations).length, 1, "timeout usage reaches the campaign ledger");
     const resumed = await resumeRun(first.runDir);
-    assert.equal(nodeState(resumed).status, "done");
+    const resumedState = nodeState(resumed);
+    assert.equal(resumedState.status, "done");
+    assert.equal(resumedState.attempt, 2, "the capped invocation is re-dispatched as attempt plus one");
+    assert.equal(resumedState.invocations?.at(-1)?.continuationMode, "fresh", "the new attempt's worktree starts a fresh session, never a resume");
     const finalLedger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
     assert.equal(Object.keys(finalLedger.epochs["live-continuation"].invocations).length, 2, "resumed invocation is ledgered once");
-    assert.match(readFileSync(join(directory, ".runs", "resume-continuation.txt"), "utf8"), /resume --json .* fake-thread /u);
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
