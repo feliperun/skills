@@ -11,15 +11,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic, writeTextAtomic } from "./store.mjs";
-import { validateLivenessFact } from "./heartbeat.mjs";
 
 export const CAMPAIGN_DIR_NAME = "campaigns";
 export const CAMPAIGN_FILE = "campaign.json";
 export const JOURNAL_FILE = "journal.jsonl";
 export const HANDOFF_FILE = "HANDOFF.md";
 export const PROJECTION_FILE = "projection.json";
+export const JOURNAL_WATCH_CURSOR_DIR = "watch-cursors";
+export const JOURNAL_WATCH_CURSOR_SCHEMA_VERSION = 1;
 export const HANDOFF_LIMIT = 20;
 export const HANDOFF_BYTES = 16 * 1024;
 export const JOURNAL_TEXT_BYTES = 2 * 1024;
@@ -339,6 +340,119 @@ function readJournalForDedupe(campaignPath) {
 
 /**
  * @param {string} campaignPath
+ * @returns {string}
+ */
+export function campaignIdOf(campaignPath) {
+  try {
+    return readCampaign(campaignPath).id;
+  } catch {
+    return basenameSafe(campaignPath);
+  }
+}
+
+/**
+ * Incremental read of the campaign journal for a session sync/watch, keyed by
+ * the journal's own `eventId`. Legacy `liveness` entries (the old heartbeat
+ * mechanism used to append them; nothing does any more) are filtered out: they carry no
+ * narrative a session needs to catch up on. Exactly one of `since` (a
+ * stateless event id) or `cursor` (a durable per-watcher position) is
+ * accepted; `cursor` advances atomically after the unseen list is built
+ * unless `readOnly` is set, so a repeated read-only call returns no events.
+ *
+ * @param {string} campaignPath
+ * @param {{since?: string, cursor?: string, readOnly?: boolean}} [options]
+ * @returns {{campaignId: string, cursor: {cursorId: string, at: string, eventId: string}|null, events: JournalEntry[]}}
+ */
+export function watchJournal(campaignPath, options = {}) {
+  if ((options.since !== undefined) === (options.cursor !== undefined)) {
+    throw new TypeError("watch requires exactly one of --since or --cursor");
+  }
+  const entries = readJournal(campaignPath)
+    .filter((entry) => entry.type !== "liveness")
+    .sort(compareJournalPositions);
+  let cursorId = null;
+  /** @type {{at: string, eventId: string}} */
+  let position;
+  if (options.since !== undefined) {
+    const since = String(options.since);
+    const entry = entries.find((candidate) => candidate.eventId === since);
+    if (!entry) throw new TypeError("--since event ID is not retained in the journal");
+    position = { at: entry.at, eventId: entry.eventId };
+  } else {
+    cursorId = String(options.cursor);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(cursorId)) throw new TypeError("--cursor must be a safe identifier");
+    position = readJournalCursor(campaignPath, cursorId);
+  }
+  const events = entries.filter((entry) => compareJournalPositions(entry, position) > 0);
+  if (cursorId !== null && !options.readOnly && events.length > 0) {
+    const last = events[events.length - 1];
+    position = { at: last.at, eventId: last.eventId };
+    writeJournalCursor(campaignPath, { cursorId, ...position });
+  }
+  return { campaignId: campaignIdOf(campaignPath), cursor: cursorId === null ? null : { cursorId, ...position }, events };
+}
+
+/**
+ * Acknowledge one retained journal event by atomically advancing a durable
+ * per-session cursor to it. `ack` is the only cursor writer: `watchJournal`
+ * only advances when explicitly told to (never in read-only mode). Cursor
+ * movement never regresses.
+ *
+ * @param {string} campaignPath
+ * @param {string} cursorId
+ * @param {string} eventId
+ * @returns {{cursorId: string, at: string, eventId: string}}
+ */
+export function acknowledgeJournalEvent(campaignPath, cursorId, eventId) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(cursorId)) throw new TypeError("--cursor must be a safe identifier");
+  if (typeof eventId !== "string" || !eventId.trim()) throw new TypeError("--event-id requires a value");
+  const current = readJournalCursor(campaignPath, cursorId);
+  const found = readJournal(campaignPath).find((candidate) => candidate.eventId === eventId);
+  let position;
+  if (found) {
+    position = { at: found.at, eventId: found.eventId };
+  } else if (current.eventId !== "" && current.eventId === eventId) {
+    position = current;
+  } else {
+    throw new TypeError("--event-id is not retained in the journal");
+  }
+  if (current.eventId !== "" && compareJournalPositions(position, current) <= 0) position = current;
+  if (current.eventId === "" || compareJournalPositions(position, current) > 0) {
+    writeJournalCursor(campaignPath, { cursorId, ...position });
+  }
+  return { cursorId, ...position };
+}
+
+/** @param {{at: string, eventId: string}} left @param {{at: string, eventId: string}} right @returns {number} */
+function compareJournalPositions(left, right) {
+  if (left.at !== right.at) return left.at < right.at ? -1 : 1;
+  return left.eventId < right.eventId ? -1 : left.eventId > right.eventId ? 1 : 0;
+}
+
+/** @param {string} campaignPath @param {string} cursorId @returns {{at: string, eventId: string}} */
+function readJournalCursor(campaignPath, cursorId) {
+  const path = join(campaignPath, JOURNAL_WATCH_CURSOR_DIR, `${cursorId}.json`);
+  if (!existsSync(path)) return { at: "", eventId: "" };
+  const record = /** @type {JsonObject} */ (JSON.parse(readFileSync(path, "utf8")));
+  requireText(record.at, "journal watch cursor.at");
+  if (typeof record.eventId !== "string") throw new TypeError("journal watch cursor.eventId must be a string");
+  return { at: String(record.at), eventId: record.eventId };
+}
+
+/** @param {string} campaignPath @param {{cursorId: string, at: string, eventId: string}} position */
+function writeJournalCursor(campaignPath, position) {
+  const path = join(campaignPath, JOURNAL_WATCH_CURSOR_DIR, `${position.cursorId}.json`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeJsonAtomic(path, { schemaVersion: JOURNAL_WATCH_CURSOR_SCHEMA_VERSION, ...position, updatedAt: new Date().toISOString() });
+}
+
+/** @param {string} value @returns {string} */
+function basenameSafe(value) {
+  return value.split(/[\\/]+/u).filter(Boolean).at(-1) ?? "campaign";
+}
+
+/**
+ * @param {string} campaignPath
  * @returns {JournalEntry[]}
  */
 export function readJournal(campaignPath) {
@@ -389,10 +503,12 @@ export function validateJournalEntry(entry) {
   if (SESSION_REQUIRED_TYPES.has(type)) {
     requireText(record.sessionId, "entry.sessionId");
   }
-  if (type === "liveness") {
-    validateLivenessFact(record);
-    return;
-  }
+  // "liveness" is a legacy type: the old heartbeat mechanism used to append it and nothing
+  // writes it any more, but a durable journal may still carry old entries and
+  // reading them must not throw. The shared allowed-field check above already
+  // rejects an unexpected key; no deeper shape validation is needed for a type
+  // nothing produces.
+  if (type === "liveness") return;
   if (type === "session.attached") return validateSessionEntry(record);
   if (type === "run.registered") {
     requireText(record.runId, "entry.runId");

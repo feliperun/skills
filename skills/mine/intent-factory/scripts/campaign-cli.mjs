@@ -1,28 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs as parseFlags } from "node:util";
 import {
+  acknowledgeJournalEvent,
   appendJournal,
   closeCampaign,
   discoverCampaigns,
   initializeCampaign,
+  readCampaign,
   readJournal,
   renderHandoff,
   resolveCampaign,
+  watchJournal,
 } from "./campaign.mjs";
-import {
-  campaignStatus,
-  configureCampaign,
-  detachSelf,
-  startCampaign,
-  superviseCampaign,
-} from "./campaign-autonomy.mjs";
-import { acknowledgeCampaignEvent, drainNotifications, watchCampaign } from "./outbox.mjs";
-import { readHeartbeat } from "./heartbeat.mjs";
+import { lockStale, readLock } from "./lock.mjs";
 import { syncAgentSignal } from "./signal.mjs";
 
 const SYNC_OUTPUT_MAX_BYTES = 8000;
+const DEFAULT_WAKE_POLL_MS = 30_000;
+const WAKE_IDLE_AFTER_MS = 20 * 60_000;
+const TERMINAL_NODE_STATUSES = new Set(["done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled", "cancelled"]);
+const ATTENTION_NODE_STATUSES = new Set(["failed", "exhausted", "stalled", "canceled", "cancelled"]);
 
 const NOTE_KINDS = new Set([
   "intent",
@@ -48,18 +47,7 @@ const NOTE_KIND_FLAGS = {
 const OPERATION_OPTIONS = {
   list: { cwd: { type: "string" } },
   init: { cwd: { type: "string" }, goal: { type: "string" } },
-  configure: {
-    cwd: { type: "string" },
-    plan: { type: "string" },
-    contract: { type: "string" },
-    "snapshot-version": { type: "string" },
-    "source-root": { type: "string" },
-  },
-  start: { cwd: { type: "string" } },
-  supervise: { cwd: { type: "string" }, detach: { type: "boolean" }, interval: { type: "string" }, once: { type: "boolean" } },
-  status: { cwd: { type: "string" } },
-  drain: { cwd: { type: "string" } },
-  watch: { cwd: { type: "string" }, since: { type: "string" }, cursor: { type: "string" } },
+  watch: { cwd: { type: "string" }, wake: { type: "boolean" }, interval: { type: "string" }, once: { type: "boolean" } },
   attach: {
     cwd: { type: "string" },
     tool: { type: "string" },
@@ -94,7 +82,7 @@ const OPERATION_OPTIONS = {
   ack: { cwd: { type: "string" }, "session-id": { type: "string" }, "event-id": { type: "string" } },
 };
 
-/** @typedef {{cwd?: string, goal?: string, tool?: string, sessionId?: string, transcript?: string, format?: string, cursor?: string, since?: string, kind?: string, text?: string, runId?: string, supersedes?: string, decisionId?: string, questionId?: string, eventId?: string, noTranscript?: boolean, plan?: string, contract?: string, snapshotVersion?: string, sourceRoot?: string, detach?: boolean, interval?: string, once?: boolean}} CliValues */
+/** @typedef {{cwd?: string, goal?: string, tool?: string, sessionId?: string, transcript?: string, format?: string, cursor?: string, since?: string, kind?: string, text?: string, runId?: string, supersedes?: string, decisionId?: string, questionId?: string, eventId?: string, noTranscript?: boolean, wake?: boolean, interval?: string, once?: boolean}} CliValues */
 /** @typedef {import("./campaign.mjs").Campaign} Campaign */
 
 /**
@@ -112,11 +100,6 @@ export async function campaignCli(args) {
   }
   if (!campaignId || extra.length) return usage();
   if (operation === "init") return init(campaignId, values);
-  if (operation === "configure") return configure(campaignId, values);
-  if (operation === "start") return start(campaignId, values);
-  if (operation === "supervise") return supervise(campaignId, values);
-  if (operation === "status") return status(campaignId, values);
-  if (operation === "drain") return drain(campaignId, values);
   if (operation === "watch") return watch(campaignId, values);
   if (operation === "attach") return attach(campaignId, values);
   if (operation === "note") return note(campaignId, values);
@@ -128,59 +111,97 @@ export async function campaignCli(args) {
   return usage();
 }
 
-/** @param {string} campaignId @param {CliValues} values */
-function configure(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  let plan;
-  if (values.plan) plan = JSON.parse(readFileSync(resolve(values.plan), "utf8"));
-  const planContract = !values.contract && plan && typeof plan.initialRunContract === "string"
-    ? resolve(resolve(values.plan ?? ".", ".."), plan.initialRunContract)
-    : undefined;
-  const configured = configureCampaign(path, {
-    plan,
-    initialRunContract: values.contract ? resolve(values.contract) : planContract,
-    snapshotVersion: values.snapshotVersion,
-    sourceRoot: values.sourceRoot ? resolve(values.sourceRoot) : undefined,
-  });
-  process.stdout.write(`[campaign] ${campaignId} configured · ${configured.path}\n`);
+/**
+ * `campaign watch <id> --wake`: poll the campaign's linked runs' status.json
+ * files and print exactly one line per actionable change (TECH-SPEC lean,
+ * rule 6 and section 5 row 2b). Replaces the harness-side
+ * `watch-campaign.mjs` monitor and the old pull-based outbox watch.
+ *
+ * @param {string} campaignId
+ * @param {CliValues} values
+ */
+async function watch(campaignId, values) {
+  if (values.wake !== true) throw new TypeError("watch requires --wake");
+  const { path, runsDir } = selectCampaign(campaignId, values);
+  const pollMs = values.interval === undefined ? DEFAULT_WAKE_POLL_MS : positiveIntervalMs(values.interval);
+  await watchCampaignWake(path, runsDir, { pollMs, once: values.once === true });
 }
 
-/** @param {string} campaignId @param {CliValues} values */
-async function start(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  const started = await startCampaign(path);
-  process.stdout.write(`[campaign] ${campaignId} started · ${started.runId}\n`);
-}
-
-/** @param {string} campaignId @param {CliValues} values */
-async function supervise(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  const intervalMs = values.interval === undefined ? undefined : positiveIntervalMs(values.interval);
-  if (values.detach === true) {
-    const detached = await detachSelf(path, { intervalMs });
-    process.stdout.write(`[campaign] ${campaignId} supervisor detached · pid ${detached.pid}\n`);
-    return;
+/**
+ * @param {string} campaignPath
+ * @param {string} runsDir
+ * @param {{pollMs?: number, once?: boolean, now?: () => number, sleep?: (ms: number) => Promise<void>, emit?: (line: string) => void}} [options]
+ * @returns {Promise<void>}
+ */
+export async function watchCampaignWake(campaignPath, runsDir, options = {}) {
+  const pollMs = options.pollMs ?? DEFAULT_WAKE_POLL_MS;
+  const now = options.now ?? (() => Date.now());
+  const sleep = options.sleep ?? ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
+  const emit = options.emit ?? ((line) => process.stdout.write(`${line}\n`));
+  /** @type {Map<string, string>} */
+  const runSignatures = new Map();
+  /** @type {Set<string>} */
+  const announced = new Set();
+  let lastActiveAt = now();
+  let first = true;
+  for (;;) {
+    const campaign = readCampaign(campaignPath);
+    if (campaign.status !== "active") {
+      emit(`campaign-watch: ${campaign.id} is ${campaign.status}; stopping`);
+      return;
+    }
+    let anyActive = false;
+    for (const runId of campaign.linkedRunIds) {
+      const status = readJsonTolerant(join(runsDir, runId, "status.json"));
+      if (!status || !Array.isArray(status.nodes)) continue;
+      const terminal = status.nodes.every((/** @type {any} */ node) => TERMINAL_NODE_STATUSES.has(String(node.status)));
+      const signature = status.nodes.map((/** @type {any} */ node) => `${node.id}:${node.status}:${node.errorCode ?? ""}`).join("|");
+      const previous = runSignatures.get(runId);
+      runSignatures.set(runId, signature);
+      if (!terminal) {
+        anyActive = true;
+        const lock = readLock(join(runsDir, runId));
+        const stale = !lock || /** @type {{invalid?: true}} */ (lock).invalid || lockStale(lock);
+        const key = `stale:${runId}`;
+        if (stale && !first) {
+          if (!announced.has(key)) {
+            announced.add(key);
+            emit(`campaign-watch: ${runId} has non-terminal nodes but no live controller; resume it`);
+          }
+        } else announced.delete(key);
+      }
+      if (!first && previous !== signature) {
+        for (const node of status.nodes) {
+          const attention = ATTENTION_NODE_STATUSES.has(String(node.status))
+            || (node.status === "blocked" && !(Array.isArray(node.blockedBy) && node.blockedBy.length > 0));
+          const key = `node:${runId}:${node.id}:${node.status}:${node.errorCode ?? ""}`;
+          if (attention && !announced.has(key)) {
+            announced.add(key);
+            emit(`campaign-watch: ${runId} node ${node.id} ${node.status}${node.errorCode ? ` [${node.errorCode}]` : ""}${node.note ? ` ${node.note}` : ""}`);
+          }
+        }
+      }
+      if (terminal) {
+        const key = `terminal:${runId}`;
+        if (!announced.has(key)) {
+          announced.add(key);
+          emit(`campaign-watch: ${runId} terminal · ${status.summary ?? ""}`);
+        }
+      }
+    }
+    const nowMs = now();
+    if (anyActive) lastActiveAt = nowMs;
+    else if (!first && nowMs - lastActiveAt >= WAKE_IDLE_AFTER_MS) {
+      const key = `idle:${Math.floor((nowMs - lastActiveAt) / WAKE_IDLE_AFTER_MS)}`;
+      if (!announced.has(key)) {
+        announced.add(key);
+        emit(`campaign-watch: ${campaign.id} active but no run has been active for ${Math.round((nowMs - lastActiveAt) / 60_000)} min; dispatch the next step`);
+      }
+    }
+    first = false;
+    if (options.once === true) return;
+    await sleep(pollMs);
   }
-  const result = await superviseCampaign(path, { intervalMs, once: values.once === true });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-}
-
-/** @param {string} campaignId @param {CliValues} values */
-function status(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  process.stdout.write(`${JSON.stringify(campaignStatus(path), null, 2)}\n`);
-}
-
-/** @param {string} campaignId @param {CliValues} values */
-async function drain(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  process.stdout.write(`${JSON.stringify(await drainNotifications(path))}\n`);
-}
-
-/** @param {string} campaignId @param {CliValues} values */
-function watch(campaignId, values) {
-  const { path } = selectCampaign(campaignId, values);
-  process.stdout.write(`${JSON.stringify(watchCampaign(path, { since: values.since, cursor: values.cursor }))}\n`);
 }
 
 /**
@@ -305,11 +326,10 @@ function show(campaignId, values) {
 }
 
 /**
- * User-pull campaign sync (TECH-SPEC 3.4, Addendum 01 section 7): attach the
- * session once per day when it is not attached yet (including after the
- * campaign completed), then print the campaign status header, one heartbeat
- * liveness line, and the unseen outbox events after the session cursor. sync
- * never writes the cursor: only `ack` does.
+ * User-pull campaign sync: attach the session once per day when it is not
+ * attached yet, then print the campaign status header, the newest linked
+ * run's status.json summary, and the unseen journal events after the session
+ * cursor. sync never writes the cursor: only `ack` does.
  *
  * @param {string} campaignId
  * @param {CliValues} values
@@ -319,17 +339,15 @@ function sync(campaignId, values) {
   const sessionId = required(values.sessionId, "--session-id");
   const cursorId = sessionCursorId(sessionId);
   attachSessionOnceDaily(path, runsDir, sessionId);
-  const status = campaignStatus(path);
-  const heartbeat = readHeartbeat(path);
-  const seen = watchCampaign(path, { cursor: cursorId, readOnly: true });
-  const header = `campaign ${status.campaignId} · status ${status.status} · attention ${attentionText(status.attention)}`;
-  const lines = [header, livenessLine(heartbeat)];
-  let output = "";
-  for (const line of lines) output += `${line}\n`;
+  const campaign = readCampaign(path);
+  const seen = watchJournal(path, { cursor: cursorId, readOnly: true });
+  const header = `campaign ${campaign.id} · status ${campaign.status}`;
+  const runLine = latestRunStatusLine(runsDir, campaign);
+  let output = `${header}\n${runLine}\n`;
   let index = 0;
   for (; index < seen.events.length; index += 1) {
     const event = seen.events[index];
-    const line = `${event.at} ${event.type} ${event.summary}\n`;
+    const line = `${event.at} ${event.type} ${journalEntryText(event)}\n`;
     if (Buffer.byteLength(output + line, "utf8") <= SYNC_OUTPUT_MAX_BYTES - 64) output += line;
     else break;
   }
@@ -346,8 +364,46 @@ function ack(campaignId, values) {
   const sessionId = required(values.sessionId, "--session-id");
   const eventId = required(values.eventId, "--event-id");
   const cursorId = sessionCursorId(sessionId);
-  const position = acknowledgeCampaignEvent(path, cursorId, eventId);
+  const position = acknowledgeJournalEvent(path, cursorId, eventId);
   process.stdout.write(`[campaign] session ${sessionId} acknowledged up to ${position.eventId}\n`);
+}
+
+/**
+ * @param {string} runsDir
+ * @param {Campaign} campaign
+ * @returns {string}
+ */
+function latestRunStatusLine(runsDir, campaign) {
+  const runId = campaign.linkedRunIds.at(-1);
+  if (!runId) return "run: none linked yet";
+  const status = readJsonTolerant(join(runsDir, runId, "status.json"));
+  if (!status) return `run ${runId}: no status.json yet`;
+  const controllerState = status.controller?.state ?? "none";
+  return `run ${runId} · ${status.summary ?? ""} · controller ${controllerState}`;
+}
+
+/**
+ * @param {Record<string, unknown>} entry
+ * @returns {string}
+ */
+function journalEntryText(entry) {
+  if (typeof entry.text === "string" && entry.text) return entry.text;
+  if (entry.type === "session.attached") return `session ${entry.sessionId} attached (${entry.tool})`;
+  if (entry.type === "run.registered") return `run ${entry.runId} registered`;
+  return String(entry.type);
+}
+
+/**
+ * @param {string} path
+ * @returns {any}
+ */
+function readJsonTolerant(path) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -367,7 +423,7 @@ function attachSessionOnceDaily(campaignPath, runsDir, sessionId) {
     (entry) => entry.type === "session.attached" && entry.sessionId === sessionId,
   );
   const newest = attaches.at(-1);
-  if (newest !== undefined && localDay(newest.at) === localDay(new Date().toISOString())) return;
+  if (newest !== undefined && localDay(String(newest.at)) === localDay(new Date().toISOString())) return;
   const tool = typeof newest?.tool === "string" && newest.tool.trim() ? newest.tool : "sync";
   appendJournal(campaignPath, {
     type: "session.attached",
@@ -381,51 +437,6 @@ function attachSessionOnceDaily(campaignPath, runsDir, sessionId) {
     cursor: null,
   });
   renderHandoff(campaignPath, runsDir);
-}
-
-/** @param {string} iso @returns {string} */
-function localDay(iso) {
-  const date = new Date(iso);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
-
-/** @param {import("./heartbeat.mjs").Heartbeat|null} heartbeat @returns {string} */
-function livenessLine(heartbeat) {
-  if (heartbeat === null) return "liveness: no heartbeat yet";
-  const checkpoints = heartbeat.checkpoints && typeof heartbeat.checkpoints === "object"
-    ? heartbeat.checkpoints
-    : { done: 0, total: 0 };
-  const activeNode = typeof heartbeat.activeNode === "string" && heartbeat.activeNode.trim()
-    ? heartbeat.activeNode
-    : null;
-  const lastProgressKnown = typeof heartbeat.lastProgressAt === "number";
-  const progressPart = lastProgressKnown
-    ? `last progress ${new Date(heartbeat.lastProgressAt * 1000).toISOString()} · ${Math.max(0, Math.floor((Date.now() / 1000 - heartbeat.lastProgressAt) / 60))} min since last progress`
-    : "last progress unknown";
-  const attention = heartbeat.attention === null ? "none" : String(heartbeat.attention);
-  return `liveness: ${heartbeat.state} · checkpoints ${checkpoints.done}/${checkpoints.total} · active node ${activeNode ?? "none"} · ${progressPart} · attention ${attention}`;
-}
-
-/**
- * @param {unknown} attention
- * @returns {string}
- */
-function attentionText(attention) {
-  if (attention === null || attention === undefined) return "none";
-  const record = attention && typeof attention === "object" && !Array.isArray(attention)
-    ? /** @type {Record<string, unknown>} */ (attention)
-    : {};
-  const code = typeof record.code === "string" ? record.code : "attention";
-  const message = typeof record.message === "string" ? boundedLine(record.message, 120) : "";
-  return message ? `${code}: ${message}` : code;
-}
-
-/** @param {string} value @param {number} maxChars @returns {string} */
-function boundedLine(value, maxChars) {
-  const chars = Array.from(value);
-  return chars.length <= maxChars ? value : `${chars.slice(0, maxChars - 1).join("")}…`;
 }
 
 /** @param {string} sessionId @returns {string} */
@@ -474,6 +485,17 @@ function selectCampaign(campaignId, values) {
  */
 function requireActive(campaign) {
   if (campaign.status !== "active") throw new Error(`campaign is closed: ${campaign.id}`);
+}
+
+/**
+ * @param {string} iso
+ * @returns {string}
+ */
+function localDay(iso) {
+  const date = new Date(iso);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
 }
 
 /**
@@ -534,7 +556,7 @@ function positiveIntervalMs(value) {
 
 function usage() {
   process.stderr.write(
-    "usage: runner.mjs campaign <init|configure|start|supervise|status|drain|watch|attach|note|resolve|close|show|list|sync|ack> <campaign-id> [--cwd <dir>] ...\n",
+    "usage: runner.mjs campaign <init|watch|attach|note|resolve|close|show|list|sync|ack> <campaign-id> [--cwd <dir>] ...\n",
   );
   process.exitCode = 2;
 }

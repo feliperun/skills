@@ -32,7 +32,6 @@ import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { attemptWorktreePath, runRefName } from "./worktree.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
-import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
   delay,
@@ -55,6 +54,13 @@ function nodeState(result, id = "build") {
   const state = result.states.get(id);
   if (!state) throw new Error(`missing node state for ${id}`);
   return state;
+}
+
+/** @param {string} runDir @returns {Record<string, unknown>[]} */
+function notifications(runDir) {
+  const path = join(runDir, "notify.jsonl");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
 
 /**
@@ -925,8 +931,7 @@ test("a spent repair blocks on protocol_failure and raises attention when no fai
   assert.equal(state.error.code, "protocol_failure");
   assert.equal(state.revisions, 0);
   assert.equal(state.routing?.history?.length ?? 0, 0, "a blocked protocol failure records no route");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "protocol_failure"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "protocol_failure"));
 });
 
 test("a second unparseable worker result takes the failover edge before it blocks with attention", async () => {
@@ -944,7 +949,8 @@ test("a second unparseable worker result takes the failover edge before it block
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
   }));
-  const state = nodeState(await runContract(path));
+  const result = await runContract(path);
+  const state = nodeState(result);
   assert.equal(state.status, "blocked");
   assert.equal(state.error?.code, "protocol_failure");
   assert.equal(state.revisions, 0, "a protocol failover never consumes a gate revision");
@@ -954,8 +960,7 @@ test("a second unparseable worker result takes the failover edge before it block
   assert.equal(history[0].errorCode, "protocol_failure");
   assert.equal(history[0].nextRuntime, "second");
   assert.equal(history[0].hop, 1);
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "protocol_failure"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "protocol_failure"));
 });
 
 test("fails deterministic verification before the judge", async () => {
@@ -1237,8 +1242,7 @@ process.stdin.on("end", () => {
   assert.equal(judges.length, 2, "exactly one bounded judge re-ask before attention");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
   assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
 
 test("skips the judge for an empty Definition of Done checklist", async () => {
@@ -1361,8 +1365,7 @@ process.stdin.on("end", () => {
   assert.equal(judges.length, 2, "the bounded re-ask still applies below the failOn threshold");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
   assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
 
 test("a judge protocol re-ask over a mixed checklist neither reruns mechanical proofs nor consumes a revision", async () => {
@@ -1550,8 +1553,7 @@ process.stdin.on("end", () => {
   assert.equal(afterVerdict.error?.code, "judge_protocol", "the recovered second uncited verdict is not a first failure");
   assert.equal(afterVerdict.revisions, 0, "an uncited rejection never consumes a revision");
   assert.equal((afterVerdict.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "the recovered verdict settles the node without another judge invocation");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_protocol"));
+  assert.ok(notifications(verdictGap).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
 
 test("provider diagnostics stay bounded and recovery consumes only a bounded tail", async () => {
@@ -1964,8 +1966,7 @@ test("a judge whose tool host is disabled never yields a verdict and blocks as j
   assert.equal(state.gate, null, "no fabricated verdict is ever adopted");
   const judgeInvocations = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
   assert.equal(judgeInvocations.length, 2, "exactly one bounded judge retry after the first tool-host failure");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_unavailable"));
 });
 
 /**
@@ -2303,8 +2304,7 @@ test("a judge timeout re-asks once then blocks as judge_unavailable", async () =
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "the wall-clock kill earns exactly one bounded re-ask");
   assert.equal(state.gate, null, "no verdict is fabricated for a judge that never returned one");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_unavailable"));
 });
 
 test("advisory review settles invalid_judge_output and completes with the work recorded", async () => {
@@ -2331,8 +2331,7 @@ test("advisory review settles invalid_judge_output and completes with the work r
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask");
   const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.ok(events.some((event) => event.type === "gate.advisory" && event.verdict === "invalid_judge_output"));
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "invalid_judge_output"), "the defective review is never silent");
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "invalid_judge_output"), "the defective review is never silent");
   assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /judge: invalid output/u);
 });
 
@@ -2360,8 +2359,7 @@ test("blocking review enters judge_unavailable with the worker result and verifi
   assert.equal(state.revisions, 0, "a review that never arbitrated consumes no revision");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "worker").length, 1, "the worker is never re-run");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "exactly one bounded re-ask");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "judge_unavailable"));
+  assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_unavailable"));
   assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /needs you: judge unavailable/u);
 });
 
@@ -3185,14 +3183,13 @@ test("events record attempt, runtime, and gate verdict", async () => {
   assert.equal(rejected.phase, "judge");
 });
 
-test("runner emits campaign.progress only for material node changes and keeps terminal events", async () => {
+test("runner notifies node.terminal and run.terminal only, never a running node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-progress-emission-"));
   const path = writeContract(directory, fixture({
     id: "progress-emission-run",
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
   const notifier = join(directory, "notify-success.mjs");
   writeFileSync(notifier, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n");
   chmodSync(notifier, 0o755);
@@ -3206,82 +3203,54 @@ test("runner emits campaign.progress only for material node changes and keeps te
     else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
   }
   assert.equal(result.ok, true);
-  const outbox = readNotificationOutbox(campaignPath);
-  const progress = outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE);
-  assert.deepEqual(progress.map((event) => event.data), [
-    { runId: "progress-emission-run", nodeId: "build", status: "running", phase: "worker", attempt: 1, revisions: 0, runtime: "luna" },
-    { runId: "progress-emission-run", nodeId: "build", status: "done", phase: "complete", attempt: 1, revisions: 0, runtime: "luna" },
-  ]);
-  assert.deepEqual(progress.map((event) => event.coalesceKey), [
-    "progress-emission-run:build",
-    "progress-emission-run:build",
-  ]);
-  // The projector summary carries counters and identifiers only, never the
-  // status/phase text or a model note, so both material states of the node
-  // render the same deterministic line; the data field keeps them distinct.
-  assert.equal(progress[0].summary, "node build progress · attempt 1 · revisions 0 · runtime luna");
-  assert.equal(progress[1].summary, "node build progress · attempt 1 · revisions 0 · runtime luna");
-  const terminal = outbox.filter((event) => event.type === "node.terminal");
-  assert.equal(terminal.length, 1);
-  assert.equal(terminal[0].coalesceKey, undefined, "terminal events are never coalesced");
-  assert.deepEqual(terminal[0].data, { runId: "progress-emission-run", nodeId: "build", status: "done" });
-  assert.equal(terminal[0].summary, "node build terminal · attempt 1 · revisions 0");
-  assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
+  const receipts = notifications(result.runDir);
+  assert.deepEqual(receipts.map((event) => event.type), ["node.terminal", "run.terminal"]);
+  assert.deepEqual(receipts.map((event) => event.status), ["delivered", "delivered"]);
+  // The template renders counters and identifiers only, never a model note.
+  assert.equal(receipts[0].summary, "node build done · run progress-emission-run · attempt 1");
+  assert.equal(receipts[0].nodeId, "build");
+  assert.equal(receipts[0].nodeStatus, "done");
+  assert.equal(receipts[0].errorCode, null);
+  assert.equal(receipts[1].summary, "run progress-emission-run terminal · 1/1 done");
+  assert.deepEqual([receipts[1].done, receipts[1].total], [1, 1]);
 });
 
-test("idle polls and resume seeding emit no extra progress and coalesce undelivered progress", async () => {
+test("idle polls emit no notification, and resume never re-notifies an already-terminal node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-progress-idle-"));
   const path = writeContract(directory, fixture({
     id: "progress-idle-run",
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
   const started = join(directory, ".runs", "provider-started");
   const release = join(directory, ".runs", "provider-release");
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
   process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "wait-for-release");
-  // The default no-op notify transport delivers every progress event, so
-  // nothing ever stays undelivered to coalesce: this test needs a transport
-  // that always fails so the seeded "running" progress and the terminal
-  // "done" progress are both left pending.
-  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  const failingNotifier = join(directory, "notify-fail.mjs");
-  writeFileSync(failingNotifier, `#!${process.execPath}\nprocess.stdin.resume();\nprocess.stdin.on("end", () => process.exit(1));\n`);
-  chmodSync(failingNotifier, 0o755);
-  process.env.INTENT_FACTORY_NOTIFY_BIN = failingNotifier;
   try {
     const pending = runContract(path);
     await waitForValue(() => (existsSync(started) ? "started" : null));
     // Let several controller polls pass while the node stays running: idle
-    // passes must not create progress events.
+    // passes must not create any notify.jsonl entry.
     await delay(200);
+    assert.equal(existsSync(join(directory, ".runs", "progress-idle-run", "notify.jsonl")), false, "a running node emits no notification");
     writeFileSync(release, "release");
     const runDir = (await pending).runDir;
-    let outbox = readNotificationOutbox(campaignPath);
-    assert.equal(outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE).length, 1, "undelivered progress coalesces to the latest material state");
-    assert.equal(outbox.find((event) => event.type === CAMPAIGN_PROGRESS_TYPE)?.data?.status, "done");
-    assert.equal(outbox.filter((event) => event.type === "node.terminal").length, 1);
-    assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
+    let receipts = notifications(runDir);
+    assert.deepEqual(receipts.map((event) => event.type), ["node.terminal", "run.terminal"]);
+
     // Rewind the finished node to running and resume. The provider that would
-    // fail any fresh worker proves the result is adopted, the still-pending
-    // "done" progress is rewritten in place, and the seeded "running" state is
-    // not re-emitted.
+    // fail any fresh worker proves the result is adopted, and the node's
+    // terminal notification must not be sent a second time.
     orphan(runDir, "build");
     const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
     assert.equal(resumed.ok, true);
     assert.equal(nodeState(resumed).status, "done");
-    outbox = readNotificationOutbox(campaignPath);
-    const progress = outbox.filter((event) => event.type === CAMPAIGN_PROGRESS_TYPE);
-    assert.equal(progress.length, 1, "resume must not duplicate progress");
-    assert.equal(progress[0]?.data?.status, "done");
-    assert.equal(outbox.filter((event) => event.type === "node.terminal").length, 1, "terminal events deduplicate");
-    assert.equal(outbox.filter((event) => event.type === "run.terminal").length, 1);
+    receipts = notifications(runDir);
+    assert.equal(receipts.filter((event) => event.type === "node.terminal").length, 1, "resume must not duplicate the node's terminal notification");
+    assert.equal(receipts.filter((event) => event.type === "run.terminal").length, 1, "resume must not duplicate the run's terminal notification");
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
-    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
   }
 });
 
@@ -4087,7 +4056,8 @@ process.stdin.on("end", () => {
       gate: { failOn: ["critical"] },
     }],
   }));
-  const state = nodeState(await runContract(path));
+  const result = await runContract(path);
+  const state = nodeState(result);
   assert.equal(state.status, "done", state.error?.message);
   assert.equal(state.judgeFailures ?? 0, 0, "a network wait spends none of the judge_unavailable budget");
   const history = (state.routing?.history ?? []).filter((entry) => entry.role === "judge");
@@ -4095,8 +4065,7 @@ process.stdin.on("end", () => {
   assert.equal(history[0].errorCode, "network_backoff:provider_error");
   assert.equal(history[0].nextRuntime, "primary", "the judge stays on the runtime the gate named");
   assert.equal(history[0].hop, 0, "a network wait spends no failover hop");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(!outbox.some((event) => event.type === "run.attention"), "a recovered socket raises no attention");
+  assert.ok(!notifications(result.runDir).some((event) => event.type === "attention"), "a recovered socket raises no attention");
 });
 
 test("quota exhaustion with no declared fallback leaves the node exhausted", async () => {
@@ -4146,84 +4115,6 @@ test("quota exhaustion routes through the declared failover edge", async () => {
   assert.equal(settlement.error?.code, "quota_exhausted");
 });
 
-test("liveness progress ignores invocation-only churn and never uses the current time", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-liveness-progress-"));
-  // The noise worker only emits provider turns (invocation updates rewrite
-  // node.updatedAt with no status or phase change); the build worker finishes.
-  // The slow notifier widens the gap between a transition and its liveness
-  // record so churn landing in that gap would otherwise advance lastProgressAt.
-  const executable = join(directory, "mixed-worker.mjs");
-  writeFileSync(executable, `#!${process.execPath}
-import { writeFileSync } from "node:fs";
-if (process.argv.includes("--version")) console.log("mixed-worker 1.0.0");
-else {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", chunk => { input += chunk; });
-  process.stdin.on("end", () => {
-    if (input.includes("Noise flood")) {
-      console.log(JSON.stringify({ type: "thread.started", thread_id: "noise-thread" }));
-      let turns = 0;
-      setInterval(() => {
-        turns += 1;
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 10, output_tokens: 1 } }));
-      }, 10);
-      return;
-    }
-    console.log(JSON.stringify({ type: "thread.started", thread_id: "build-thread" }));
-    const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
-    if (resultPath) writeFileSync(resultPath, JSON.stringify({ status: "done", summary: "build done", changedFiles: [], verification: [], artifacts: [], missingContext: [] }));
-    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "build done" } }));
-    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 1 } }));
-  });
-}
-`);
-  chmodSync(executable, 0o755);
-  const path = writeContract(directory, fixture({
-    id: "liveness-progress-run",
-    pollIntervalMs: 5,
-    timeoutSec: 5,
-    runtimes: { worker: { driver: "codex", model: "mixed", executable } },
-    runtimeDefaults: { worker: "worker", judge: "worker" },
-    nodes: [
-      { id: "noise", type: "backend", taskPacket: packet({ objective: "Noise flood" }), timeoutSec: 1, gate: false },
-      { id: "build", type: "backend", taskPacket: packet({ objective: "Build quickly" }), gate: false },
-    ],
-  }));
-  const notifier = join(directory, "notify-slow.mjs");
-  writeFileSync(notifier, `#!${process.execPath}\nsetTimeout(() => process.exit(0), 120);\n`);
-  chmodSync(notifier, 0o755);
-  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
-  try {
-    const result = await runContract(path);
-    assert.equal(nodeState(result, "noise").status, "exhausted", "the flooding node is stopped by its wall-clock deadline");
-    assert.equal(nodeState(result, "build").status, "done", "the quiet node completes");
-    const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
-    const journal = readFileSync(join(campaignPath, "journal.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const facts = journal.filter((entry) => entry.type === "liveness");
-    assert.ok(facts.length >= 2, "the run records liveness facts around its material transitions");
-    const transitions = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n")
-      .map(line => JSON.parse(line))
-      .filter((event) => event.node && event.from && event.to && event.from !== event.to);
-    assert.ok(transitions.length >= 2, "the run records distinct status transitions");
-    for (const fact of facts) {
-      const preceding = transitions.filter((event) => event.at <= fact.at);
-      assert.ok(preceding.length > 0, `every liveness fact follows a status transition (fact ${fact.at})`);
-      const newestTransitionAt = preceding.reduce((newest, event) => event.at > newest ? event.at : newest, "0");
-      assert.ok(
-        fact.lastProgressAt <= newestTransitionAt,
-        `liveness lastProgressAt ${fact.lastProgressAt} must not exceed the newest transition ${newestTransitionAt} recorded before fact ${fact.at} (invocation-only churn must not count as progress)`,
-      );
-    }
-    const newestTransitionAt = transitions.reduce((newest, event) => event.at > newest ? event.at : newest, "0");
-    assert.equal(facts.at(-1)?.lastProgressAt, newestTransitionAt, "the terminal liveness fact folds the last transition, never the current time");
-  } finally {
-    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
-    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
-  }
-});
-
 test("liveness state reports paused_quota only while a provider backoff is pending and failed once exhaustion is terminal", async () => {
   // A quota reset announced inside the node's deadline holds its node pending
   // on a future backoffUntil, so liveness must report paused_quota for that
@@ -4265,13 +4156,11 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
   const terminalState = nodeState(terminalResult);
   assert.equal(terminalState.status, "exhausted", terminalState.error?.message);
   assert.equal(terminalState.error?.code, "quota_exhausted");
-  const terminalFacts = readFileSync(join(terminalDirectory, ".runs", "campaigns", "test-campaign", "journal.jsonl"), "utf8").trim().split("\n")
-    .map((line) => JSON.parse(line))
-    .filter((entry) => entry.type === "liveness");
-  const terminalStates = terminalFacts.map((fact) => fact.state);
-  assert.ok(terminalStates.includes("failed"), `terminal quota exhaustion without a failover route journals failed (saw ${terminalStates.join(",")})`);
-  assert.ok(!terminalStates.includes("paused_quota"), `terminal exhaustion must not be reported as a live quota pause (saw ${terminalStates.join(",")})`);
-  assert.equal(terminalStates.at(-1), "failed", `the terminal run's final liveness fact reports failed (saw ${terminalStates.join(",")})`);
+  assert.equal(
+    livenessState(terminalResult.states),
+    "failed",
+    "terminal quota exhaustion without a failover route reports failed, never a live quota pause",
+  );
 });
 
 test("reuses one worker continuation per ordered phase", async () => {
@@ -4488,11 +4377,12 @@ test("ordinary runs deliver bounded node and run terminal notifications", async 
   const previous = process.env.INTENT_FACTORY_NOTIFY_BIN;
   process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
   try {
-    await withFakeCodex(directory, "pass", () => runContract(path));
+    const result = await withFakeCodex(directory, "pass", () => runContract(path));
     const events = readFileSync(delivered, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(events.some((event) => event.type === "node.terminal" && event.data.nodeId === "build"));
-    assert.ok(events.some((event) => event.type === "run.terminal" && event.data.runId === "run-notifications"));
-    assert.ok(events.every((event) => event.deliveredAt === null), "delivery payload is the durable pre-delivery event");
+    assert.ok(events.some((event) => event.type === "node.terminal" && event.nodeId === "build"));
+    assert.ok(events.some((event) => event.type === "run.terminal" && event.runId === "run-notifications"));
+    const receipts = notifications(result.runDir);
+    assert.ok(receipts.every((receipt) => receipt.status === "delivered"), "every event this transport received is recorded delivered");
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
     else process.env.INTENT_FACTORY_NOTIFY_BIN = previous;

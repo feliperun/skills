@@ -1,20 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendJournal, campaignDir, readJournal } from "../scripts/campaign.mjs";
+import { acknowledgeJournalEvent, campaignDir, readJournal } from "../scripts/campaign.mjs";
 import { driverCapabilities, normalizeProviderResult, providerCommand } from "../scripts/drivers/index.mjs";
 import { liveInputTokens, liveSessionMetrics, liveUsage } from "../scripts/drivers/exec-jsonl.mjs";
 import { replayDriver } from "../scripts/drivers/replay.mjs";
-import { EVENT_MAX_BYTES } from "../scripts/events.mjs";
-import { readHeartbeat, rebuildHeartbeat, recordLiveness } from "../scripts/heartbeat.mjs";
 import { JUDGE_SCHEMA } from "../scripts/lib.mjs";
 import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
-import { acknowledgeCampaignEvent, drainNotifications, readNotificationOutbox } from "../scripts/outbox.mjs";
 import { runContract, resumeRun } from "../scripts/runner.mjs";
 import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../scripts/integrate.mjs";
 import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../scripts/worktree.mjs";
@@ -62,6 +58,12 @@ function writeRecording(directory, lines, name = "recording.jsonl") {
 /** @param {string} path @returns {string|null} */
 function readIfExists(path) {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+/** @param {string} path @returns {Record<string, unknown>[]} */
+function readJsonlRecords(path) {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
 
 /** @param {string} stdout @returns {Record<string, unknown>} */
@@ -914,7 +916,7 @@ test("D25: a gate rejection citing no Definition of Done item is invalid", async
   assert.equal(readFileSync(`${replayed.workerRecording}.cursor`, "utf8"), "1\n", "the worker was never re-dispatched");
 });
 
-test("D27: a complete replayed campaign with no requiresUser event has a wake count of zero", async () => {
+test("D27: a complete replayed campaign notifies once per terminal node plus once for the run, all delivered", async () => {
   assertExecutable();
   const replayed = await driveReplayedContract({
     id: "d27-no-wake",
@@ -925,94 +927,20 @@ test("D27: a complete replayed campaign with no requiresUser event has a wake co
     ],
   });
   assert.equal(replayed.outcome.ok, true);
-  const outbox = readNotificationOutbox(replayed.campaignPath);
-  assert.ok(outbox.length > 0, "the campaign recorded human-channel events");
-  assert.deepEqual(outbox.filter((record) => record.requiresUser === true), [], "a complete run never asks for the session");
+  const notifications = readJsonlRecords(join(replayed.outcome.runDir, "notify.jsonl"));
+  assert.ok(notifications.length > 0, "the run recorded notify receipts");
+  assert.deepEqual(notifications.filter((record) => record.status !== "delivered"), [], "the suite's no-op transport delivers every receipt");
+  assert.deepEqual(new Set(notifications.map((record) => record.type)), new Set(["node.terminal", "run.terminal"]), "a clean run never raises attention");
   const metrics = campaignMetrics(replayed.campaignPath, replayed.runsDir);
   assert.deepEqual(
     metrics.sessionWakeCount,
-    { value: 0, direction: "down", count: outbox.length },
-    "a measured zero over the recorded outbox, not a missing measurement",
+    { value: notifications.length, direction: "down", count: notifications.length },
+    "every notified event is a session wake now that progress is never notified",
   );
 });
 
-test("D28: a node stuck for 40 minutes shows an aged lastProgressAt without emitting an event", async () => {
+test("D32: notify.jsonl bounds retries against a failing transport, and sync/ack use journal event ids", async () => {
   assertExecutable();
-  const replayed = await driveReplayedContract({
-    id: "d28-stuck-node",
-    worker: [{ envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }) }],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  });
-  const facts = readJournal(replayed.campaignPath).filter((entry) => entry.type === "liveness");
-  const running = facts[0];
-  assert.ok(running, "the replayed run recorded a liveness fact");
-  const eventsPath = join(replayed.outcome.runDir, "events.jsonl");
-  const eventsBefore = readFileSync(eventsPath, "utf8");
-  const outboxBefore = readNotificationOutbox(replayed.campaignPath).length;
-
-  // The supervisor refreshes liveness on its interval; a node that made no
-  // progress for 40 minutes refreshes the same lastProgressAt, so the ageing
-  // is visible in the heartbeat and nothing is emitted for it.
-  const stuckAt = new Date(Date.parse(String(running.at)) + 40 * 60 * 1000).toISOString();
-  const { heartbeat } = recordLiveness(
-    replayed.campaignPath,
-    /** @type {import("../scripts/heartbeat.mjs").LivenessFact} */ ({ ...running, eventId: randomUUID(), at: stuckAt }),
-    { generatedAt: stuckAt },
-  );
-  assert.equal(heartbeat.lastProgressAt, Math.floor(Date.parse(String(running.lastProgressAt)) / 1000), "lastProgressAt did not move");
-  assert.ok(heartbeat.generatedAt - heartbeat.lastProgressAt >= 2400, "the heartbeat shows the 40-minute age");
-  assert.equal(readFileSync(eventsPath, "utf8"), eventsBefore, "ageing emits no run event");
-  assert.equal(readNotificationOutbox(replayed.campaignPath).length, outboxBefore, "ageing emits no human-channel event");
-});
-
-test("D29: a heartbeat rebuilt from the journal is byte-identical to the recorded one", async () => {
-  assertExecutable();
-  const replayed = await driveReplayedContract({
-    id: "d29-heartbeat-rebuild",
-    worker: [{ envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }) }],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  });
-  const heartbeatPath = join(replayed.campaignPath, "heartbeat.json");
-  const recorded = readFileSync(heartbeatPath, "utf8");
-  const parsed = readHeartbeat(replayed.campaignPath);
-  assert.ok(parsed, "the replayed run left a readable heartbeat");
-  const rebuilt = rebuildHeartbeat(replayed.campaignPath, { generatedAt: parsed.generatedAt });
-  assert.deepEqual(rebuilt, parsed, "the rebuild derives the same heartbeat object");
-  assert.equal(readFileSync(heartbeatPath, "utf8"), recorded, "and writes the same bytes");
-});
-
-test("D30: a crash between the fact and the heartbeat write leaves the old heartbeat intact", async () => {
-  assertExecutable();
-  const replayed = await driveReplayedContract({
-    id: "d30-crash-between-writes",
-    worker: [{ envelope: envelope({ result: JSON.stringify(workerResult("build complete")) }) }],
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  });
-  const heartbeatPath = join(replayed.campaignPath, "heartbeat.json");
-  const recorded = readFileSync(heartbeatPath, "utf8");
-  const facts = readJournal(replayed.campaignPath).filter((entry) => entry.type === "liveness");
-  const newest = facts.at(-1);
-  assert.ok(newest, "the replayed run recorded a liveness fact");
-
-  // recordLiveness appends the durable fact first and only then writes the
-  // heartbeat: a crash in that window is exactly the journal append alone.
-  const crashedAt = new Date(Date.parse(String(newest.at)) + 60 * 1000).toISOString();
-  const crashed = /** @type {Record<string, unknown>} */ ({ ...newest, eventId: randomUUID(), at: crashedAt, checkpointsDone: Number(newest.checkpointsDone) + 1 });
-  appendJournal(replayed.campaignPath, crashed);
-  assert.equal(readFileSync(heartbeatPath, "utf8"), recorded, "the old heartbeat is still pinned, byte for byte");
-
-  const repaired = rebuildHeartbeat(replayed.campaignPath, { generatedAt: crashedAt });
-  assert.equal(repaired?.checkpoints.done, Number(newest.checkpointsDone) + 1, "the rebuild recovers the newest durable fact");
-  assert.notEqual(readFileSync(heartbeatPath, "utf8"), recorded, "and only the rebuild moves the heartbeat");
-});
-
-test("D32: the replayed campaign inbox bounds event size, sets deliveredAt after append, and separates sync from ack", async () => {
-  assertExecutable();
-  // A configured transport delivers every event type, campaign.progress
-  // included (drainNotifications only filters by PUSH_EVENT_TYPES when no
-  // executable is configured) — so a transport that always fails leaves
-  // every event pending without ever reaching the platform notify adapter
-  // the suite's no-op default stands in for.
   const failingTransport = join(mkdtempSync(join(tmpdir(), "d32-failing-transport-")), "fail.sh");
   writeFileSync(failingTransport, "#!/bin/sh\ncat > /dev/null\nexit 1\n");
   chmodSync(failingTransport, 0o755);
@@ -1029,51 +957,32 @@ test("D32: the replayed campaign inbox bounds event size, sets deliveredAt after
     if (previousDefaultNotifyBin === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
     else process.env.INTENT_FACTORY_NOTIFY_BIN = previousDefaultNotifyBin;
   }
-  const appended = readNotificationOutbox(replayed.campaignPath);
-  assert.ok(appended.length > 0, "the run appended events to the inbox");
-  for (const record of appended) {
-    assert.ok(Buffer.byteLength(JSON.stringify(record), "utf8") <= EVENT_MAX_BYTES, `${record.eventId} exceeds the ${EVENT_MAX_BYTES}-byte ceiling`);
-    // deliveredAt is stamped by a delivery, never by the append: an event is
-    // either still pending or was delivered at or after it was appended.
-    assert.ok(record.deliveredAt === null || String(record.deliveredAt) >= record.at, `${record.eventId} was stamped before it was appended`);
+  const receipts = readJsonlRecords(join(replayed.outcome.runDir, "notify.jsonl"));
+  assert.ok(receipts.length > 0, "the run appended notify receipts");
+  assert.deepEqual(receipts.filter((record) => record.status !== "failed"), [], "a failing transport never marks a receipt delivered");
+  /** @type {Map<string, number>} */
+  const attemptsByEvent = new Map();
+  for (const receipt of receipts) {
+    const key = `${receipt.type}:${receipt.runId}:${receipt.nodeId ?? ""}`;
+    attemptsByEvent.set(key, (attemptsByEvent.get(key) ?? 0) + 1);
   }
-  const pending = appended.filter((record) => !record.deliveredAt);
-  assert.ok(pending.length > 0, "campaign.progress events are never pushed and stay pending for the pull consumer");
+  for (const [key, count] of attemptsByEvent) assert.ok(count <= 3, `${key} exceeded the bounded retry budget: ${count}`);
 
-  const transport = join(replayed.directory, "notify-transport.sh");
-  writeFileSync(transport, "#!/bin/sh\ncat > /dev/null\nexit 0\n");
-  chmodSync(transport, 0o755);
-  const previousNotifyBin = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  process.env.INTENT_FACTORY_NOTIFY_BIN = transport;
-  try {
-    const drained = await drainNotifications(replayed.campaignPath);
-    assert.equal(drained.delivered, pending.length, "the drain delivered exactly what was pending");
-    assert.equal(drained.pending, 0, "every appended event was delivered");
-  } finally {
-    if (previousNotifyBin === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
-    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotifyBin;
-  }
-  for (const record of readNotificationOutbox(replayed.campaignPath)) {
-    assert.ok(typeof record.deliveredAt === "string" && record.deliveredAt >= record.at, `${record.eventId} carries deliveredAt only after delivery`);
-  }
-
-  const cursorPath = join(replayed.campaignPath, "watch-cursors", "session-d32.json");
-  const configured = spawnSync(process.execPath, [runner, "campaign", "configure", "test-campaign", "--cwd", replayed.directory, "--contract", replayed.contractPath], { encoding: "utf8" });
-  assert.equal(configured.status, 0, configured.stderr);
   const sync = spawnSync(process.execPath, [runner, "campaign", "sync", "test-campaign", "--cwd", replayed.directory, "--session-id", "d32"], { encoding: "utf8" });
   assert.equal(sync.status, 0, sync.stderr);
   assert.ok(Buffer.byteLength(sync.stdout, "utf8") <= 8000, `sync printed ${Buffer.byteLength(sync.stdout, "utf8")} bytes`);
+  const cursorPath = join(replayed.campaignPath, "watch-cursors", "session-d32.json");
   assert.equal(existsSync(cursorPath), false, "sync is a read: only ack writes the cursor");
 
-  const acknowledged = readNotificationOutbox(replayed.campaignPath).sort((left, right) => (left.at < right.at ? -1 : 1)).at(-1);
-  assert.ok(acknowledged, "there is a newest event to acknowledge");
-  const ack = spawnSync(process.execPath, [runner, "campaign", "ack", "test-campaign", "--cwd", replayed.directory, "--session-id", "d32", "--event-id", acknowledged.eventId], { encoding: "utf8" });
+  const newestEntry = readJournal(replayed.campaignPath).at(-1);
+  assert.ok(newestEntry, "the campaign journal recorded at least one event");
+  const ack = spawnSync(process.execPath, [runner, "campaign", "ack", "test-campaign", "--cwd", replayed.directory, "--session-id", "d32", "--event-id", newestEntry.eventId], { encoding: "utf8" });
   assert.equal(ack.status, 0, ack.stderr);
-  assert.equal(JSON.parse(readFileSync(cursorPath, "utf8")).eventId, acknowledged.eventId, "ack advanced the durable cursor");
+  assert.equal(JSON.parse(readFileSync(cursorPath, "utf8")).eventId, newestEntry.eventId, "ack advanced the durable cursor");
   const afterAck = readFileSync(cursorPath, "utf8");
   assert.deepEqual(
-    acknowledgeCampaignEvent(replayed.campaignPath, "session-d32", acknowledged.eventId),
-    { cursorId: "session-d32", at: acknowledged.at, eventId: acknowledged.eventId },
+    acknowledgeJournalEvent(replayed.campaignPath, "session-d32", newestEntry.eventId),
+    { cursorId: "session-d32", at: newestEntry.at, eventId: newestEntry.eventId },
   );
   assert.equal(readFileSync(cursorPath, "utf8"), afterAck, "re-acknowledging the same event is a durable no-op");
 });

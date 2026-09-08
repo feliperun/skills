@@ -1,125 +1,231 @@
-import { createClaudeSessionAdapter, SESSION_WAKE_ENV } from "./claude-session.mjs";
+/**
+ * Direct notification dispatcher (TECH-SPEC lean, rule 6). On `node.terminal`,
+ * `run.terminal` and `attention` the controller renders a one-line message
+ * from a fixed per-type template, calls `INTENT_FACTORY_NOTIFY_BIN` with the
+ * event as JSON on stdin, and appends a receipt (`delivered` or `failed`, with
+ * the timestamp) to `<run-dir>/notify.jsonl`. A failed delivery is retried on
+ * the next controller ticks up to three times with backoff. With no
+ * transport bound (`INTENT_FACTORY_NOTIFY_BIN` unset) nothing is spawned and a
+ * `no_transport` receipt is recorded instead — there is no implicit desktop
+ * fallback. The macOS notifier is reachable only by setting
+ * `INTENT_FACTORY_NOTIFY_BIN=os-macos`, an explicit opt-in, never a default.
+ */
+
+import { spawn as defaultSpawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { createMacosNotifier } from "./os-macos.mjs";
 
-export const PUSH_EVENT_TYPES = new Set([
-  "run.attention",
-  "campaign.attention",
-  "node.terminal",
-  "run.terminal",
-  "campaign.completed",
-]);
+export const NOTIFY_BIN_ENV = "INTENT_FACTORY_NOTIFY_BIN";
+export const MACOS_TRANSPORT = "os-macos";
+export const NOTIFY_LOG_FILE = "notify.jsonl";
+export const MAX_ATTEMPTS = 3;
+/** Wait, in ms, before attempt 2 and attempt 3 of a failed delivery. */
+export const DEFAULT_BACKOFF_MS = [5_000, 30_000];
 
-const PROGRESS_EVENT_TYPE = "campaign.progress";
+const SUMMARY_CHARS = 200;
 
 /** @typedef {Record<string, unknown>} JsonObject */
-/** @typedef {{type: string, campaignId?: string, summary?: string, next?: string, requiresUser?: boolean, eventId?: string, at?: string, data?: JsonObject}} NotificationEvent */
-/** @typedef {{ok: boolean, error?: string}} WakeResult */
-/** @typedef {{id: string, capabilities: {canPush: boolean, canWake: boolean, canRenderAmbient: boolean}, deliver(event: NotificationEvent): Promise<WakeResult>, wake?: (event: NotificationEvent) => Promise<WakeResult>}} NotifyAdapter */
+/** @typedef {{type: "node.terminal"|"run.terminal"|"attention", runId: string, campaignId?: string|null, nodeId?: string|null, status?: string|null, attempt?: number|null, errorCode?: string|null, done?: number|null, total?: number|null, dedupeKey?: string|null}} NotifyEvent */
+/** @typedef {{ok: boolean, error?: string, noTransport?: boolean}} DeliveryResult */
 
 /**
- * Load the notify adapters for the current platform. The macOS adapter is
- * present only on darwin; the Claude session adapter is present only when the
- * host bound a wake channel, by injection or through SESSION_WAKE_ENV.
+ * Render the fixed one-line message for an event, from counters and
+ * identifiers only (node id, run id, state, attempt, error code, done/total),
+ * never from model text.
  *
- * @param {{platform?: string, spawn?: import("./os-macos.mjs").SpawnFunction, sessionWake?: import("./claude-session.mjs").WakeChannel, wakeFile?: string}} [options]
- * @returns {NotifyAdapter[]}
- */
-export function loadNotifyAdapters({ platform = process.platform, spawn, sessionWake, wakeFile = process.env[SESSION_WAKE_ENV] } = {}) {
-  /** @type {NotifyAdapter[]} */
-  const adapters = [];
-  if (platform === "darwin") adapters.push(createMacosNotifier({ spawn, platform }));
-  if (typeof sessionWake === "function" || (typeof wakeFile === "string" && Boolean(wakeFile.trim()))) {
-    adapters.push(createClaudeSessionAdapter({ wake: sessionWake, wakeFile }));
-  }
-  return adapters;
-}
-
-/**
- * Route a notification event to the adapters allowed to push it. Progress
- * events and any type outside PUSH_EVENT_TYPES are never routed.
- *
- * @param {NotificationEvent} event
- * @param {NotifyAdapter[]} adapters
- * @returns {NotifyAdapter[]}
- */
-export function routeNotification(event, adapters) {
-  if (!event || typeof event.type !== "string" || event.type === PROGRESS_EVENT_TYPE || !PUSH_EVENT_TYPES.has(event.type)) {
-    return [];
-  }
-  return /** @type {NotifyAdapter[]} */ (adapters).filter((adapter) => adapter.capabilities.canPush === true);
-}
-
-/**
- * Deliver one event through every routed adapter without ever throwing.
- *
- * @param {NotificationEvent} event
- * @param {NotifyAdapter[]} adapters
- * @returns {Promise<{delivered: string[], failed: {id: string, error: string}[]}>}
- */
-export async function pushNotification(event, adapters) {
-  /** @type {string[]} */
-  const delivered = [];
-  /** @type {{id: string, error: string}[]} */
-  const failed = [];
-  for (const adapter of routeNotification(event, adapters)) {
-    try {
-      const result = await adapter.deliver(event);
-      if (result && result.ok === true) delivered.push(adapter.id);
-      else failed.push({ id: adapter.id, error: (result && typeof result.error === "string" && result.error) || "delivery failed" });
-    } catch (error) {
-      failed.push({ id: adapter.id, error: errorMessage(error) });
-    }
-  }
-  return { delivered, failed };
-}
-
-/**
- * @param {unknown} error
+ * @param {NotifyEvent} event
  * @returns {string}
  */
+export function renderNotification(event) {
+  const runId = event.runId ?? "-";
+  switch (event.type) {
+    case "node.terminal": {
+      const errorPart = event.errorCode ? ` · ${event.errorCode}` : "";
+      return truncate(`node ${event.nodeId ?? "-"} ${event.status ?? "-"} · run ${runId} · attempt ${event.attempt ?? 0}${errorPart}`);
+    }
+    case "run.terminal": {
+      const done = event.done ?? 0;
+      const total = event.total ?? 0;
+      return truncate(`run ${runId} terminal · ${done}/${total} done${total > done ? " · attention" : ""}`);
+    }
+    case "attention": {
+      const nodePart = event.nodeId ? ` · node ${event.nodeId}` : "";
+      const errorPart = event.errorCode ? ` · ${event.errorCode}` : "";
+      return truncate(`run ${runId} attention${nodePart}${errorPart}`);
+    }
+    default:
+      throw new TypeError(`renderNotification: unknown event type ${String(event.type)}`);
+  }
+}
+
+/** @param {string} value @returns {string} */
+function truncate(value) {
+  return value.length <= SUMMARY_CHARS ? value : `${value.slice(0, SUMMARY_CHARS - 1)}…`;
+}
+
+/**
+ * Deliver one event through the bound transport. No transport bound resolves
+ * `{ok: false, noTransport: true}` without spawning anything.
+ *
+ * @param {{type: string, summary: string, campaignId?: string|null, [key: string]: unknown}} event
+ * @param {{bin?: string, spawn?: typeof defaultSpawn, timeoutMs?: number}} [options]
+ * @returns {Promise<DeliveryResult>}
+ */
+export function deliverNotification(event, options = {}) {
+  const bin = options.bin ?? process.env[NOTIFY_BIN_ENV];
+  if (!bin) return Promise.resolve({ ok: false, noTransport: true });
+  if (bin === MACOS_TRANSPORT) {
+    return createMacosNotifier({ spawn: options.spawn }).deliver(/** @type {any} */ (event));
+  }
+  return spawnDeliver(bin, event, options);
+}
+
+/**
+ * @param {string} bin
+ * @param {JsonObject} event
+ * @param {{spawn?: typeof defaultSpawn, timeoutMs?: number}} options
+ * @returns {Promise<DeliveryResult>}
+ */
+function spawnDeliver(bin, event, { spawn = defaultSpawn, timeoutMs = 5_000 } = {}) {
+  return new Promise((resolveDelivery) => {
+    let child;
+    try {
+      child = spawn(bin, [], { stdio: ["pipe", "ignore", "pipe"], env: process.env });
+    } catch (error) {
+      resolveDelivery({ ok: false, error: errorMessage(error) });
+      return;
+    }
+    let settled = false;
+    /** @param {DeliveryResult} result */
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveDelivery(result);
+    };
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-1024);
+    });
+    child.once("error", (error) => finish({ ok: false, error: errorMessage(error) }));
+    child.once("close", (code) => finish(code === 0 ? { ok: true } : { ok: false, error: stderr || `notification exited ${code}` }));
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+      finish({ ok: false, error: `notification timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    child.stdin.end(`${JSON.stringify(event)}\n`);
+  });
+}
+
+/**
+ * Per-run queue of pending notifications with bounded retry. `enqueue`
+ * renders the message and attempts delivery immediately; a failed attempt
+ * schedules the next one at `now() + backoffMs[attempt - 1]`, and `pump`
+ * retries whichever pending entries are due. Every attempt appends one
+ * receipt to `<runDir>/notify.jsonl`, so a resume or an audit sees exactly
+ * how many tries an event took and when each one happened.
+ */
+export class NotifyQueue {
+  /**
+   * @param {{runDir: string, maxAttempts?: number, backoffMs?: number[], deliver?: typeof deliverNotification, now?: () => number}} options
+   */
+  constructor({ runDir, maxAttempts = MAX_ATTEMPTS, backoffMs, deliver = deliverNotification, now = () => Date.now() }) {
+    this.runDir = runDir;
+    this.maxAttempts = maxAttempts;
+    this.backoffMs = backoffMs ?? backoffMsFromEnv() ?? DEFAULT_BACKOFF_MS;
+    this.deliver = deliver;
+    this.now = now;
+    /** @type {{event: NotifyEvent & {summary: string}, attempts: number, nextAttemptAt: number}[]} */
+    this.pending = [];
+  }
+
+  /**
+   * @param {NotifyEvent} event
+   * @returns {Promise<void>}
+   */
+  async enqueue(event) {
+    const summary = renderNotification(event);
+    const entry = { event: { ...event, summary }, attempts: 0, nextAttemptAt: this.now() };
+    this.pending.push(entry);
+    await this._attempt(entry);
+  }
+
+  /** @returns {Promise<void>} */
+  async pump() {
+    const now = this.now();
+    for (const entry of this.pending.filter((candidate) => candidate.nextAttemptAt <= now)) {
+      await this._attempt(entry);
+    }
+  }
+
+  /**
+   * Drain every pending entry, waiting in real time for each one's backoff, so
+   * a caller with no more ticks left (the controller at run.terminal) still
+   * exhausts the bounded retry budget before returning.
+   *
+   * @param {(ms: number) => Promise<void>} [wait]
+   * @returns {Promise<void>}
+   */
+  async drain(wait = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms))) {
+    while (this.pending.length > 0) {
+      const due = Math.min(...this.pending.map((entry) => entry.nextAttemptAt));
+      const remaining = due - this.now();
+      if (remaining > 0) await wait(remaining);
+      await this.pump();
+    }
+  }
+
+  /**
+   * @param {{event: NotifyEvent & {summary: string}, attempts: number, nextAttemptAt: number}} entry
+   */
+  async _attempt(entry) {
+    entry.attempts += 1;
+    const result = await this.deliver(entry.event);
+    /** @type {JsonObject} */
+    const receipt = {
+      type: entry.event.type,
+      runId: entry.event.runId ?? null,
+      nodeId: entry.event.nodeId ?? null,
+      nodeStatus: entry.event.status ?? null,
+      errorCode: entry.event.errorCode ?? null,
+      done: entry.event.done ?? null,
+      total: entry.event.total ?? null,
+      dedupeKey: entry.event.dedupeKey ?? null,
+      summary: entry.event.summary,
+      attempt: entry.attempts,
+      status: result.ok ? "delivered" : result.noTransport ? "no_transport" : "failed",
+      at: new Date(this.now()).toISOString(),
+    };
+    if (!result.ok && !result.noTransport) receipt.error = result.error ?? null;
+    appendFileSync(join(this.runDir, NOTIFY_LOG_FILE), `${JSON.stringify(receipt)}\n`);
+    if (result.ok || result.noTransport || entry.attempts >= this.maxAttempts) {
+      this.pending = this.pending.filter((candidate) => candidate !== entry);
+    } else {
+      entry.nextAttemptAt = this.now() + (this.backoffMs[entry.attempts - 1] ?? this.backoffMs.at(-1) ?? 0);
+    }
+  }
+}
+
+/** @param {unknown} error @returns {string} */
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Route a session wake. A wake exists only for a requiresUser-true event
- * (Addendum 01 section 9, ADR-0019): requiresUser is read from the projected
- * record and never re-derived here, and for every other event — progress
- * included — the canWake capability is not consulted at all.
+ * An operator (or a test) may override the retry backoff with a
+ * comma-separated list of milliseconds, so a slow default never has to be
+ * waited out in full. Read fresh on every queue construction rather than
+ * baked into a module constant, so the override still applies however late
+ * it is set.
  *
- * @param {NotificationEvent} event
- * @param {NotifyAdapter[]} adapters
- * @returns {NotifyAdapter[]}
+ * @returns {number[]|null}
  */
-export function routeWake(event, adapters) {
-  if (!event || event.requiresUser !== true) return [];
-  return /** @type {NotifyAdapter[]} */ (adapters).filter(
-    (adapter) => adapter.capabilities.canWake === true && typeof adapter.wake === "function",
-  );
-}
-
-/**
- * Wake every session adapter routed for this event, without ever throwing.
- * A healthy campaign wakes two or three times in total, never once per
- * progress transition.
- *
- * @param {NotificationEvent} event
- * @param {NotifyAdapter[]} adapters
- * @returns {Promise<{woke: string[], failed: {id: string, error: string}[]}>}
- */
-export async function wakeSession(event, adapters) {
-  /** @type {string[]} */
-  const woke = [];
-  /** @type {{id: string, error: string}[]} */
-  const failed = [];
-  for (const adapter of routeWake(event, adapters)) {
-    try {
-      const result = await /** @type {(event: NotificationEvent) => Promise<WakeResult>} */ (adapter.wake)(event);
-      if (result && result.ok === true) woke.push(adapter.id);
-      else failed.push({ id: adapter.id, error: (result && typeof result.error === "string" && result.error) || "wake failed" });
-    } catch (error) {
-      failed.push({ id: adapter.id, error: errorMessage(error) });
-    }
-  }
-  return { woke, failed };
+function backoffMsFromEnv() {
+  const raw = process.env.INTENT_FACTORY_NOTIFY_BACKOFF_MS;
+  if (!raw) return null;
+  const parts = raw.split(",").map((value) => Number(value.trim())).filter((value) => Number.isFinite(value) && value >= 0);
+  return parts.length > 0 ? parts : null;
 }

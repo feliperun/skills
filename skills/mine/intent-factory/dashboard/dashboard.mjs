@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { campaignsDir, discoverCampaigns } from "../scripts/campaign.mjs";
-import { readHeartbeat } from "../scripts/heartbeat.mjs";
 import { lockPath, lockStale, readLock } from "../scripts/lock.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -175,9 +174,12 @@ function campaignWeightedUsage(campaignPath) {
 }
 
 /**
- * Full detail payload for one campaign: projection, heartbeat, ledger,
- * outbox, journal tail and per-run state read from raw snapshots (never
- * through contract validation, which costs seconds per run).
+ * Full detail payload for one campaign: projection, ledger, notifications,
+ * journal tail and per-run state read from raw snapshots (never through
+ * contract validation, which costs seconds per run). There is no more
+ * campaign-level heartbeat: `heartbeat` stays null so the page falls back to
+ * deriving "now" from the linked runs' own node snapshots, as it already does
+ * whenever no heartbeat was ever recorded.
  *
  * @param {string} runsDir
  * @param {string} campaignId
@@ -197,7 +199,7 @@ export function buildCampaignDetail(runsDir, campaignId) {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     campaign,
-    heartbeat: readHeartbeat(campaignPath),
+    heartbeat: null,
     next: folded.next ?? null,
     decisions: latestById(folded.decisions, 50),
     questions: latestById(folded.questions, 20),
@@ -206,7 +208,7 @@ export function buildCampaignDetail(runsDir, campaignId) {
     outcomes: orderedList(folded.outcomes, 40),
     sessions: orderedList(folded.sessions),
     ledger: ledgerSummary(join(campaignPath, "usage-ledger.json")),
-    outbox: outboxSummary(join(campaignPath, "notification-outbox.json")),
+    outbox: notificationsSummary(runsDir, linkedRunIds),
     journalTail: tailJsonl(join(campaignPath, "journal.jsonl"), JOURNAL_TAIL_ENTRIES, 512 * 1024)
       .filter((entry) => entry.type !== "liveness")
       .reverse(),
@@ -243,6 +245,8 @@ function runSignature(runDir) {
   return fileSignature([
     join(runDir, "run.json"),
     join(runDir, "contract.json"),
+    join(runDir, "status.json"),
+    join(runDir, "notify.jsonl"),
     lockPath(runDir),
     join(runDir, "events.jsonl"),
     ...(existsSync(join(runDir, "nodes")) ? readdirSync(join(runDir, "nodes")).filter((name) => name.endsWith(".json")).sort().map((name) => join(runDir, "nodes", name)) : []),
@@ -282,7 +286,7 @@ export function campaignSignature(runsDir, campaignId) {
   }
   if (campaignId) {
     const campaignPath = join(campaignsRoot, campaignId);
-    parts.push(fileSignature(["journal.jsonl", "projection.json", "notification-outbox.json", "usage-ledger.json", "heartbeat.json"].map((name) => join(campaignPath, name))));
+    parts.push(fileSignature(["journal.jsonl", "projection.json", "usage-ledger.json"].map((name) => join(campaignPath, name))));
     const campaign = /** @type {{linkedRunIds?: unknown}|null} */ (readJsonTolerant(join(campaignPath, "campaign.json")));
     for (const runId of Array.isArray(campaign?.linkedRunIds) ? /** @type {string[]} */ (campaign.linkedRunIds) : []) parts.push(runSignature(join(runsDir, runId)));
   }
@@ -462,16 +466,26 @@ function ledgerSummary(ledgerPath) {
 }
 
 /**
- * Pending human-attention events first, then the most recent delivered ones.
+ * Notify receipts across every linked run's `notify.jsonl`, reshaped into the
+ * same pending/recent split the page already renders: a `failed` receipt is
+ * the last attempt the controller recorded for that event and stays pending
+ * until a later attempt in the same file supersedes it, while a `delivered`
+ * or `no_transport` receipt is terminal.
  *
- * @param {string} outboxPath
+ * @param {string} runsDir
+ * @param {string[]} linkedRunIds
  * @returns {{pending: Record<string, unknown>[], recent: Record<string, unknown>[], pendingCount: number}}
  */
-function outboxSummary(outboxPath) {
-  const entries = /** @type {Record<string, unknown>[]} */ (readJsonTolerant(outboxPath) ?? []);
-  const pendingAll = entries.filter((entry) => !entry.deliveredAt);
-  const delivered = entries.filter((entry) => entry.deliveredAt).slice(-10).reverse();
-  return { pending: pendingAll.slice(-20).reverse(), recent: delivered, pendingCount: pendingAll.length };
+function notificationsSummary(runsDir, linkedRunIds) {
+  /** @type {Record<string, unknown>[]} */
+  const receipts = [];
+  for (const runId of linkedRunIds) {
+    for (const entry of tailJsonl(join(runsDir, runId, "notify.jsonl"), 200)) receipts.push({ ...entry, runId });
+  }
+  receipts.sort((left, right) => String(left.at ?? "").localeCompare(String(right.at ?? "")));
+  const pendingAll = receipts.filter((entry) => entry.status === "failed");
+  const settled = receipts.filter((entry) => entry.status === "delivered" || entry.status === "no_transport").slice(-10).reverse();
+  return { pending: pendingAll.slice(-20).reverse(), recent: settled, pendingCount: pendingAll.length };
 }
 
 /**

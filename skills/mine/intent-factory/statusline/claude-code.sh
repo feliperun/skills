@@ -2,15 +2,19 @@
 # Claude Code statusLine renderer for intent-factory ambient liveness.
 #
 # Reads the session JSON on stdin (cwd or workspace.current_dir locates the
-# repository), finds the newest .runs/campaigns/*/heartbeat.json under that
-# repository by modification time, and prints one bounded status line:
+# repository), reads that repository's single .runs/status.json pointer (the
+# controller rewrites it every tick — TECH-SPEC lean, rule 5), and prints one
+# bounded status line:
 #
 #   if <campaignId> <state> <done>/<total> <activeNode> <runtime> \
 #     <age>m ago[ · attention: <text>]
 #
-# Degradation is silent: no heartbeat, an unreadable file, or a heartbeat
-# larger than the 1 KiB cap prints an empty line and exits 0. Only stdin, the
-# session JSON, the newest 1 KiB heartbeat, and local tools are used; git and
+# The age has no jq-less equivalent (see below), so the no-jq fallback omits
+# it and ends after <runtime>[ · attention: <text>].
+#
+# Degradation is silent: no pointer, an unreadable file, or a pointer larger
+# than the 1 KiB cap prints an empty line and exits 0. Only stdin, the
+# session JSON, the bounded 1 KiB pointer, and local tools are used; git and
 # the network are never invoked.
 #
 # Process budget: shell builtins, plus jq when it exists, plus exactly one
@@ -20,14 +24,15 @@
 # 1025 bytes, so a file over the 1 KiB cap is rejected before any parser
 # sees it and no tool ever receives the whole file. Where head is absent
 # (restricted environments) the shell reads the first line itself and applies
-# the same cap, and a heartbeat carrying anything beyond that line degrades.
+# the same cap, and a pointer carrying anything beyond that line degrades.
 #
 # Parsing is jq alone when jq exists. Otherwise fields come from a POSIX
 # builtin JSON reader that consumes strings escape-aware and walks the object
 # in order, so an attention value carrying quotes or escaped field names can
-# never terminate early or forge another field. The age derives from
-# generatedAt because the heartbeat cache is rewritten on every liveness
-# fact, so no date or clock process runs.
+# never terminate early or forge another field. generatedAt is unix seconds:
+# jq's builtin `now` gives the age with no date or clock process, but the
+# no-jq fallback has no live clock at all (adding one would mean a `date`
+# call, which the process budget above forbids), so it renders no age.
 
 set -u
 
@@ -35,7 +40,7 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-HEARTBEAT_MAX_BYTES=1024
+POINTER_MAX_BYTES=1024
 PROBE_BYTES=1025
 MAX_LINE_CHARS=160
 
@@ -164,25 +169,12 @@ if [ "$rest" != "$session" ]; then
   fi
 fi
 
-if [ -z "$repo" ] || [ ! -d "$repo/.runs/campaigns" ]; then
+if [ -z "$repo" ] || [ ! -f "$repo/.runs/status.json" ]; then
   printf '\n'
   exit 0
 fi
 
-# Newest heartbeat under <repo>/.runs/campaigns/*/heartbeat.json by mtime.
-newest=
-for candidate in "$repo/.runs/campaigns"/*/heartbeat.json; do
-  if [ -f "$candidate" ]; then
-    if [ -z "$newest" ] || [ "$candidate" -nt "$newest" ]; then
-      newest=$candidate
-    fi
-  fi
-done
-
-if [ -z "$newest" ]; then
-  printf '\n'
-  exit 0
-fi
+newest="$repo/.runs/status.json"
 
 # ---------------------------------------------------------------------------
 # Bounded read: at most PROBE_BYTES bytes reach the shell, and the same
@@ -197,7 +189,7 @@ if command -v head >/dev/null 2>&1; then
   content=${content%X}
 else
   # No bounded-read process available: the shell reads the first line and
-  # applies the same cap. A heartbeat is exactly one line, so anything after
+  # applies the same cap. The pointer is exactly one line, so anything after
   # it means the file is not the bounded artifact and degrades.
   overflow=
   {
@@ -210,7 +202,7 @@ else
   fi
 fi
 
-if [ -z "$content" ] || [ "${#content}" -gt "$HEARTBEAT_MAX_BYTES" ]; then
+if [ -z "$content" ] || [ "${#content}" -gt "$POINTER_MAX_BYTES" ]; then
   printf '\n'
   exit 0
 fi
@@ -231,14 +223,14 @@ if command -v jq >/dev/null 2>&1; then
     | (.state | txt) as $state
     | ((.checkpoints.done // -1) | uint) as $done
     | ((.checkpoints.total // -1) | uint) as $total
-    | ((.lastProgressAt // -1) | uint) as $last
+    | ((.generatedAt // -1) | uint) as $generated
     | (.activeNode // null) as $active
     | (.runtime // null) as $runtime
     | (.attention // null) as $attention
-    | if $cid != "" and $state != "" and $done >= 0 and $total >= 0 and $last >= 0 then
+    | if $cid != "" and $state != "" and $done >= 0 and $total >= 0 and $generated >= 0 then
         (if $active == null or $active == "" then "-" else $active end) as $activeS
         | (if $runtime == null or $runtime == "" then "-" else $runtime end) as $runtimeS
-        | ((now - $last) / 60 | floor) as $age
+        | ((now - $generated) / 60 | floor) as $age
         | (if $age < 0 then 0 else $age end) as $ageC
         | (("if " + $cid + " " + $state + " " + ($done | tostring) + "/" + ($total | tostring) + " "
              + $activeS + " " + $runtimeS + " "
@@ -267,7 +259,6 @@ hb_attention=
 hb_has_attention=0
 hb_done=
 hb_total=
-hb_last=
 hb_generated=
 
 # $1 key, $2 value, $3 1 when the value was a JSON string.
@@ -283,7 +274,6 @@ assign_field() {
         hb_has_attention=1
       fi
       ;;
-    lastProgressAt) hb_last=$2 ;;
     generatedAt) hb_generated=$2 ;;
   esac
   return 0
@@ -323,7 +313,7 @@ scan_checkpoints() {
   done
 }
 
-scan_heartbeat() {
+scan_pointer() {
   skip_ws
   case $json_rest in
     '{'*) json_rest=${json_rest#?} ;;
@@ -376,7 +366,7 @@ scan_heartbeat() {
 
 parse_error=0
 json_rest=$content
-scan_heartbeat
+scan_pointer
 
 valid=1
 if [ "$parse_error" -ne 0 ]; then valid=0; fi
@@ -384,19 +374,18 @@ if [ "$parse_error" -ne 0 ]; then valid=0; fi
 [ -n "$hb_state" ] || valid=0
 case $hb_done in ''|*[!0-9]*) valid=0 ;; esac
 case $hb_total in ''|*[!0-9]*) valid=0 ;; esac
-case $hb_last in ''|*[!0-9]*) valid=0 ;; esac
 case $hb_generated in ''|*[!0-9]*) valid=0 ;; esac
 if [ "$valid" -ne 1 ]; then
   printf '\n'
   exit 0
 fi
 
-age=$(( (hb_generated - hb_last) / 60 ))
-if [ "$age" -lt 0 ]; then age=0; fi
 if [ -z "$hb_active" ]; then hb_active=-; fi
 if [ -z "$hb_runtime" ]; then hb_runtime=-; fi
 
-line="if ${hb_campaign} ${hb_state} ${hb_done}/${hb_total} ${hb_active} ${hb_runtime} ${age}m ago"
+# No live clock is available without a date process, so the fallback line
+# ends after runtime: age is a jq-only field (see the module docstring).
+line="if ${hb_campaign} ${hb_state} ${hb_done}/${hb_total} ${hb_active} ${hb_runtime}"
 if [ "$hb_has_attention" -eq 1 ] && [ -n "$hb_attention" ]; then
   line="${line} · attention: ${hb_attention}"
 fi

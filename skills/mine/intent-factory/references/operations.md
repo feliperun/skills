@@ -111,3 +111,37 @@ their reset time, including Z.ai code 1310. Omitted assignments are composed
 once and persisted in `routing.assignments`; exhaustion re-tiers only within
 the current tier and otherwise leaves the node in attention with
 `runtime_tier_exhausted`.
+
+## Status
+
+`<run-dir>/status.json` (the same payload `status --json` prints) and
+`.runs/status.json` (a bounded pointer to the active run) are written
+atomically every controller tick and at run terminal — the progress surface
+now that there is no heartbeat. The per-run file carries `schemaVersion`,
+`run`, `contractId`, `campaignId`, `goal`, `usage`, `controller` (state, pid,
+since), `summary`, and one entry per node (`id`, `status`, `phase`, `runtime`,
+`attempt`, `revisions`, `note`, `errorCode`, `blockedBy`, …). The `.runs`
+pointer is smaller — `schemaVersion`, `runId`, `campaignId`, `state`,
+`checkpoints`, `activeNode`, `runtime`, `attention`, `generatedAt` (unix
+seconds) — bounded to 1 KiB for a cheap ambient read; `statusline/claude-code.sh`
+reads it directly.
+
+## Notify
+
+On `node.terminal`, `run.terminal` and `attention` the controller renders a
+one-line message from counters and identifiers only (node id, run id, state,
+attempt, error code, done/total — never model text), calls the executable
+named by `INTENT_FACTORY_NOTIFY_BIN` with that event as JSON on stdin, and
+appends a receipt (`delivered`, `failed`, or `no_transport`, with the
+timestamp) to `<run-dir>/notify.jsonl`. Exit code 0 is the only success
+signal; anything else is `failed` and retried on a later controller tick, up
+to three attempts total with backoff (`INTENT_FACTORY_NOTIFY_BACKOFF_MS`
+overrides the default). With `INTENT_FACTORY_NOTIFY_BIN` unset nothing is
+spawned and the receipt is `no_transport` — there is no implicit desktop
+fallback. Progress never notifies. Setting
+`INTENT_FACTORY_NOTIFY_BIN=os-macos` is the one explicit opt-in to the bundled
+`osascript` adapter; every other value is treated as an executable path.
+Resuming a run never re-sends a notification already recorded for the same
+node, attempt, and outcome: the durable `notify.jsonl` is the only thing that
+survives the controller process boundary, so it is what a fresh resume checks
+before enqueuing.

@@ -14,12 +14,8 @@ actionable verdicts into the session.
 | You need | Read |
 | --- | --- |
 | Contract, packets, results, driver protocol, states, resume | [contract.md](references/contract.md) |
-| Attempt worktrees, integration, and recovery | [operations.md](references/operations.md) |
+| Attempt worktrees, integration, recovery, controller lock, status.json, notify | [operations.md](references/operations.md) |
 | Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
-| Campaign plan, transition table, authority, failover routes, commands | [campaign-autonomy.md](references/campaign-autonomy.md) |
-| Heartbeat, outbox, sync/ack, judge gate, metrics, resilience | [release-1.md](references/release-1.md) |
-| Status line, notifications, notify transport | [feedback.md](references/feedback.md) |
-| Harness-side ambient rendering | [harness-feedback.md](references/harness-feedback.md) |
 | Session save/resume protocol | [session-memory.md](references/session-memory.md) |
 
 ## Session commands
@@ -31,6 +27,7 @@ Everything else runs detached.
 | Probe runtimes and host before spending tokens | `preflight <contract.json>`, `doctor [--cwd <dir>]` |
 | Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
 | Advance that cursor past an event | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |
+| Wake only on actionable change, poll every 30s | `campaign watch <id> --cwd <repo> --wake` |
 | Read the campaign indicators | `metrics <campaign-id> [--cwd <dir>] [--json]` |
 
 ## Load-bearing rules

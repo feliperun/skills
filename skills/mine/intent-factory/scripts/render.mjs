@@ -1,14 +1,22 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { validateContract, validateNodeSnapshot, validateRunMetadata } from "./contract.mjs";
-import { readJson } from "./store.mjs";
+import { readJson, writeJsonAtomic } from "./store.mjs";
 import { lockStale, pidAlive, readLock } from "./lock.mjs";
 import { scopeFindingsNote } from "./scope-findings.mjs";
 import { reviewNote } from "./review-modes.mjs";
 
+/** Advisory ceiling for status.json (TECH-SPEC lean, rule 5); never enforced destructively. */
+export const STATUS_JSON_MAX_BYTES = 200 * 1024;
+export const STATUS_POINTER_FILE = "status.json";
+const STATUS_POINTER_MAX_BYTES = 1024;
+const POINTER_STRING_CHARS = 64;
+const POINTER_ATTENTION_CHARS = 80;
+
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
 /** @typedef {import("./contract.mjs").NodeStatus} NodeStatus */
+/** @typedef {Record<string, unknown>} JsonObject */
 
 const MARK = {
   pending: "[ ]",
@@ -71,9 +79,26 @@ export function renderStatus(runDir) {
 export function renderStatusJson(runDir) {
   const { contract, nodes, identityWarnings } = loadRun(runDir);
   const usage = readRunUsage(runDir);
+  const payload = buildStatusPayload(runDir, contract, nodes, identityWarnings, usage);
+  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/**
+ * The status.json payload shared by the CLI (`status --json`, reading from
+ * disk) and the controller's per-tick writer (in-memory node states): every
+ * field is a durable fact, never a rendering choice.
+ *
+ * @param {string} runDir
+ * @param {ValidatedContract} contract
+ * @param {NodeSnapshot[]} nodes
+ * @param {string[]} identityWarnings
+ * @param {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null}} usage
+ * @returns {JsonObject}
+ */
+function buildStatusPayload(runDir, contract, nodes, identityWarnings, usage) {
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
-  const payload = {
+  return {
     schemaVersion: 1,
     run: basename(runDir),
     contractId: contract.id,
@@ -100,9 +125,96 @@ export function renderStatusJson(runDir) {
       pendingHandoff: pendingHandoff(node),
       note: statusNote(node),
       scopeFindings: node.scopeFindings?.unexpectedPaths ?? null,
+      errorCode: node.error?.code ?? null,
+      blockedBy: node.blockedBy ?? [],
     })),
   };
-  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/**
+ * The node the operator should look at right now: the first node that is
+ * running, else the first in an attention state, else null.
+ *
+ * @param {NodeSnapshot[]} nodes
+ * @returns {NodeSnapshot|null}
+ */
+function activeStatusNode(nodes) {
+  return nodes.find((node) => node.status === "running")
+    ?? nodes.find((node) => !["pending", "running", "done", "no-op"].includes(node.status))
+    ?? null;
+}
+
+/**
+ * The bounded pointer record written to `.runs/status.json`: enough for a
+ * quick ambient read (statusline, a stale watcher) without opening the
+ * per-run status.json. Bounded the same way heartbeat.json used to be, so a
+ * cheap bounded read stays valid for any reader still built that way.
+ * `generatedAt` is unix seconds, not ISO: the statusline's no-jq fallback has
+ * no clock and only jq's builtin `now` can compute an age from a live clock,
+ * and neither path needs a `date` process to read an integer.
+ *
+ * @param {JsonObject} payload the per-run status.json payload
+ * @param {NodeSnapshot[]} nodes
+ * @param {number} generatedAt unix seconds
+ * @returns {JsonObject}
+ */
+function derivePointer(payload, nodes, generatedAt) {
+  const active = activeStatusNode(nodes);
+  const done = nodes.filter((node) => node.status === "done" || node.status === "no-op").length;
+  const attentionNode = nodes.find((node) => !["pending", "running", "done", "no-op"].includes(node.status));
+  const state = attentionNode ? "attention" : nodes.every((node) => ["done", "no-op"].includes(node.status)) ? "done" : "active";
+  const pointer = {
+    schemaVersion: 1,
+    runId: payload.run,
+    campaignId: payload.campaignId,
+    state,
+    checkpoints: { done, total: nodes.length },
+    activeNode: active ? truncateChars(active.id, POINTER_STRING_CHARS) : null,
+    runtime: active?.runtime ? truncateChars(`${active.runtime.driver}/${active.runtime.model}`, POINTER_STRING_CHARS) : null,
+    attention: attentionNode ? truncateChars(statusNote(attentionNode) ?? attentionNode.status, POINTER_ATTENTION_CHARS) : null,
+    generatedAt,
+  };
+  return pointer;
+}
+
+/**
+ * @param {string} value
+ * @param {number} maxChars
+ * @returns {string}
+ */
+function truncateChars(value, maxChars) {
+  const chars = Array.from(value);
+  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
+}
+
+/**
+ * Write status.json for one run (bounded advisory ceiling) and the
+ * `.runs/status.json` pointer to it (bounded to 1 KiB, mirroring the old
+ * heartbeat.json contract), atomically. Called each controller tick and at
+ * run terminal (TECH-SPEC lean, rule 5).
+ *
+ * @param {string} runDir
+ * @param {string} runsDir
+ * @param {ValidatedContract} contract
+ * @param {Map<string, NodeSnapshot>} states
+ */
+export function writeStatusArtifacts(runDir, runsDir, contract, states) {
+  const nodes = /** @type {NodeSnapshot[]} */ (contract.nodes.map((node) => states.get(node.id)).filter((node) => node !== undefined));
+  const runMetadata = /** @type {{identityWarnings?: string[]}} */ (readJson(join(runDir, "run.json")) ?? {});
+  const usage = readRunUsage(runDir);
+  const payload = buildStatusPayload(runDir, contract, nodes, runMetadata.identityWarnings ?? [], usage);
+  const serialized = JSON.stringify(payload);
+  if (Buffer.byteLength(serialized, "utf8") > STATUS_JSON_MAX_BYTES) {
+    process.stderr.write(`[warn] status.json for ${basename(runDir)} exceeds the ${STATUS_JSON_MAX_BYTES}-byte advisory ceiling\n`);
+  }
+  writeJsonAtomic(join(runDir, STATUS_POINTER_FILE), payload);
+  const pointer = derivePointer(payload, nodes, Math.floor(Date.now() / 1000));
+  const pointerSerialized = JSON.stringify(pointer);
+  if (Buffer.byteLength(pointerSerialized, "utf8") <= STATUS_POINTER_MAX_BYTES) {
+    writeJsonAtomic(join(runsDir, STATUS_POINTER_FILE), pointer);
+  } else {
+    process.stderr.write(`[warn] .runs/status.json pointer for ${basename(runDir)} exceeds ${STATUS_POINTER_MAX_BYTES} bytes; left unwritten\n`);
+  }
 }
 
 /**

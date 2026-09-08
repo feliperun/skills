@@ -18,6 +18,12 @@ if (!process.env.INTENT_FACTORY_NOTIFY_BIN) {
   process.env.INTENT_FACTORY_NOTIFY_BIN = path;
 }
 
+// The default retry backoff (5s, then 30s) is a production value: a suite
+// that ever exercises a failing transport must not wait it out in real time.
+if (!process.env.INTENT_FACTORY_NOTIFY_BACKOFF_MS) {
+  process.env.INTENT_FACTORY_NOTIFY_BACKOFF_MS = "0,0";
+}
+
 /**
  * @param {number} milliseconds
  * @returns {Promise<void>}

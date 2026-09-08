@@ -209,7 +209,7 @@ function once(server) {
 
 /**
  * A temp repository with one campaign, one two-node run, journal, projection,
- * ledger and outbox.
+ * ledger and notify.jsonl receipts.
  *
  * @returns {{directory: string, runsDir: string, runDir: string}}
  */
@@ -277,10 +277,10 @@ function makeWorld() {
       },
     },
   });
-  writeJson(join(campaignPath, "notification-outbox.json"), [
-    { eventId: "a", type: "run.attention", at: NOW, summary: "pending one", deliveredAt: null },
-    { eventId: "b", type: "node.terminal", at: NOW, summary: "delivered one", deliveredAt: NOW },
-  ]);
+  writeFileSync(join(runDir, "notify.jsonl"), [
+    { type: "attention", runId: "dash-run", nodeId: "alpha", summary: "pending one", status: "failed", attempt: 1, at: NOW },
+    { type: "node.terminal", runId: "dash-run", nodeId: "beta", summary: "delivered one", status: "delivered", attempt: 1, at: NOW },
+  ].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
   return { directory, runsDir, runDir };
 }
 

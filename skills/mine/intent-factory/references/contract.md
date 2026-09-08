@@ -847,13 +847,12 @@ Every contract requires `campaignId`. Campaign state lives at
 `.runs/campaigns/<campaign-id>/` and can link multiple runs. Commands stay under
 the runner CLI:
 
-The campaign plan schema, transition table, safety boundary, notification
-outbox, and autonomous operational workflow live in
-[campaign-autonomy.md](campaign-autonomy.md).
-Notifications are controller-only: the controller and the supervisor enqueue
-bounded events into the outbox and drain them through the configured generic
-executable; the provider protocol carries no notification surface, and live
-preflight probes strip the notification executable from their environment.
+Notifications are controller-only (rule 6): on `node.terminal`, `run.terminal`
+and `attention` the controller calls `INTENT_FACTORY_NOTIFY_BIN` and appends a
+receipt to the run's `notify.jsonl`; the provider protocol carries no
+notification surface, and live preflight probes strip the notification
+executable from their environment. Details:
+[operations.md](operations.md).
 
 ```bash
 node <skill-dir>/scripts/runner.mjs campaign list [--cwd <dir>]
@@ -861,8 +860,9 @@ node <skill-dir>/scripts/runner.mjs campaign init <campaign-id> --cwd <dir> --go
 node <skill-dir>/scripts/runner.mjs campaign attach <campaign-id> --cwd <dir> --tool codex --session-id <session-id> --transcript <absolute-path> --format jsonl [--cursor <cursor>]
 node <skill-dir>/scripts/runner.mjs campaign note <campaign-id> --cwd <dir> --session-id <session-id> --kind <intent|decision|supersede|constraint|outcome|next|open-question|retrospective> [--decision-id <id> | --supersedes <id> | --run-id <run-id>] --text <text>
 node <skill-dir>/scripts/runner.mjs campaign resolve <campaign-id> --cwd <dir> --session-id <session-id> --question-id <id> --text <answer>
-node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --cursor session-<session-id>
-node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --since <event-id>
+node <skill-dir>/scripts/runner.mjs campaign sync <campaign-id> --cwd <dir> --session-id <session-id>
+node <skill-dir>/scripts/runner.mjs campaign ack <campaign-id> --cwd <dir> --session-id <session-id> --event-id <event-id>
+node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <dir> --wake
 node <skill-dir>/scripts/runner.mjs campaign close <campaign-id> --cwd <dir>
 node <skill-dir>/scripts/runner.mjs campaign show <campaign-id> --cwd <dir>
 ```
@@ -876,14 +876,14 @@ attach/note/resolve writes but remains inspectable via `show` and `list`.
 ends with a recorded retrospective (`note --kind retrospective`) that captures
 what to improve, so the autonomous completion path leaves the campaign active
 until one is recorded.
-`watch --cursor` returns ordered unseen notification events and atomically
-advances a durable consumer position; invoking it again returns no events until
-new material progress exists. `watch --since` is stateless and returns events
-after a named event ID that is still retained in the bounded outbox. The flags
-are mutually exclusive. A resumed session uses one stable watch consumer ID
-derived from its attached session ID and calls `watch` once per reinvocation
-before its single status read. This watch consumer ID is unrelated to the
-optional transcript position accepted by `campaign attach --cursor`.
+`sync` is the user-initiated read: it prints the campaign header, the newest
+linked run's `status.json` summary, and unseen journal events after the
+session's durable cursor without ever moving it. `ack` is the only cursor
+writer, keyed by the journal's own event id. `watch --wake` is the persistent
+poll: it reads every linked run's `status.json` every 30 seconds and prints
+one line per actionable change — a run gone terminal, a node in attention, a
+non-terminal run whose controller lock is stale, or twenty idle minutes — and
+exits once the campaign is closed.
 
 Artifacts:
 

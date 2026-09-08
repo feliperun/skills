@@ -1,7 +1,7 @@
 /**
- * Metrics projector (TECH-SPEC section 8.4). One pure function over the four
+ * Metrics projector (TECH-SPEC section 8.4). One pure function over the
  * recorded sources of a campaign — the run `events.jsonl`, the per-run
- * `usage.jsonl`, the notification outbox and the campaign journal — returning
+ * `usage.jsonl` and `notify.jsonl`, and the campaign journal — returning
  * every release-1 indicator in one object, so effectiveness
  * (`firstPassGateRate`, `ambientCoverage`) and efficiency
  * (`takesPerClosedCheckpoint`) are always reported together and never one
@@ -26,33 +26,38 @@
  * router stays one line per subcommand, while `metrics-report.mjs` decides how
  * the projection is printed.
  *
- * The liveness subset comes from `deriveGovernanceMetrics` (`heartbeat.mjs`),
- * the single source of the silent-stall indicator; this module only wraps its
- * value with the supporting record count. The preamble, session, liveness and
- * usage measurements come from `metrics-evals.mjs` and the recorded usage
- * records, which own what each of those indicators is measured from.
+ * The liveness subset (`silentStallRateOf`, in `metrics-evals.mjs`) is
+ * measured from the campaign journal's legacy `liveness` entries only: the
+ * heartbeat mechanism that used to write them is gone, so a new campaign
+ * carries none and the indicator reports no record. The preamble, session
+ * (now over `notify.jsonl`) and usage measurements come from
+ * `metrics-evals.mjs` and the recorded usage records, which own what each of
+ * those indicators is measured from.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { campaignDir, readCampaign, readJournal } from "./campaign.mjs";
-import { CAMPAIGN_STATE_FILE } from "./campaign-autonomy.mjs";
-import { deriveGovernanceMetrics } from "./heartbeat.mjs";
 import {
   coverageOf,
   countNonterminalFacts,
   jsonObjectOf,
   livenessFactsOf,
   livenessGapsOf,
+  notifyUsageOf,
   percentile95,
   preambleTokensByRuntime,
   PREFLIGHT_FILE,
   round4,
-  sessionUsageOf,
+  silentStallRateOf,
   timestampMs,
 } from "./metrics-evals.mjs";
 import { renderMetricsJson, renderMetricsReport } from "./metrics-report.mjs";
-import { readNotificationOutbox } from "./outbox.mjs";
+
+/** Legacy per-campaign origin record of a run the old supervisor dispatched; read only for backward compatibility with a campaign that still has one. */
+const CAMPAIGN_STATE_FILE = "control-state.json";
+/** Governance staleness window (seconds), matching the removed heartbeat mechanism's default. */
+const GOVERNANCE_STALE_SEC = 2400;
 
 /** Heartbeat age, in seconds, below which a reader is considered covered (Addendum 01 section 8). */
 export const HEARTBEAT_FRESH_SEC = 60;
@@ -75,7 +80,7 @@ const UNKNOWN_LANE = "unknown";
  *   events?: unknown[],
  *   takeRunIds?: string[]|null,
  *   usageRecords?: unknown[],
- *   outbox?: unknown[],
+ *   notifications?: unknown[],
  *   journal?: unknown[],
  *   preflight?: unknown[],
  *   now?: number,
@@ -131,14 +136,15 @@ export function projectMetrics({
   events = [],
   takeRunIds = null,
   usageRecords = [],
-  outbox = [],
+  notifications = [],
   journal = [],
   preflight = [],
   now = Date.now(),
-  staleSec,
+  staleSec = GOVERNANCE_STALE_SEC,
   freshSec = HEARTBEAT_FRESH_SEC,
   tokenizerEstimate = DEFAULT_TOKENIZER_ESTIMATE,
 } = {}) {
+  void now;
   const byNode = eventsByNode(events);
   const lifecycle = lifecycleOf(byNode);
   const usage = usageTotalsOf(usageRecords);
@@ -146,11 +152,9 @@ export function projectMetrics({
   const gates = firstPassGateRateByLane(byNode);
   const livenessFacts = livenessFactsOf(journal);
   const gaps = livenessGapsOf(livenessFacts);
-  const session = sessionUsageOf(outbox, tokenizerEstimate);
+  const session = notifyUsageOf(notifications, tokenizerEstimate);
   const closed = lifecycle.closed;
   const takes = Array.isArray(takeRunIds) ? takeRunIds.length : null;
-  // staleSec left undefined keeps heartbeat.mjs's own GOVERNANCE_STALE_SEC.
-  const governance = deriveGovernanceMetrics({ events, livenessFacts, outbox, now, staleSec });
   const preamble = preambleTokensByRuntime(preflight);
   return {
     wallClockPerClosedCheckpoint: measured("down", span.count, closed === 0 || span.seconds === null ? null : span.seconds / closed),
@@ -165,8 +169,11 @@ export function projectMetrics({
     heartbeatStalenessP95: measured("down", gaps.length, percentile95(gaps)),
     ambientCoverage: measured("up", gaps.length, coverageOf(gaps, freshSec)),
     // Hard target zero (Addendum 02): a measured zero means every liveness gap
-    // was covered, so it survives only while there are facts to measure.
-    silentStallRate: measured("down", countNonterminalFacts(livenessFacts), governance.silentStallRate),
+    // was covered, so it survives only while there are facts to measure. No
+    // liveness facts are recorded any more (the heartbeat mechanism that
+    // wrote them is gone), so this stays measured only against a legacy
+    // journal's old entries and drifts toward "no record" for every new run.
+    silentStallRate: measured("down", countNonterminalFacts(livenessFacts), silentStallRateOf(livenessFacts, staleSec)),
     workerPreambleTokens: grouped("down", preamble.count, preamble.value),
     notifyLatencyP95: measured("down", session.latencies.length, percentile95(session.latencies)),
     usageTokensByKind: grouped("informative", usage.tokenCount, usage.tokensByKind),
@@ -416,6 +423,7 @@ export const METRICS_OPTIONS = { cwd: { type: "string" }, json: { type: "boolean
 const RUNS_DIR_NAME = ".runs";
 const RUN_EVENTS_FILE = "events.jsonl";
 const USAGE_LOG_FILE = "usage.jsonl";
+const NOTIFY_LOG_FILE = "notify.jsonl";
 /** Recorded origin of a run the controller generated to recover a partial effect. */
 const REPAIR_KIND = "repair";
 
@@ -427,7 +435,7 @@ const REPAIR_KIND = "repair";
  *   repairRunIds: string[],
  *   events: unknown[],
  *   usageRecords: unknown[],
- *   outbox: unknown[],
+ *   notifications: unknown[],
  *   journal: unknown[],
  *   preflight: unknown[],
  * }} MetricsSources
@@ -465,10 +473,13 @@ export function deriveTakeRuns(linkedRunIds, controlState) {
 /**
  * Read the recorded sources of one campaign: the transition events and
  * recorded `preflight --json` payload of every linked run, plus the per-run
- * `usage.jsonl` records, the notification outbox and the journal. A missing artefact reads as
- * empty, which the projector reports as a missing measurement and never as a
- * measured zero — a run whose phase start recorded no `preflight.json` leaves
- * the preamble to whatever its dispatches recorded.
+ * `usage.jsonl` and `notify.jsonl` records and the journal. A missing
+ * artefact reads as empty, which the projector reports as a missing
+ * measurement and never as a measured zero — a run whose phase start
+ * recorded no `preflight.json` leaves the preamble to whatever its dispatches
+ * recorded. `control-state.json` no longer exists for a new campaign (the
+ * supervisor that wrote it is gone); it is read only for backward
+ * compatibility with a campaign still carrying one from before.
  *
  * @param {string} campaignPath
  * @param {{runsDir?: string}} [options]
@@ -481,10 +492,13 @@ export function readMetricsSources(campaignPath, { runsDir = join(campaignPath, 
   /** @type {unknown[]} */
   const usageRecords = [];
   /** @type {unknown[]} */
+  const notifications = [];
+  /** @type {unknown[]} */
   const preflight = [];
   for (const runId of campaign.linkedRunIds) {
     for (const record of readJsonlRecords(join(runsDir, runId, RUN_EVENTS_FILE))) events.push(record);
     for (const record of readJsonlRecords(join(runsDir, runId, USAGE_LOG_FILE))) usageRecords.push(record);
+    for (const record of readJsonlRecords(join(runsDir, runId, NOTIFY_LOG_FILE))) notifications.push(record);
     const payload = readJsonFile(join(runsDir, runId, PREFLIGHT_FILE));
     if (payload !== null) preflight.push(payload);
   }
@@ -494,7 +508,7 @@ export function readMetricsSources(campaignPath, { runsDir = join(campaignPath, 
     ...deriveTakeRuns([...campaign.linkedRunIds], readJsonFile(join(campaignPath, CAMPAIGN_STATE_FILE))),
     events,
     usageRecords,
-    outbox: readNotificationOutbox(campaignPath),
+    notifications,
     journal: readJournal(campaignPath),
     preflight,
   };

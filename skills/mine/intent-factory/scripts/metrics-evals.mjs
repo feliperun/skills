@@ -75,35 +75,46 @@ function preflightPreambleTallies(payloads) {
 }
 
 /**
- * Control-session cost of the campaign. The session is pull-only: progress is
- * never pushed, so only an outbox record with `requiresUser: true` involves the
- * session — it alone increments the wake count and adds permanent context,
- * estimated from the bounded record's own bytes. Notification latency is
- * measured over the same outbox, from projection to delivery.
+ * Control-session cost of the campaign, measured over the recorded
+ * `notify.jsonl` receipts. Only `node.terminal`, `run.terminal` and
+ * `attention` events are ever notified (progress never is), so every logical
+ * event — its first attempt, `attempt: 1` — is a session wake; tokens are
+ * estimated from that first receipt's own bytes. Latency is the delay from
+ * that first attempt to whichever later receipt for the same event first
+ * reports `delivered`, so a bounded retry's backoff shows up as latency
+ * rather than disappearing.
  *
- * @param {unknown[]} outbox
+ * @param {unknown[]} notifications
  * @param {{bytes: number, tokens: number}} estimate
  * @returns {{count: number, wakes: number, tokens: number, latencies: number[]}}
  */
-export function sessionUsageOf(outbox, estimate) {
+export function notifyUsageOf(notifications, estimate) {
   let count = 0;
   let wakes = 0;
   let tokens = 0;
   /** @type {number[]} */
   const latencies = [];
-  for (const raw of outbox) {
+  /** @type {Map<string, number>} */
+  const enqueuedAtByEvent = new Map();
+  for (const raw of notifications) {
     const record = jsonObjectOf(raw);
     if (record === null) continue;
     count += 1;
-    if (record.requiresUser === true) {
+    const key = `${record.type}:${record.runId ?? ""}:${record.nodeId ?? ""}`;
+    if (record.attempt === 1) {
       wakes += 1;
       tokens += estimatedTokens(Buffer.byteLength(JSON.stringify(record), "utf8"), estimate);
+      const atMs = timestampMs(record.at);
+      if (Number.isFinite(atMs)) enqueuedAtByEvent.set(key, atMs);
     }
-    const atMs = timestampMs(record.at);
-    const deliveredMs = timestampMs(record.deliveredAt);
-    if (!Number.isFinite(atMs) || !Number.isFinite(deliveredMs)) continue;
-    const seconds = (deliveredMs - atMs) / 1000;
-    if (seconds >= 0) latencies.push(seconds);
+    if (record.status === "delivered") {
+      const atMs = timestampMs(record.at);
+      const enqueuedMs = enqueuedAtByEvent.get(key);
+      if (Number.isFinite(atMs) && Number.isFinite(enqueuedMs)) {
+        const seconds = (atMs - /** @type {number} */ (enqueuedMs)) / 1000;
+        if (seconds >= 0) latencies.push(seconds);
+      }
+    }
   }
   return { count, wakes, tokens, latencies };
 }
@@ -191,6 +202,36 @@ export function countNonterminalFacts(facts) {
 }
 
 
+
+/**
+ * Fraction of consecutive nonterminal liveness facts whose gap exceeded
+ * `staleSec` that went uncovered. There is no attention mechanism left to
+ * cover a gap (the campaign-level stall watchdog that used to enqueue one is
+ * gone with the supervisor), so every qualifying gap now counts as silent:
+ * the rate is 1 whenever at least one qualifying gap exists, else 0. Facts
+ * come only from a legacy journal — nothing writes new ones — so this
+ * measures old campaigns and reports no record for new ones.
+ *
+ * @param {JsonObject[]} facts
+ * @param {number} staleSec
+ * @returns {number}
+ */
+export function silentStallRateOf(facts, staleSec) {
+  /** @type {number[]} */
+  const stamps = [];
+  for (const fact of facts) {
+    if (fact.state === "done" || fact.state === "failed") continue;
+    const atMs = timestampMs(fact.at);
+    if (Number.isFinite(atMs)) stamps.push(atMs);
+  }
+  stamps.sort((left, right) => left - right);
+  let gaps = 0;
+  for (let index = 0; index + 1 < stamps.length; index += 1) {
+    const gapSeconds = (stamps[index + 1] - stamps[index]) / 1000;
+    if (gapSeconds > staleSec) gaps += 1;
+  }
+  return gaps === 0 ? 0 : 1;
+}
 
 /**
  * @param {number[]} values

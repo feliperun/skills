@@ -216,25 +216,15 @@ test("metrics lostTakeRate counts takes whose spend bought no result", () => {
   assert.deepEqual(noTake.lostTakeRate, { value: null, direction: "down", count: 0 });
 });
 
-test("metrics session indicators grow only on requiresUser involvement", () => {
-  const wake = {
-    type: "campaign.completed",
-    at: at(9),
-    campaignId: "c",
-    summary: "campaign closed",
-    requiresUser: true,
-    data: {},
-  };
-  const progress = { type: "campaign.progress", at: at(1), campaignId: "c", summary: "2/3", requiresUser: false, data: {} };
-  const metrics = projectMetrics({ outbox: [progress, { ...progress, at: at(5) }, wake] });
-  assert.deepEqual(metrics.sessionWakeCount, { value: 1, direction: "down", count: 3 });
-  assert.deepEqual(metrics.sessionContextGrowth, { value: recordTokens(wake), direction: "down", count: 3 });
-
-  // The control session is pull-only: progress never wakes it, so a campaign
-  // that only progressed measures zero over the records it did project.
-  const pullOnly = projectMetrics({ outbox: [progress, { ...progress, at: at(5) }] });
-  assert.deepEqual(pullOnly.sessionWakeCount, { value: 0, direction: "down", count: 2 });
-  assert.deepEqual(pullOnly.sessionContextGrowth, { value: 0, direction: "down", count: 2 });
+test("metrics session indicators count each notified event once, at its first attempt", () => {
+  // Only node.terminal, run.terminal and attention are ever notified — progress
+  // never is — so every notify.jsonl record is already wake-worthy; a retry of
+  // the same event (attempt 2) must not be counted a second time.
+  const first = { type: "node.terminal", runId: "r", nodeId: "n", attempt: 1, status: "failed", at: at(1) };
+  const retry = { type: "node.terminal", runId: "r", nodeId: "n", attempt: 2, status: "delivered", at: at(1, 5) };
+  const metrics = projectMetrics({ notifications: [first, retry] });
+  assert.deepEqual(metrics.sessionWakeCount, { value: 1, direction: "down", count: 2 });
+  assert.deepEqual(metrics.sessionContextGrowth, { value: recordTokens(first), direction: "down", count: 2 });
 
   const empty = projectMetrics();
   assert.deepEqual(empty.sessionWakeCount, { value: null, direction: "down", count: 0 });
@@ -263,7 +253,10 @@ test("metrics ambient liveness indicators measure the gaps between liveness fact
   assert.deepEqual(single.ambientCoverage, { value: null, direction: "up", count: 0 });
 });
 
-test("metrics silentStallRate holds its hard target of zero only where facts exist", () => {
+test("metrics silentStallRate is measured only from a legacy journal's liveness facts", () => {
+  // The heartbeat mechanism that used to append "liveness" journal entries is
+  // gone, and with it the campaign-level watchdog that could cover a gap: any
+  // qualifying gap in an old journal's facts is now unconditionally silent.
   /** @param {string} stamp @returns {Record<string, unknown>} */
   const fact = (stamp) => ({ type: "liveness", eventId: stamp, at: stamp, state: "running" });
 
@@ -272,17 +265,9 @@ test("metrics silentStallRate holds its hard target of zero only where facts exi
   const healthy = projectMetrics({ journal: [fact(at(0)), fact(at(10))], staleSec: 2400 });
   assert.deepEqual(healthy.silentStallRate, { value: 0, direction: "down", count: 2 });
 
-  // A gap past staleSec with no covering attention event is a silent stall.
+  // A gap past staleSec is a silent stall: nothing can cover it any more.
   const stalled = projectMetrics({ journal: [fact(at(0)), fact(at(50))], staleSec: 600 });
   assert.deepEqual(stalled.silentStallRate, { value: 1, direction: "down", count: 2 });
-
-  // The same gap covered by a stale_liveness notification is observed, not silent.
-  const covered = projectMetrics({
-    journal: [fact(at(0)), fact(at(50))],
-    outbox: [{ type: "run.attention", at: at(30), requiresUser: true, data: { code: "stale_liveness" } }],
-    staleSec: 600,
-  });
-  assert.equal(covered.silentStallRate.value, 0);
 
   // A campaign with no liveness fact has no stall measurement at all.
   assert.deepEqual(projectMetrics().silentStallRate, { value: null, direction: "down", count: 0 });
@@ -306,20 +291,21 @@ test("metrics workerPreambleTokens is the mean measured preamble per runtime", (
   assert.deepEqual(unmeasured.workerPreambleTokens, { value: null, direction: "down", count: 0 });
 });
 
-test("metrics notifyLatencyP95 measures the outbox from projection to delivery", () => {
-  const base = { type: "run.attention", campaignId: "c", requiresUser: true, data: {} };
+test("metrics notifyLatencyP95 measures notify.jsonl receipts from first attempt to delivery", () => {
+  const base = { type: "attention" };
   const metrics = projectMetrics({
-    outbox: [
-      { ...base, at: at(0), deliveredAt: at(0, 2) },
-      { ...base, at: at(1), deliveredAt: at(1, 10) },
-      { ...base, at: at(2), deliveredAt: null },
+    notifications: [
+      { ...base, runId: "a", attempt: 1, status: "failed", at: at(0) },
+      { ...base, runId: "a", attempt: 2, status: "delivered", at: at(0, 2) },
+      { ...base, runId: "b", attempt: 1, status: "failed", at: at(1) },
+      { ...base, runId: "b", attempt: 2, status: "delivered", at: at(1, 10) },
     ],
   });
   assert.deepEqual(metrics.notifyLatencyP95, { value: 10, direction: "down", count: 2 });
 
-  // An outbox that was never drained still wakes the session, but has no
+  // A receipt that never reaches delivered still wakes the session, but has no
   // latency to report.
-  const undelivered = projectMetrics({ outbox: [{ ...base, at: at(0), deliveredAt: null }] });
+  const undelivered = projectMetrics({ notifications: [{ ...base, runId: "c", attempt: 1, status: "failed", at: at(0) }] });
   assert.deepEqual(undelivered.notifyLatencyP95, { value: null, direction: "down", count: 0 });
   assert.equal(undelivered.sessionWakeCount.value, 1);
 });
@@ -400,8 +386,13 @@ function baselineWorkspace() {
   const campaignPath = join(cwd, ".runs", "campaigns", BASELINE_CAMPAIGN);
   mkdirSync(campaignPath, { recursive: true });
   writeFileSync(join(campaignPath, "campaign.json"), JSON.stringify(FIXTURE.campaign));
+  // control-state.json is legacy: nothing writes it any more, but it is still
+  // read for backward compatibility with a campaign that has one, which this
+  // distilled baseline does.
   writeFileSync(join(campaignPath, "control-state.json"), JSON.stringify(FIXTURE.controlState));
-  writeFileSync(join(campaignPath, "notification-outbox.json"), JSON.stringify(FIXTURE.outbox));
+  // FIXTURE.outbox is kept for provenance (it was part of what the campaign was
+  // distilled from) but is never materialized: readMetricsSources reads
+  // notify.jsonl per linked run now, and this baseline predates that file.
   writeFileSync(join(campaignPath, "journal.jsonl"), FIXTURE.journal.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
   for (const [runId, events] of Object.entries(FIXTURE.runs)) {
     mkdirSync(join(cwd, ".runs", runId), { recursive: true });

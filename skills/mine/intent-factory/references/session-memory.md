@@ -90,8 +90,8 @@ automatically."
 2. If the target repo's `AGENTS.md` carries a intent-factory signal block, the
    work has a durable layer: read `.runs/<campaign>/HANDOFF.md` for the
    campaign state, re-attach this session (`campaign attach`), and continue
-   the run or `supervise` it. The session handoff only covers what is not
-   yet in the campaign.
+   or resume the run. The session handoff only covers what is not yet in the
+   campaign.
 3. Verify state before trusting it: git status/log, run directories, open
    processes. A handoff is a memory, not the truth.
 4. Answer open questions only if the user already answered them; otherwise

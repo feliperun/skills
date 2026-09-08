@@ -102,17 +102,14 @@ Claude, settle the Codex intent, export and verify the capsule, and start a new
 Claude session from that capsule; the reverse handoff follows the same rule.
 No handoff is valid from an executing or unknown-effect checkpoint.
 
-Notifications are controller-only by construction: only the controller and
-supervisor code paths can enqueue bounded human-channel events into the
-campaign outbox and drain them through the configured generic executable; the
-provider protocol carries no notification surface, and live preflight probes
-strip the notification executable from their environment. Progress never
-wakes the control session. Ambient status and system/Ford notifications are
-for the human; the session is involved only by `requiresUser: true`, and
-`campaign sync` is always user initiated.
-Human-facing feedback — the ambient status line, system/Ford notifications,
-and the generic notify transport — is documented with its channels and
-boundary in [feedback.md](feedback.md).
+Notifications are controller-only by construction: on `node.terminal`,
+`run.terminal` and `attention` the controller calls the executable named by
+`INTENT_FACTORY_NOTIFY_BIN` and appends a receipt to the run's `notify.jsonl`;
+the provider protocol carries no notification surface, and live preflight
+probes strip the notification executable from their environment. Progress
+never notifies. `campaign sync` is always user initiated, and a persistent
+`campaign watch --wake` is the only channel that wakes the orchestrator
+between syncs. Details: [operations.md](operations.md).
 
 Per-node token budgets are cumulative weighted input budgets, not context-window
 limits. New contracts require a versioned, reproducible budget profile and
@@ -130,8 +127,8 @@ the public contract must not depend on them.
 ## Workflow
 
 1. Read [contract.md](contract.md). For the durable campaign coordinator, use
-   the [campaign autonomy reference](campaign-autonomy.md) for the plan schema,
-   transition table, safety boundary, notifications, and operational commands.
+   [operations.md](operations.md) for the journal, notify, and operational
+   commands.
 2. Establish the durable campaign before inspecting or launching work. Discover
    the active campaign; when more than one exists, stop instead of guessing.
    Initialize a new one only for a new objective, read its `HANDOFF.md`, and
@@ -262,15 +259,16 @@ the public contract must not depend on them.
     material events in commentary before the single status read:
 
     ```bash
-    node <skill-dir>/scripts/runner.mjs campaign watch <campaign-id> --cwd <repo> --cursor session-<session-id>
+    node <skill-dir>/scripts/runner.mjs campaign sync <campaign-id> --cwd <repo> --session-id <session-id>
     ```
 
     `campaign sync <campaign-id> --cwd <repo> --session-id <session-id>` is the
     user-pull read: it attaches once per day when needed and prints the status
-    header, a heartbeat liveness line, and unseen events under an 8,000-byte
-    ceiling without ever moving the cursor. `campaign ack <campaign-id> --cwd
-    <repo> --session-id <session-id> --event-id <event-id>` is the only cursor
-    writer and advances the session cursor to the retained event id.
+    header, the newest linked run's `status.json` summary, and unseen journal
+    events under an 8,000-byte ceiling without ever moving the cursor. `campaign
+    ack <campaign-id> --cwd <repo> --session-id <session-id> --event-id
+    <event-id>` is the only cursor writer and advances the session cursor to the
+    retained journal event id.
 
     This is incremental pull triggered by reinvocation, not unsolicited push
     into an idle chat. True proactive delivery requires a separately configured
@@ -427,7 +425,7 @@ changes provider or account implicitly. Failover is used only for
 provider-reported exhaustion: a budget, scope, authority, permission, or
 cancellation stop becomes attention instead. Any failover changes the runtime
 definition fingerprint, so it rotates to a fresh session rather than reusing a
-continuation. See the [transition table](campaign-autonomy.md) for the exact
+continuation. See `scripts/backoff.mjs`'s `classifyTransition` for the exact
 classification rows.
 
 ## Gates
@@ -479,7 +477,7 @@ bounded, self-contained retry is preferable to repeating upstream research.
 serves a read-only local dashboard on `127.0.0.1` for the humans watching a
 campaign: campaign list with per-node state strips, the active campaign's
 detail (next action, decisions, intents, outcomes, token ledger per epoch,
-notification outbox) and a live feed of journal entries and node transitions,
+notify.jsonl receipts) and a live feed of journal entries and node transitions,
 refreshed every 2 seconds. It only ever reads `.runs/`, binds to localhost, and
 never writes campaign state — ambient observation only, per the pull-only
 liveness rule.

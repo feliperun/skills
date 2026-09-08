@@ -88,7 +88,7 @@ import {
   reachableRuntimes,
 } from "./env-preflight.mjs";
 import { composeAssignments, discoverRuntimes, exhaustedUntilOf } from "./runtime-discovery.mjs";
-import { renderReportJson, renderStatusJson, statusNote } from "./render.mjs";
+import { renderReportJson, renderStatusJson, statusNote, writeStatusArtifacts } from "./render.mjs";
 import {
   captureSourceIdentity,
   validateEvent,
@@ -124,7 +124,7 @@ import {
 import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "./scope-findings.mjs";
 import { finalVerificationCommands } from "./final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
-import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
+import { campaignIdOf, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { contractCli, validateContractFile } from "./contract-cli.mjs";
 import {
@@ -133,15 +133,8 @@ import {
   planResumeRetry,
   renderPreviousAttemptSection,
 } from "./retry.mjs";
-import { campaignIdOf } from "./campaign-autonomy.mjs";
 import { bootstrapFailureMatchesChild, bootstrapMatchesChild, sameProcessStartToken, validBootstrapNonce } from "./lease-liveness.mjs";
-import {
-  CAMPAIGN_PROGRESS_TYPE,
-  notifyCampaign,
-  terminalErrorCode,
-} from "./outbox.mjs";
-import { projectEvent } from "./events.mjs";
-import { recordLiveness } from "./heartbeat.mjs";
+import { NotifyQueue } from "./notify/index.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./metrics.mjs";
 import {
   attemptWorktreePath,
@@ -800,45 +793,6 @@ function boundedChars(value, maxChars) {
 }
 
 /**
- * @param {string|null} left
- * @param {string} right
- * @returns {string}
- */
-function newestIso(left, right) {
-  return left === null || right > left ? right : left;
-}
-
-/**
- * The node whose liveness is reported: the running node when one exists, else
- * the most recently updated node in contract order. Null only when the
- * contract has no nodes.
- *
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @returns {NodeSnapshot|null}
- */
-function activeLivenessNode(contract, states) {
-  /** @type {NodeSnapshot[]} */
-  const ordered = [];
-  for (const node of contract.nodes) {
-    const state = states.get(node.id);
-    if (state !== undefined) ordered.push(state);
-  }
-  const running = ordered.find((state) => state.status === "running");
-  if (running) return running;
-  /** @type {NodeSnapshot|null} */
-  let newest = null;
-  for (const state of ordered) {
-    if (newest === null) {
-      newest = state;
-      continue;
-    }
-    if (state.updatedAt > newest.updatedAt) newest = state;
-  }
-  return newest;
-}
-
-/**
  * Derive the run-level liveness state from the node snapshots alone.
  * A run awaiting a provider backoff is persisted as a pending node whose
  * routing override carries a future backoffUntil, so that shape - and only
@@ -862,104 +816,61 @@ export function livenessState(states) {
 }
 
 /**
- * Newest material transition time per node, keyed by run dir. transition() is
- * the only funnel that changes a node's status or phase, and it stamps
- * updatedAt with the transition time; invocation persistence and live provider
- * updates overwrite state.updatedAt later without any status or phase change,
- * so the raw updatedAt can no longer be read as progress. This map keeps the
- * last transition time for every node this controller process observed and is
- * cleared once a run is fully terminal.
- *
- * @type {Map<string, Map<string, string>>}
+ * One notify queue per run, so retries and the notify.jsonl receipt log stay
+ * scoped to the run that owns them across the whole controller lifetime.
+ * @type {Map<string, NotifyQueue>}
  */
-const livenessTransitionAtByRun = new Map();
-/** @type {Map<string, string>} */
-const livenessProgressByRun = new Map();
+const notifyQueuesByRun = new Map();
 
-/**
- * Newest observed progress timestamp: every node's progress.lastProgressAt
- * plus the transition time of every node whose status or phase changed while
- * this controller process observed the run, never the current time. Falls
- * back to the run startedAt.
- *
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} runDir
- * @returns {string}
- */
-function lastLivenessProgressAt(states, runDir) {
-  let newest = null;
-  const transitionAt = livenessTransitionAtByRun.get(runDir);
-  for (const state of states.values()) {
-    const progress = /** @type {{lastProgressAt?: unknown}|null|undefined} */ (state.progress);
-    if (progress && typeof progress.lastProgressAt === "string") newest = newestIso(newest, progress.lastProgressAt);
-    const materialAt = transitionAt?.get(state.id);
-    if (typeof materialAt === "string") newest = newestIso(newest, materialAt);
+/** @param {string} runDir @returns {NotifyQueue} */
+function notifyQueueFor(runDir) {
+  let queue = notifyQueuesByRun.get(runDir);
+  if (!queue) {
+    queue = new NotifyQueue({ runDir });
+    notifyQueuesByRun.set(runDir, queue);
   }
-  if (newest !== null) return newest;
-  try {
-    const metadata = /** @type {{startedAt?: unknown}} */ (readJson(join(runDir, "run.json")));
-    if (typeof metadata.startedAt === "string") return metadata.startedAt;
-  } catch (error) {
-    // run.json not existing yet (a run still bootstrapping) is expected; a
-    // metadata file that exists but will not parse is a defect worth surfacing.
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-  return "1970-01-01T00:00:00.000Z";
+  return queue;
 }
 
 /**
- * Append one derived liveness fact and refresh the campaign heartbeat. A
- * failure only writes one stderr warning: observability never stops the
- * controller.
+ * The projector error code of a terminal node event. A `blocked_context`
+ * worker result is persisted by the runner as error code `context_missing`;
+ * it is classified as the blocking question it is, so the notify template
+ * carries the worker's own terminal status code.
  *
- * @param {{path: string}} campaign
- * @param {string} runDir
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @param {{attention?: string|null}} [options]
+ * @param {NodeSnapshot} state
+ * @returns {string|null}
  */
-function recordRunLiveness(campaign, runDir, contract, states, { attention: attentionOption } = {}) {
-  try {
-    const nodes = contract.nodes;
-    const active = activeLivenessNode(contract, states);
-    let attention = attentionOption || null;
-    const currentProgress = lastLivenessProgressAt(states, runDir);
-    const previousMax = livenessProgressByRun.get(runDir);
-    const observed = previousMax === undefined ? currentProgress : newestIso(currentProgress, previousMax);
-    livenessProgressByRun.set(runDir, observed);
-    /** @type {import("./heartbeat.mjs").LivenessFact} */
-    const fact = {
-      type: "liveness",
-      eventId: randomUUID(),
-      at: new Date().toISOString(),
-      campaignId: basename(campaign.path),
-      runId: basename(runDir),
-      nodeId: active?.id ?? null,
-      phase: active ? active.phase : contract.id,
-      checkpointsDone: nodes.filter((node) => states.get(node.id)?.status === "done").length,
-      checkpointsTotal: nodes.length,
-      runtime: active?.runtime?.id ?? null,
-      state: livenessState(states),
-      lastProgressAt: observed,
-      attention,
-    };
-    recordLiveness(campaign.path, fact);
-  } catch (error) {
-    process.stderr.write(`[warn] liveness record failed: ${errorMessage(error)}\n`);
-  }
+function terminalErrorCode(state) {
+  const result = state.result && typeof state.result === "object" ? /** @type {{status?: unknown}} */ (state.result) : {};
+  if (result.status === "blocked_context") return "blocked_context";
+  const error = state.error && typeof state.error === "object" ? /** @type {{code?: unknown}} */ (state.error) : {};
+  return typeof error.code === "string" && error.code ? error.code : null;
 }
 
 /**
- * Release the per-run liveness memory once a controller finished driving the
- * run. Clearing happens only after the terminal liveness facts are recorded,
- * never before the final record, so the last fact still folds the terminal
- * transitions.
+ * Whether `notify.jsonl` already carries a receipt for this exact logical
+ * event. A resumed controller starts a fresh in-memory notify queue, so
+ * without this durable check it would re-notify every node that was already
+ * terminal before the resume; the durable log is the only thing that
+ * survives the process boundary.
  *
  * @param {string} runDir
+ * @param {string} dedupeKey
+ * @returns {boolean}
  */
-function clearRunLivenessMemory(runDir) {
-  livenessTransitionAtByRun.delete(runDir);
-  livenessProgressByRun.delete(runDir);
+function alreadyNotified(runDir, dedupeKey) {
+  const path = join(runDir, "notify.jsonl");
+  if (!existsSync(path)) return false;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      if (JSON.parse(line).dedupeKey === dedupeKey) return true;
+    } catch {
+      // A torn trailing line was never a committed receipt.
+    }
+  }
+  return false;
 }
 
 /**
@@ -1558,7 +1469,7 @@ export async function driveRun(contract, runDir, states, campaign, lock, sourceI
     const fingerprint = statesFingerprint(states);
     if (!force && fingerprint === statusFingerprint) return;
     statusFingerprint = fingerprint;
-    render(runDir, contract, states, renderLock);
+    render(runDir, runsDir, contract, states, renderLock);
   };
   let handoffFingerprint = statesFingerprint(states);
   const renderHandoffIfChanged = () => {
@@ -1567,70 +1478,32 @@ export async function driveRun(contract, runDir, states, campaign, lock, sourceI
     handoffFingerprint = fingerprint;
     renderCampaignHandoffSafely(campaign, runsDir, runDir);
   };
-  // Material progress is per node and per state, never per poll: a node whose
-  // status, phase, attempt, revision, or runtime did not change produces no
-  // campaign.progress event, so heartbeat counters and repeated idle passes
-  // stay silent. Terminal states found at take-over (e.g. on resume) are not
-  // seeded so their first pass still reports them.
-  /** @type {Map<string, string>} */
-  const progressFingerprints = new Map(
-    [...states.values()]
-      .filter((state) => !TERMINAL.has(state.status))
-      .map((state) => [state.id, nodeMaterialFingerprint(state)]),
-  );
+  // Progress never notifies (TECH-SPEC lean, rule 6): only a node reaching a
+  // terminal state wakes the notify queue. status.json (written every render)
+  // is the progress surface now.
+  const notifyQueue = notifyQueueFor(runDir);
   /** @type {string|null} */
   let notificationFingerprint = null;
   const notifyStateChanges = async () => {
-    for (const state of states.values()) {
-      const fingerprint = nodeMaterialFingerprint(state);
-      if (progressFingerprints.get(state.id) === fingerprint) continue;
-      progressFingerprints.set(state.id, fingerprint);
-      const attempt = state.attempt ?? 0;
-      const revisions = state.revisions ?? 0;
-      const runtime = state.runtime?.id ?? null;
-      const runId = basename(runDir);
-      const progressKey = `${runId}:${state.id}:${state.status}:${state.phase}:${attempt}:${revisions}:${runtime ?? ""}`;
-      await notifyCampaign(
-        campaign.path,
-        projectEvent({
-          type: CAMPAIGN_PROGRESS_TYPE,
-          campaignId: campaign.campaign.id,
-          runId,
-          nodeId: state.id,
-          counters: { attempt, revisions },
-          identifiers: { runtimeId: runtime },
-          data: { runId, nodeId: state.id, status: state.status, phase: state.phase, attempt, revisions, runtime },
-          key: progressKey,
-        }),
-        progressKey,
-        `${runId}:${state.id}`,
-      );
-      recordRunLiveness(campaign, runDir, contract, states);
-    }
+    await notifyQueue.pump();
     const fingerprint = statesFingerprint(states);
     if (fingerprint === notificationFingerprint) return;
     notificationFingerprint = fingerprint;
     for (const state of states.values()) {
       if (!TERMINAL.has(state.status)) continue;
       const runId = basename(runDir);
-      const terminalKey = `${runId}:${state.id}:${state.status}:${state.attempt}:${state.revisions}`;
-      // This projection happens before the campaign supervisor evaluates its
-      // configured failover routes, so no remaining-edge fact is asserted:
-      // raw provider-class codes never carry requiresUser here.
-      await notifyCampaign(
-        campaign.path,
-        projectEvent({
-          type: "node.terminal",
-          campaignId: campaign.campaign.id,
-          runId,
-          nodeId: state.id,
-          counters: { attempt: state.attempt ?? 0, revisions: state.revisions ?? 0 },
-          identifiers: { errorCode: terminalErrorCode(state) },
-          data: { runId, nodeId: state.id, status: state.status },
-          key: terminalKey,
-        }),
-        terminalKey,
-      );
+      const dedupeKey = `node.terminal:${runId}:${state.id}:${state.status}:${state.attempt ?? 0}:${state.revisions ?? 0}`;
+      if (alreadyNotified(runDir, dedupeKey)) continue;
+      await notifyQueue.enqueue({
+        type: "node.terminal",
+        campaignId: campaign.campaign.id,
+        runId,
+        nodeId: state.id,
+        status: state.status,
+        attempt: state.attempt ?? 0,
+        errorCode: terminalErrorCode(state),
+        dedupeKey,
+      });
     }
   };
 
@@ -1735,7 +1608,7 @@ export async function driveRun(contract, runDir, states, campaign, lock, sourceI
   } catch (error) {
     if (!(error instanceof LockLostError)) throw error;
     await Promise.all([...running.values()].map((job) => terminateProcess(job)));
-    clearRunLivenessMemory(runDir);
+    notifyQueuesByRun.delete(runDir);
     return { runDir, states, ok: false, error };
   } finally {
     process.removeListener("SIGINT", cancel);
@@ -1747,20 +1620,22 @@ export async function driveRun(contract, runDir, states, campaign, lock, sourceI
   renderCampaignHandoffSafely(campaign, runsDir, runDir);
   writeFindingsArtifact(runDir, contract, states);
   const failed = [...states.values()].filter((state) => state.status !== "done");
-  recordRunLiveness(campaign, runDir, contract, states);
-  clearRunLivenessMemory(runDir);
-  await notifyCampaign(
-    campaign.path,
-    projectEvent({
+  const runId = basename(runDir);
+  const runDedupeKey = `run.terminal:${runId}:${failed.length ? "attention" : "done"}`;
+  if (!alreadyNotified(runDir, runDedupeKey)) {
+    await notifyQueue.enqueue({
       type: "run.terminal",
       campaignId: campaign.campaign.id,
-      runId: basename(runDir),
-      counters: { done: states.size - failed.length, total: states.size },
-      data: { runId: basename(runDir), done: states.size - failed.length, total: states.size, needsAttention: failed.length },
-      key: `${basename(runDir)}:${failed.length ? "attention" : "done"}`,
-    }),
-    `${basename(runDir)}:${failed.length ? "attention" : "done"}`,
-  );
+      runId,
+      done: states.size - failed.length,
+      total: states.size,
+      dedupeKey: runDedupeKey,
+    });
+  }
+  // No more ticks will run to retry a failed delivery: exhaust the bounded
+  // retry budget here, in real time, before the controller returns.
+  await notifyQueue.drain();
+  notifyQueuesByRun.delete(runDir);
   process.stdout.write(`[run] ${contract.id} ${failed.length ? `failed · ${runDir} · findings.json` : `done · ${runDir}`}\n`);
   if ([...states.values()].some((state) => state.usage)) {
     const report = renderFinalReport(runDir, contract, states);
@@ -4018,26 +3893,24 @@ async function applyInvalidWorkerResult(contract, node, state, runDir, running, 
 }
 
 /**
- * Surface a node attention state on the campaign outbox.
+ * Surface a node attention state through the run's notify queue.
  * @param {string} campaignPath
  * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {string} code
  */
 async function raiseNodeAttention(campaignPath, runDir, state, code) {
-  await notifyCampaign(
-    campaignPath,
-    projectEvent({
-      type: "run.attention",
-      campaignId: campaignIdOf(campaignPath),
-      runId: basename(runDir),
-      nodeId: state.id,
-      identifiers: { errorCode: code },
-      data: { runId: basename(runDir), nodeId: state.id, code },
-      key: `${basename(runDir)}:${state.id}:${code}`,
-    }),
-    `${basename(runDir)}:${state.id}:${code}`,
-  );
+  const runId = basename(runDir);
+  const dedupeKey = `attention:${runId}:${state.id}:${code}`;
+  if (alreadyNotified(runDir, dedupeKey)) return;
+  await notifyQueueFor(runDir).enqueue({
+    type: "attention",
+    campaignId: campaignIdOf(campaignPath),
+    runId,
+    nodeId: state.id,
+    errorCode: code,
+    dedupeKey,
+  });
 }
 
 /**
@@ -4196,12 +4069,6 @@ function transition(runDir, state, status, patch = {}, lock = null) {
   const from = state.status;
   const updatedAt = new Date().toISOString();
   Object.assign(state, patch, { status, updatedAt });
-  let transitionAt = livenessTransitionAtByRun.get(runDir);
-  if (!transitionAt) {
-    transitionAt = new Map();
-    livenessTransitionAtByRun.set(runDir, transitionAt);
-  }
-  transitionAt.set(state.id, updatedAt);
   writeNode(runDir, state, lock);
   if (status === "done" && process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT === "after-state") {
     throw new Error("integration interrupted after node state write");
@@ -4328,13 +4195,15 @@ function writeNode(runDir, state, lock = null) {
 
 /**
  * @param {string} runDir
+ * @param {string} runsDir
  * @param {ValidatedContract} contract
  * @param {Map<string, NodeSnapshot>} states
  * @param {LockHandle|null} [lock]
  */
-function render(runDir, contract, states, lock = null) {
+function render(runDir, runsDir, contract, states, lock = null) {
   lock?.assert();
   writeTextAtomic(join(runDir, "STATUS.md"), renderFinalStatus(runDir, contract, states));
+  writeStatusArtifacts(runDir, runsDir, contract, states);
 }
 
 const STATUS_MARK = {
@@ -5226,18 +5095,6 @@ function addCost(left, right) {
  */
 function statesFingerprint(states) {
   return [...states.values()].map((state) => `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}`).join("|");
-}
-
-/**
- * Material progress identity of one node: status, phase, attempt, revision,
- * and runtime. Heartbeat counters and other advisory fields are excluded, so
- * idle polls and live heartbeats never look like progress.
- *
- * @param {NodeSnapshot} state
- * @returns {string}
- */
-function nodeMaterialFingerprint(state) {
-  return `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}:${state.runtime?.id ?? ""}`;
 }
 
 /**
