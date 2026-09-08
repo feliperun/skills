@@ -50,8 +50,8 @@ export async function waitForValue(read, timeoutMs = 5_000, intervalMs = 25) {
  * seal and verify, exactly as an interrupted run would.
  *
  * @param {string} runDir
- * @param {{id: string, attempt: number, worktree?: {status?: string, branch?: string}|null}} state
- * @returns {{status?: string, branch?: string}|null|undefined} the worktree to persist on the node
+ * @param {{id: string, attempt: number, worktree?: import("../scripts/contract.mjs").WorktreeState|null}} state
+ * @returns {import("../scripts/contract.mjs").WorktreeState|null|undefined} the worktree to persist on the node
  */
 export function ensureAttemptWorktree(runDir, state) {
   if (state.worktree?.status !== "removed" || !state.worktree.branch) return state.worktree;

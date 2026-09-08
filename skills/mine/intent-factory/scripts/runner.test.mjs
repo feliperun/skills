@@ -2832,7 +2832,7 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   }));
   const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   const nodePath = join(runDir, "nodes", "build.json");
-  /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string}>}} */
+  /** @type {{id: string, attempt: number, invocations: Array<{id: string, phase: string, stdoutPath: string}>, worktree?: import("./contract.mjs").WorktreeState|null}} */
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
   const judgeInvocation = state.invocations.at(-1);
   assert.ok(judgeInvocation, "persisted judge invocation exists");
@@ -3415,7 +3415,7 @@ test("ledger enforcement on resume lets a done budgeted worker reach its judge",
   /** @type {Array<[id: string, phase: string, keepResult: boolean]>} */
   const plans = [["gated", "judge", true], ["revision", "worker", true], ["sibling", "worker", false]];
   for (const [id, phase, keepResult] of plans) {
-    /** @type {{budgetState?: {currentCapTokens?: number}|null, invocations?: Array<{id: string, phase: string, usage?: {inputTokens?: number, outputTokens?: number, cacheReadInputTokens?: number}|null}>|null, result?: unknown|null}} */
+    /** @type {{id: string, attempt: number, budgetState?: {currentCapTokens?: number}|null, invocations?: Array<{id: string, phase: string, usage?: {inputTokens?: number, outputTokens?: number, cacheReadInputTokens?: number}|null}>|null, result?: unknown|null, worktree?: import("./contract.mjs").WorktreeState|null}} */
     const persisted = JSON.parse(readFileSync(persistedPath(id), "utf8"));
     const cap = Math.max(1, Math.ceil(persisted.budgetState?.currentCapTokens ?? 500));
     const worker = (persisted.invocations ?? []).find((invocation) => invocation.phase === "worker");
