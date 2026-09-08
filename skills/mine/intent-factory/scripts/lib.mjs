@@ -1,5 +1,6 @@
 import { validateContract, routeRuntime } from "./contract.mjs";
 import { normalizeProviderResult, providerCommand } from "./drivers/index.mjs";
+export { composeAssignments, discoverRuntimes, exhaustedUntilOf, nextSameTierRuntime, normalizeProviderAvailability } from "./runtime-discovery.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { scopeFindingsPromptSection } from "./scope-findings.mjs";
 export { runProcessAlive } from "./supervisor.mjs";

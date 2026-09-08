@@ -20,6 +20,7 @@ import {
   resolveVendor,
   validateCapabilityRequirements,
 } from "./drivers/index.mjs";
+import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "./runtime-discovery.mjs";
 
 export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index.mjs";
 
@@ -38,7 +39,7 @@ const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
   "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
   "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities", "costRank",
-  "fallback", "vendor",
+  "fallback", "vendor", "tier",
 ]);
 const GATE_FIELDS = new Set(["enabled", "runtime", "review", "failOn", "maxRevisions", "requiredCapabilities"]);
 const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
@@ -53,7 +54,7 @@ const CAPABILITY_FIELDS = new Set([
 ]);
 const GATE_RESULT_FIELDS = new Set(["verdict", "maxSeverity", "summary", "findings"]);
 const FINDING_FIELDS = new Set(["severity", "description", "evidence"]);
-const ERROR_FIELDS = new Set(["code", "message"]);
+const ERROR_FIELDS = new Set(["code", "message", "exhaustedUntil"]);
 const USAGE_FIELDS = new Set(["inputTokens", "outputTokens", "cacheReadInputTokens"]);
 const MAX_PROGRESS_SEC = 86_400;
 const MAX_DRY_HEARTBEATS = 1_000;
@@ -69,7 +70,7 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{mode: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], readFiles: string[], writeFiles?: string[], writeRoots?: string[], symbols: string[], decisions: string[], nonGoals: string[], verification: VerificationCommand[]}} TaskPacket */
 
-/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number, fallback?: string, vendor: string}} ValidatedRuntime */
+/** @typedef {{driver: "claude"|"codex"|"agy"|"glm"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number, fallback?: string, vendor: string, tier?: number|string}} ValidatedRuntime */
 
 /** @typedef {{enabled: boolean, review?: ("none"|"advisory"|"blocking"), runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
@@ -77,13 +78,13 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
 /** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
 
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker: string, judge: string}, nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker?: string, judge?: string}, nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
 /** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
 /** @typedef {{severity: "minor"|"major"|"critical", description: string, evidence: string}} Finding */
 /** @typedef {{verdict: "pass"|"fail"|"invalid_judge_output", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: Finding[]}} GateResult */
-/** @typedef {{code: string, message: string}} SnapshotError */
+/** @typedef {{code: string, message: string, exhaustedUntil?: string|null}} SnapshotError */
 /** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} Usage */
 /** @typedef {ValidatedRuntime & {id: string, capabilities: import("./drivers/index.mjs").DriverCapabilities}} RuntimeSnapshot */
 /** @typedef {import("./supervisor.mjs").Invocation} Invocation */
@@ -97,7 +98,9 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{unexpectedPaths: string[]}} ScopeFindings */
 /** @typedef {{at: string, role: "worker"|"judge", runtime: string, nextRuntime?: string, rule?: number, ruleIndex?: number, revision?: number, hop?: number, status?: NodeStatus, errorCode?: string, backoffSec?: number, backoffUntil?: string, usage?: Usage, costUsd?: number|null}} RoutingHistoryEntry */
 /** @typedef {{at: string, role: "worker"|"judge", runtime: string, nextRuntime?: string, rule?: number, ruleIndex?: number, revision?: number, hop?: number, reason: string, backoffSec?: number, backoffUntil?: string, usage?: Usage, costUsd?: number|null}} RoutingOverride */
-/** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null}} RoutingState */
+/** @typedef {{worker: string, judge: string, composedWorker?: boolean, composedJudge?: boolean}} RuntimeAssignments */
+/** @typedef {{available: boolean, exhaustedUntil: string|null, reason: string}} RuntimeAvailability */
+/** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null, assignments?: RuntimeAssignments, availability?: Record<string, RuntimeAvailability>}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
 /** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null}} WorktreeState */
 /** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
@@ -142,7 +145,7 @@ export function validateContract(raw, contractPath, options = {}) {
     { kind: "contract", id: raw.id, campaignId: raw.campaignId },
   );
 
-  const rawRuntimes = /** @type {Record<string, JsonObject>} */ (raw.runtimes);
+  const rawRuntimes = /** @type {Record<string, JsonObject>} */ (raw.runtimes ?? DISCOVERY_RUNTIME_DEFINITIONS);
   if (!rawRuntimes || typeof rawRuntimes !== "object" || Array.isArray(rawRuntimes)) {
     throw new TypeError("contract.runtimes must be an object");
   }
@@ -156,13 +159,13 @@ export function validateContract(raw, contractPath, options = {}) {
     requireRuntime(runtimes, runtime.fallback, `runtime ${id}.fallback`);
   }
 
-  const defaults = /** @type {JsonObject} */ (raw.runtimeDefaults);
+  const defaults = /** @type {JsonObject} */ (raw.runtimeDefaults ?? {});
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
-    throw new TypeError("contract.runtimeDefaults is required");
+    throw new TypeError("contract.runtimeDefaults must be an object when provided");
   }
   rejectUnknown(defaults, DEFAULTS_FIELDS, "contract.runtimeDefaults");
-  requireRuntime(runtimes, defaults.worker, "runtimeDefaults.worker");
-  requireRuntime(runtimes, defaults.judge, "runtimeDefaults.judge");
+  if (defaults.worker !== undefined) requireRuntime(runtimes, defaults.worker, "runtimeDefaults.worker");
+  if (defaults.judge !== undefined) requireRuntime(runtimes, defaults.judge, "runtimeDefaults.judge");
 
   if (!Array.isArray(raw.nodes) || raw.nodes.length === 0) {
     throw new TypeError("contract.nodes must be a non-empty array");
@@ -269,10 +272,11 @@ export function validateContract(raw, contractPath, options = {}) {
   // gate, so this is rejected outright rather than left to reach dispatch.
   for (const [index, node] of nodes.entries()) {
     if (!node.gate.enabled) continue;
-    const workerRuntimeId = /** @type {string} */ (node.runtime ?? defaults.worker);
-    const judgeRuntimeId = /** @type {string} */ (node.gate.runtime ?? defaults.judge);
-    const workerVendor = runtimes[workerRuntimeId].vendor;
-    const judgeVendor = runtimes[judgeRuntimeId].vendor;
+    const workerRuntimeId = node.runtime ?? defaults.worker;
+    const judgeRuntimeId = node.gate.runtime ?? defaults.judge;
+    if (!workerRuntimeId || !judgeRuntimeId) continue;
+    const workerVendor = runtimes[/** @type {string} */ (workerRuntimeId)].vendor;
+    const judgeVendor = runtimes[/** @type {string} */ (judgeRuntimeId)].vendor;
     if (workerVendor === judgeVendor) {
       throw new TypeError(`nodes[${index}] worker runtime ${workerRuntimeId} and judge runtime ${judgeRuntimeId} share vendor ${workerVendor}`);
     }
@@ -286,7 +290,7 @@ export function validateContract(raw, contractPath, options = {}) {
     sourceIdentity,
     cwd,
     runtimes,
-    runtimeDefaults: /** @type {{worker: string, judge: string}} */ (defaults),
+    runtimeDefaults: /** @type {{worker?: string, judge?: string}} */ (defaults),
     nodes,
     maxParallel: validateMaxParallel(raw.maxParallel ?? 1),
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
@@ -306,7 +310,7 @@ export function validateContract(raw, contractPath, options = {}) {
 }
 
 /** @typedef {{id: string, type?: string, runtime?: string, gate: {runtime?: string}, status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RoutableNode */
-/** @typedef {{status?: NodeStatus, errorCode?: string, currentRuntime?: string}} RoutingEvent */
+/** @typedef {{status?: NodeStatus, errorCode?: string, currentRuntime?: string, assignment?: string, availability?: Record<string, RuntimeAvailability>}} RoutingEvent */
 /**
  * Resolve which runtime is currently assigned to a role. There is no dynamic
  * rerouting here — rerouting is owned entirely by `planRoute` (backoff.mjs),
@@ -317,11 +321,14 @@ export function validateContract(raw, contractPath, options = {}) {
 export function routeRuntime(contract, node, role = "worker", event = {}) {
   if (role !== "worker" && role !== "judge") throw new TypeError("route role must be worker or judge");
   const initialRuntimeId = role === "judge"
-    ? node.gate.runtime ?? contract.runtimeDefaults.judge
-    : node.runtime ?? contract.runtimeDefaults.worker;
-  const runtimeId = event.currentRuntime ?? node.currentRuntime ?? initialRuntimeId;
+    ? node.gate.runtime ?? contract.runtimeDefaults?.judge
+    : node.runtime ?? contract.runtimeDefaults?.worker;
+  const composed = !initialRuntimeId && event.availability
+    ? composeAssignments(contract, event.availability)[node.id]?.[role]
+    : undefined;
+  const runtimeId = event.currentRuntime ?? node.currentRuntime ?? event.assignment ?? composed ?? initialRuntimeId;
   requireRuntime(contract.runtimes, runtimeId, "routing current runtime");
-  const runtime = contract.runtimes[runtimeId];
+  const runtime = contract.runtimes[/** @type {string} */ (runtimeId)];
   return { id: runtimeId, ...runtime, capabilities: driverCapabilities(runtime) };
 }
 
@@ -532,6 +539,10 @@ function validateRuntimeValues(runtime, label, executableRequired) {
   if (runtime.versionArgs !== undefined) requireStringArray(runtime.versionArgs, `${label}.versionArgs`);
   if (runtime.maxArgvPromptBytes !== undefined) positiveInteger(runtime.maxArgvPromptBytes, `${label}.maxArgvPromptBytes`);
   if (runtime.costRank !== undefined) nonNegativeNumber(runtime.costRank, `${label}.costRank`);
+  if (runtime.tier !== undefined && !(
+    (typeof runtime.tier === "number" && Number.isInteger(runtime.tier) && runtime.tier >= 0)
+    || (typeof runtime.tier === "string" && runtime.tier.trim())
+  )) throw new TypeError(`${label}.tier must be a non-negative integer or non-empty string`);
   if (runtime.fallback !== undefined) requireString(runtime.fallback, `${label}.fallback`);
   if (runtime.vendor !== undefined) requireString(runtime.vendor, `${label}.vendor`);
   validateCapabilityRequirements(
@@ -1027,6 +1038,7 @@ function validateSnapshotError(value, label) {
   rejectUnknown(value, ERROR_FIELDS, label);
   requireString(value.code, `${label}.code`);
   requireString(value.message, `${label}.message`);
+  if (value.exhaustedUntil !== undefined && value.exhaustedUntil !== null) requireTimestamp(value.exhaustedUntil, `${label}.exhaustedUntil`);
 }
 
 /**
@@ -1045,7 +1057,7 @@ function validateUsage(value, label) {
  */
 function validateRoutingState(value, label) {
   assertObject(value, label);
-  rejectUnknown(value, new Set(["history", "currentOverride"]), label);
+  rejectUnknown(value, new Set(["history", "currentOverride", "assignments", "availability"]), label);
   if (!Array.isArray(value.history) || value.history.length > MAX_ROUTING_HISTORY) {
     throw new TypeError(`${label}.history must be an array with at most ${MAX_ROUTING_HISTORY} items`);
   }
@@ -1053,6 +1065,26 @@ function validateRoutingState(value, label) {
     validateRoutingEntry(entry, `${label}.history[${index}]`, false);
   }
   if (value.currentOverride !== null) validateRoutingEntry(value.currentOverride, `${label}.currentOverride`, true);
+  if (value.assignments !== undefined) {
+    assertObject(value.assignments, `${label}.assignments`);
+    rejectUnknown(value.assignments, new Set(["worker", "judge", "composedWorker", "composedJudge"]), `${label}.assignments`);
+    requireId(value.assignments.worker, `${label}.assignments.worker`);
+    requireId(value.assignments.judge, `${label}.assignments.judge`);
+    for (const key of ["composedWorker", "composedJudge"]) {
+      if (value.assignments[key] !== undefined && typeof value.assignments[key] !== "boolean") throw new TypeError(`${label}.assignments.${key} must be boolean`);
+    }
+  }
+  if (value.availability !== undefined) {
+    assertObject(value.availability, `${label}.availability`);
+    for (const [id, availability] of Object.entries(value.availability)) {
+      requireId(id, `${label}.availability runtime`);
+      assertObject(availability, `${label}.availability.${id}`);
+      rejectUnknown(availability, new Set(["available", "exhaustedUntil", "reason"]), `${label}.availability.${id}`);
+      if (typeof availability.available !== "boolean") throw new TypeError(`${label}.availability.${id}.available must be boolean`);
+      if (availability.exhaustedUntil !== undefined && availability.exhaustedUntil !== null) requireTimestamp(availability.exhaustedUntil, `${label}.availability.${id}.exhaustedUntil`);
+      requireString(availability.reason, `${label}.availability.${id}.reason`);
+    }
+  }
 }
 
 /**

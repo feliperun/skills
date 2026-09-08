@@ -406,6 +406,14 @@ Resolve a worker runtime in this order:
 
 Resolve judges from `nodes[].gate.runtime`, then `runtimeDefaults.judge`.
 
+Both `runtimes` and `runtimeDefaults` may be omitted. The factory then uses
+the installed-driver catalogue and composes omitted roles from available
+runtimes: the cheapest runtime works and the strongest runtime from a
+different vendor judges. The composed pair is persisted in
+`routing.assignments`; explicit node and default declarations are unchanged.
+If no admissible judge exists, assignment fails with the named
+`runtime_assignment_judge_unavailable` error.
+
 ### Vendor identity
 
 Vendor is a resolved property, never the driver name: `resolveVendor` in
@@ -535,8 +543,8 @@ no synthesized ordering over the rest of the contract — the reachable set out
 of a runtime is exactly itself and, if declared, its one `fallback`. Because a
 hop is bounded at one, a multi-runtime cycle is structurally impossible, and
 validation still rejects a self-loop (`fallback` naming the runtime itself).
-`costRank` remains optional on a runtime for reporting order only; it plays no
-part in routing.
+`tier` groups runtimes eligible for composed re-tiering; lower tiers are
+cheaper and higher tiers are stronger. `costRank` breaks ties within a tier.
 
 This one-hop reachable-state enumeration — a node's role, the runtime it
 started on, and the runtime named by that runtime's `fallback` — is what
@@ -560,6 +568,13 @@ vendor it is supposed to check.
 Both roles stay bounded by the existing guards — a runtime already attempted
 in the revision, or a hop past the one-hop cap, ends the node `exhausted`
 (worker) or `attention` (judge) instead of routing again.
+
+Composed assignments re-tier only within the current tier. A judge candidate
+must differ from the vendor of the worker runtime that actually ran. Explicit
+single-hop fallbacks take precedence; budget, scope, permission, and authority
+failures never switch providers. If no composed candidate remains, the node
+enters attention with `runtime_tier_exhausted` and preserves the provider's
+`exhaustedUntil` when one was announced.
 
 **Quota reset before an edge.** When the exhaustion envelope announces a reset
 instant (`resetAt`, at the envelope root or on its `error`), the controller

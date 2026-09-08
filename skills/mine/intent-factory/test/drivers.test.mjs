@@ -371,8 +371,8 @@ test("routes explicit, matching, and default runtimes", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-route-"));
   const path = writeContract(directory, fixture());
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(routeRuntime(contract, { id: "a", type: "frontend", gate: {} }).id, "opus");
-  assert.equal(routeRuntime(contract, { id: "b", type: "mechanic", gate: {} }).id, "flash");
+  assert.equal(routeRuntime(contract, { id: "a", type: "frontend", gate: {} }).id, "luna");
+  assert.equal(routeRuntime(contract, { id: "b", type: "mechanic", gate: {} }).id, "luna");
   assert.equal(routeRuntime(contract, { id: "c", type: "backend", gate: {} }).id, "luna");
   assert.equal(routeRuntime(contract, { id: "d", type: "backend", runtime: "opus", gate: {} }).id, "opus");
 });

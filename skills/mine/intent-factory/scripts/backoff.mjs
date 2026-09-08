@@ -14,6 +14,7 @@
  */
 import { nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { latestTimeoutSec, quotaResetSchedule } from "./supervisor.mjs";
+import { nextSameTierRuntime } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").ValidatedNode} ValidatedNode */
@@ -28,7 +29,10 @@ import { latestTimeoutSec, quotaResetSchedule } from "./supervisor.mjs";
  */
 export const NON_FAILOVER_CODES = new Set([
   "revision_cap", "verification_failed", "budget_exceeded", "wall_clock_timeout",
-  "progress_stalled", "cancellation", "unexpected_write",
+  "progress_stalled", "cancellation", "unexpected_write", "scope_violation",
+  "permission_denied", "permission_required", "authority_denied", "authority_required",
+  "authorization_required", "authentication_failed", "budget_attention", "cost_budget_exceeded",
+  "token_budget_exceeded", "rollout_budget_exhausted",
 ]);
 
 /** Network attempts on one runtime before the node gives up on it and hops. */
@@ -265,33 +269,45 @@ export function isRepairable(node, state) {
  * @param {string} current
  * @param {Transition} schedule
  * @param {number} [now] epoch ms the backoff window is measured from
- * @returns {{blocked: RouteError|null, nextRuntime: string, ruleIndex: number|undefined, revision: number, hop: number, backoffSec: number, backoffUntil: string}}
+ * @returns {{blocked: RouteError|null, nextRuntime: string, ruleIndex: number|undefined, revision: number, hop: number, backoffSec: number, backoffUntil: string, composed: boolean}}
  */
 export function planRoute(contract, node, state, role, error, current, schedule, now = Date.now()) {
   const revision = state.revisions ?? 0;
   const attempted = new Set((state.invocations ?? [])
     .filter((invocation) => invocation.phase === role && (invocation.revision === undefined || invocation.revision === revision))
     .map((invocation) => invocation.runtimeId)
-    .filter(Boolean));
+    .filter((id) => typeof id === "string"));
   // The runtime's own declared fallback is the only edge that exists: one
   // hop, never a chain over every other runtime in the contract.
-  const fallback = nextSynthesizedRuntime(contract, role, current, attempted);
+  const actualWorker = [...(state.invocations ?? [])].reverse().find((invocation) => invocation.phase === "worker")?.runtimeId;
+  const routing = state.routing?.assignments
+    ? { ...state.routing, assignments: { ...state.routing.assignments, ...(actualWorker ? { worker: actualWorker } : {}) } }
+    : state.routing ?? {};
+  const declaredFallback = contract.runtimes[current]?.fallback !== undefined;
+  const explicitFallbackUsed = (state.routing?.history ?? []).some((entry) =>
+    entry.role === role
+    && entry.nextRuntime
+    && contract.runtimes[entry.runtime]?.fallback === entry.nextRuntime);
+  const composedAssignment = role === "worker" ? state.routing?.assignments?.composedWorker === true : state.routing?.assignments?.composedJudge === true;
+  const dynamicComposed = composedAssignment && !declaredFallback && !explicitFallbackUsed;
+  const fallback = nextSynthesizedRuntime(contract, role, current, attempted)
+    ?? (dynamicComposed ? nextSameTierRuntime(contract, routing, role, current, attempted) : null);
   const hop = nextHop(state, role, revision, schedule);
   const nextRuntime = schedule.kind === "reset" ? current : fallback ?? current;
   const blocked = schedule.kind === "reset"
     ? null
     : fallback === null
-      ? { code: error.code, message: error.message }
+      ? { code: dynamicComposed ? "runtime_tier_exhausted" : error.code, message: dynamicComposed ? `no available runtime remains in tier ${String(contract.runtimes[current]?.tier ?? "unknown")} for ${role}` : error.message }
       : attempted.has(fallback)
         ? { code: "provider_failover_cycle", message: `runtime ${fallback} was already attempted in ${role} revision ${revision}` }
-        : hop > 1
+        : hop > 1 && !dynamicComposed
           ? { code: "provider_failover_hop_cap", message: "provider failover exceeded the one-hop cap" }
           : null;
   const backoffSec = schedule.kind === "reset"
     ? Math.max(0, (Date.parse(schedule.at) - now) / 1_000)
     : 0;
   const backoffUntil = schedule.kind === "reset" ? schedule.at : new Date(now + backoffSec * 1_000).toISOString();
-  return { blocked, nextRuntime, ruleIndex: undefined, revision, hop, backoffSec, backoffUntil };
+  return { blocked, nextRuntime, ruleIndex: undefined, revision, hop, backoffSec, backoffUntil, composed: composedAssignment };
 }
 
 /**

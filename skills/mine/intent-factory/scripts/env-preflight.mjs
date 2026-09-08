@@ -18,8 +18,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statfsSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, getDriver, probeRuntime } from "./drivers/index.mjs";
-import { addRuntimeRequirement, failoverTargets } from "./failover.mjs";
+import { addRuntimeRequirement, failoverTargets, runtimeSnapshot } from "./failover.mjs";
 import { routeRuntime, validateContract } from "./contract.mjs";
+import { DISCOVERY_RUNTIME_DEFINITIONS, discoverRuntimes } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").RuntimeSnapshot} RuntimeSnapshot */
@@ -214,15 +215,28 @@ export function reachableRuntimes(contract) {
   const runtimes = new Map();
   for (const node of contract.nodes) {
     for (const role of /** @type {("worker"|"judge")[]} */ (["worker", ...(node.gate.enabled ? ["judge"] : [])])) {
-      const runtime = routeRuntime(contract, node, role);
+      const explicit = role === "judge" ? node.gate.runtime ?? contract.runtimeDefaults?.judge : node.runtime ?? contract.runtimeDefaults?.worker;
+      const fallbackId = role === "worker"
+        ? Object.keys(contract.runtimes)[0]
+        : Object.entries(contract.runtimes).find(([, candidate]) => candidate.vendor !== contract.runtimes[Object.keys(contract.runtimes)[0]]?.vendor)?.[0]
+          ?? Object.keys(contract.runtimes)[0];
+      if (!fallbackId) throw new Error("runtime discovery catalogue is empty");
+      const runtime = explicit
+        ? /** @type {RuntimeSnapshot} */ (routeRuntime(contract, node, role))
+        : runtimeSnapshot(contract, fallbackId);
       const required = role === "judge"
         ? [runtime.requiredCapabilities, node.gate.requiredCapabilities, { structuredOutput: true }]
         : [runtime.requiredCapabilities, node.requiredCapabilities];
       const requiredCapabilitySets = required.filter((item) => item !== undefined);
       addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets);
-      const current = { node, role, runtimeId: runtime.id };
+      const current = { node, role, runtimeId: /** @type {string} */ (runtime.id) };
       for (const fallbackRuntime of failoverTargets(contract, current)) {
         addRuntimeRequirement(runtimes, fallbackRuntime, requiredCapabilitySets);
+      }
+      if (!explicit) {
+        for (const candidate of Object.keys(contract.runtimes)) {
+          addRuntimeRequirement(runtimes, runtimeSnapshot(contract, candidate), requiredCapabilitySets);
+        }
       }
     }
   }
@@ -243,7 +257,7 @@ const DRIVER_BIN_OVERRIDES = Object.freeze({
  * given) schema and driver versions.
  *
  * @param {string|undefined} contractPath
- * @param {{cwd?: string, json?: boolean}} values
+ * @param {{cwd?: string, json?: boolean, discover?: boolean}} values
  * @returns {Promise<boolean>}
  */
 export async function doctorCommand(contractPath, values) {
@@ -271,6 +285,8 @@ export async function doctorCommand(contractPath, values) {
   let routedRuntimes = new Map();
   /** @type {Record<string, string|null>} */
   const driverVersions = {};
+  /** @type {Record<string, import("./runtime-discovery.mjs").RuntimeAvailability>} */
+  let discovered = {};
   let dispatchCwd = repoDir;
   if (contractPath) {
     const absolute = resolve(contractPath);
@@ -298,6 +314,20 @@ export async function doctorCommand(contractPath, values) {
   } else {
     checks.push({ name: "contract", ok: true, detail: "no contract.json provided; skipping runtime probes" });
   }
+  if (values.discover === true) {
+    const discoveryRuntimes = contractPath
+      ? (() => {
+        try { return validateContract(JSON.parse(readFileSync(resolve(contractPath), "utf8")), resolve(contractPath)).runtimes; } catch { return {}; }
+      })()
+      : /** @type {Record<string, import("./contract.mjs").ValidatedRuntime>} */ (DISCOVERY_RUNTIME_DEFINITIONS);
+    discovered = await discoverRuntimes(discoveryRuntimes, { cwd: dispatchCwd });
+    const available = Object.values(discovered).filter((entry) => entry.available).length;
+    checks.push({
+      name: "runtime discovery",
+      ok: available > 0,
+      detail: Object.entries(discovered).map(([id, entry]) => `${id}: ${entry.available ? "available" : `unavailable (${entry.reason})`}${entry.exhaustedUntil ? ` until ${entry.exhaustedUntil}` : ""}`).join(" · ") || "no runtimes discovered",
+    });
+  }
   // A PATH-only check must not fail a runtime whose binary is supplied through
   // an explicit executable or a INTENT_FACTORY_*_BIN override; the driver probe above
   // already validated whatever the runtime actually resolves to.
@@ -318,7 +348,7 @@ export async function doctorCommand(contractPath, values) {
   }
   const ok = checks.every((check) => check.ok);
   if (values.json === true) {
-    process.stdout.write(`${JSON.stringify({ schemaVersion: 1, repo: repoDir, ok, checks }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ schemaVersion: 1, repo: repoDir, ok, checks, ...(values.discover === true ? { runtimes: discovered } : {}) }, null, 2)}\n`);
   } else {
     for (const check of checks) process.stdout.write(`[${check.ok ? "ok" : "fail"}] ${check.name} · ${check.detail}\n`);
   }

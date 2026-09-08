@@ -10,6 +10,7 @@
  * hop is bounded at one, a multi-runtime cycle is structurally impossible.
  */
 import { driverCapabilities } from "./drivers/index.mjs";
+import { nextSameTierRuntime } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").RuntimeSnapshot} RuntimeSnapshot */
@@ -98,10 +99,15 @@ export function nextHop(state, role, revision, schedule) {
  *
  * @param {ValidatedContract} contract
  * @param {{node: EdgeNode, role: "worker"|"judge", runtimeId: string}} current
+ * @param {{routing?: {assignments?: {worker?: string, judge?: string}, availability?: Record<string, {available: boolean, exhaustedUntil: string|null, reason: string}>}}|null} [state]
  * @returns {RuntimeSnapshot[]}
  */
-export function failoverTargets(contract, current) {
-  return synthesizedChain(contract, current.role, current.runtimeId).map((id) => runtimeSnapshot(contract, id));
+export function failoverTargets(contract, current, state = null) {
+  const declared = synthesizedChain(contract, current.role, current.runtimeId);
+  if (declared.length) return declared.map((id) => runtimeSnapshot(contract, id));
+  const attempted = new Set([current.runtimeId]);
+  const composed = state ? nextSameTierRuntime(contract, state.routing ?? {}, current.role, current.runtimeId, attempted) : null;
+  return composed ? [runtimeSnapshot(contract, composed)] : [];
 }
 
 /**

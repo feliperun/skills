@@ -202,6 +202,41 @@ test("repair contract creation is exact-once across controller restart", async (
   } finally { cleanup(value); }
 });
 
+test("a completed repair settles its failed source run and completes the campaign", async () => {
+  const value = tempRepo();
+  try {
+    await startCampaign(value.campaignPath, { executor: async () => {} });
+    const initialContractPath = join(value.campaignPath, value.plan.initialRunContract);
+    const initialContract = JSON.parse(readFileSync(initialContractPath, "utf8"));
+    const initialRunDir = join(value.root, ".runs", "initial-run");
+    mkdirSync(join(initialRunDir, "nodes"), { recursive: true });
+    writeJsonAtomic(join(initialRunDir, "contract.json"), initialContract);
+    writeJsonAtomic(join(initialRunDir, "nodes", "build.json"), {
+      id: "build",
+      status: "failed",
+      attempt: 1,
+      error: { code: "verification_failed", message: "red" },
+    });
+
+    let dispatched = 0;
+    await superviseCampaignOnce(value.campaignPath, { executor: async () => { dispatched += 1; } });
+    assert.equal(dispatched, 1, "the failed source run dispatches one repair");
+    const stateAfterRepair = JSON.parse(readFileSync(join(value.campaignPath, CAMPAIGN_STATE_FILE), "utf8"));
+    const repair = stateAfterRepair.runs.find(/** @param {{kind: string}} run */ (run) => run.kind === "repair");
+    assert.ok(repair, "the repair run is recorded");
+    const repairContract = JSON.parse(readFileSync(repair.contractPath, "utf8"));
+    const repairRunDir = join(value.root, ".runs", repair.id);
+    mkdirSync(join(repairRunDir, "nodes"), { recursive: true });
+    writeJsonAtomic(join(repairRunDir, "contract.json"), repairContract);
+    writeJsonAtomic(join(repairRunDir, "nodes", "repair.json"), { id: "repair", status: "done" });
+
+    const status = await superviseCampaignOnce(value.campaignPath, { executor: async () => { throw new Error("must not dispatch a completed repair"); } });
+    assert.equal(status.status, "completed");
+    const runs = /** @type {{status: string}[]} */ (status.runs);
+    assert.ok(runs.every((run) => run.status === "done"));
+  } finally { cleanup(value); }
+});
+
 test("lease exclusion is durable", () => {
   const value = tempRepo();
   let lease;

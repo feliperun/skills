@@ -336,7 +336,19 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
   const plan = readCampaignPlan(campaignPath);
   const state = loadOrCreateState(campaignPath, plan);
   const now = options.now ?? new Date().toISOString();
-  for (const record of state.runs) {
+  const records = [...state.runs].sort((left, right) => Number(left.kind === "initial") - Number(right.kind === "initial"));
+  for (const record of records) {
+    if (record.status === "done") continue;
+    const linkedRepairId = record.kind === "initial" ? repairForRun(state, record.id) : null;
+    if (linkedRepairId) {
+      const linkedRepair = state.runs.find((candidate) => candidate.id === linkedRepairId);
+      if (linkedRepair?.status === "done") {
+        record.status = "done";
+        persistState(campaignPath, state);
+        continue;
+      }
+      if (linkedRepair && linkedRepair.status !== "attention") continue;
+    }
     const observed = inspectRun(campaignPath, record);
     if (observed.invalid) {
       setAttention(campaignPath, state, "invalid_state", String(observed.invalid));
@@ -349,6 +361,11 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
     }, run: observed });
     if (transition.action === "complete") {
       record.status = "done";
+      if (record.kind === "repair") {
+        const sourceId = sourceRunForRepair(state, record.id);
+        const source = sourceId ? state.runs.find((candidate) => candidate.id === sourceId) : undefined;
+        if (source) source.status = "done";
+      }
       persistState(campaignPath, state);
       continue;
     }
@@ -432,6 +449,16 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
   }
   try { await drainNotifications(campaignPath); } catch {}
   return campaignStatus(campaignPath);
+}
+
+/** @param {CampaignControlState} state @param {string} runId @returns {string|null} */
+function repairForRun(state, runId) {
+  return Object.entries(state.repairs).find(([key]) => key.startsWith(`${runId}:`))?.[1] ?? null;
+}
+
+/** @param {CampaignControlState} state @param {string} repairId @returns {string|null} */
+function sourceRunForRepair(state, repairId) {
+  return Object.entries(state.repairs).find(([, id]) => id === repairId)?.[0]?.split(":", 1)[0] ?? null;
 }
 
 /**

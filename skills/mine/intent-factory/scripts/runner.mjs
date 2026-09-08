@@ -83,6 +83,7 @@ import {
   environmentPreflight,
   reachableRuntimes,
 } from "./env-preflight.mjs";
+import { composeAssignments, discoverRuntimes, exhaustedUntilOf } from "./runtime-discovery.mjs";
 import { renderReportJson, renderStatusJson, statusNote } from "./render.mjs";
 import {
   captureSourceIdentity,
@@ -467,6 +468,7 @@ export async function runContract(contractPath) {
   });
   lease.startHeartbeat();
   try {
+    const runtimePlan = await runtimeAssignments(contract);
     const scopeBoundaries = captureNodeScopeBoundaries(contract);
     const sourceIdentity = await captureRunIdentity(contract, scopeBoundaries);
     const integrationRef = createRunRef(contract.cwd, contract.id, sourceIdentity.gitHead);
@@ -506,7 +508,12 @@ export async function runContract(contractPath) {
         gate: null,
         error: null,
         judgeFailures: 0,
-        routing: { history: [], currentOverride: null },
+        routing: {
+          history: [],
+          currentOverride: null,
+          assignments: runtimePlan.assignments[node.id],
+          availability: runtimePlan.availability,
+        },
         progress: null,
         budgetDecision: null,
         budgetState: null,
@@ -526,6 +533,32 @@ export async function runContract(contractPath) {
     lease.release();
     throw error;
   }
+}
+
+/**
+ * Resolve role assignments once at run creation. Discovery is used only for
+ * omitted roles; the resulting pair is persisted so resume is deterministic.
+ *
+ * @param {ValidatedContract} contract
+ * @returns {Promise<{assignments: Record<string, {worker: string, judge: string, composedWorker: boolean, composedJudge: boolean}>, availability: Record<string, import("./runtime-discovery.mjs").RuntimeAvailability>}>}
+ */
+async function runtimeAssignments(contract) {
+  const needsComposition = contract.nodes.some((node) =>
+    (node.runtime === undefined && contract.runtimeDefaults?.worker === undefined)
+    || (node.gate.enabled && node.gate.runtime === undefined && contract.runtimeDefaults?.judge === undefined));
+  const availability = needsComposition ? await discoverRuntimes(contract.runtimes, { cwd: contract.cwd }) : {};
+  const assignments = composeAssignments(contract, availability);
+  return {
+    assignments: Object.fromEntries(Object.entries(assignments).map(([nodeId, assignment]) => {
+      const node = contract.nodes.find((candidate) => candidate.id === nodeId);
+      return [nodeId, {
+        ...assignment,
+        composedWorker: node?.runtime === undefined && contract.runtimeDefaults?.worker === undefined,
+        composedJudge: Boolean(node?.gate.enabled && node.gate.runtime === undefined && contract.runtimeDefaults?.judge === undefined),
+      }];
+    })),
+    availability,
+  };
 }
 
 /**
@@ -1381,7 +1414,12 @@ function routeRuntimeForState(contract, node, state, role) {
     const runtime = contract.runtimes[override.runtime];
     return { id: override.runtime, ...runtime, capabilities: driverCapabilities(runtime) };
   }
-  return routeRuntime(contract, node, role);
+  const assigned = state.routing?.assignments?.[role];
+  if (assigned && contract.runtimes[assigned]) {
+    const runtime = contract.runtimes[assigned];
+    return { id: assigned, ...runtime, capabilities: driverCapabilities(runtime) };
+  }
+  return /** @type {RuntimeSnapshot} */ (routeRuntime(contract, node, role));
 }
 
 /**
@@ -3836,7 +3874,15 @@ function handleProviderExhaustion(contract, runDir, node, state, role, envelope,
     // there is nowhere left to route it: it has a better answer than another
     // silent exhaustion — attention, or the provider's own error.
     if (precomputed) return false;
-    transition(runDir, state, "exhausted", { phase: role, result: state.result, usage: state.usage, error: plan.blocked }, lease);
+    const attention = plan.blocked.code === "runtime_tier_exhausted";
+    const exhaustedUntil = exhaustedUntilOf(envelope);
+    transition(runDir, state, attention ? "blocked" : "exhausted", {
+      phase: role,
+      result: state.result,
+      usage: state.usage,
+      error: { ...plan.blocked, ...(exhaustedUntil ? { exhaustedUntil } : {}) },
+    }, lease);
+    if (attention) void raiseNodeAttention(campaignPath, runDir, state, plan.blocked.code).catch(() => {});
     return true;
   }
   // A judge fallback that would land on the vendor of the worker it is
@@ -7331,7 +7377,7 @@ const COMMAND_OPTIONS = {
   report: { json: { type: "boolean" } },
   findings: {},
   handoff: { node: { type: "string" }, runtime: { type: "string" }, reason: { type: "string" } },
-  doctor: { cwd: { type: "string" }, json: { type: "boolean" } },
+  doctor: { cwd: { type: "string" }, json: { type: "boolean" }, discover: { type: "boolean" } },
   metrics: METRICS_OPTIONS,
 };
 
@@ -7397,6 +7443,7 @@ async function main(argv) {
     const ok = await doctorCommand(target, {
       cwd: typeof values.cwd === "string" ? values.cwd : undefined,
       json: values.json === true,
+      discover: values.discover === true,
     });
     if (!ok) process.exitCode = 1;
     return;
@@ -7658,7 +7705,7 @@ function usage() {
     "<resume|supervise|cancel> <run-dir> [--detach] [--interval <sec>] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "handoff <run-dir> --node <id> --runtime <runtime-id> [--reason <text>] | " +
-    "doctor [<contract.json>] [--cwd <dir>] [--json] | contract <prune|validate> ... | " +
+    "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract <prune|validate> ... | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|attach|note|resolve|close|show|list> ...\n",
   );

@@ -65,3 +65,13 @@ the candidate deterministically; a verified transaction reuses its recorded
 candidate evidence. Recovery handles the conditional ref move, the done-state
 write, worktree removal, and terminal event as separate idempotent effects.
 This includes a candidate whose SHA equals the previous run-ref tip.
+
+## Runtime discovery
+
+`doctor --discover [--json]` performs mutation-free driver discovery and
+reports `{available, exhaustedUntil, reason}` per runtime. Missing CLIs are
+`not_found`; authentication failures have no reset; quota responses retain
+their reset time, including Z.ai code 1310. Omitted assignments are composed
+once and persisted in `routing.assignments`; exhaustion re-tiers only within
+the current tier and otherwise leaves the node in attention with
+`runtime_tier_exhausted`.

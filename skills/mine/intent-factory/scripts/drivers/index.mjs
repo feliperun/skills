@@ -44,14 +44,14 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {DriverCommand & {driver: string, model: string, capabilities: DriverCapabilities}} ProviderCommand */
 
-/** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string}|null, judgeCandidates?: number}} ProviderEnvelope */
+/** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string, resetAt?: string|null}|null, exhaustedUntil?: string|null, judgeCandidates?: number}} ProviderEnvelope */
 
 /**
  * One declared runtime. `driver` names a registered adapter (`claude`,
  * `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`); replay requires
  * `config["replay.recording"]` for commands.
  *
- * @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements}} DriverRuntime
+ * @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, tier?: number|string, vendor?: string}} DriverRuntime
  */
 
 /**
@@ -78,7 +78,7 @@ const CAPABILITY_NAMES = new Set([
 /**
  * Result of a read-only runtime probe.
  *
- * @typedef {{id: string|null, driver: string, executable: string, model: string, version: string|null, capabilities: DriverCapabilities, requiredCapabilities: CapabilityRequirements, requiredCapabilitySets: CapabilityRequirements[], ok: boolean, detail: string|null, live?: boolean, liveStatus?: string, usage?: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd?: number|null}} ProbeResult
+ * @typedef {{id: string|null, driver: string, executable: string, model: string, version: string|null, capabilities: DriverCapabilities, requiredCapabilities: CapabilityRequirements, requiredCapabilitySets: CapabilityRequirements[], ok: boolean, detail: string|null, availability?: {available: boolean, exhaustedUntil: string|null, reason: string}, live?: boolean, liveStatus?: string, usage?: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd?: number|null}} ProbeResult
  */
 
 /** @typedef {{id?: string}} RuntimeIdentity */
@@ -176,6 +176,51 @@ export function normalizeProviderResult(runtimeOrDriver, stdout, exitCode, signa
 }
 
 /**
+ * Normalize a provider envelope or recorded response into the availability
+ * shape used by doctor and runtime assignment.
+ *
+ * @param {string|{driver: string}} runtimeOrDriver
+ * @param {unknown} response
+ * @param {number|null} [exitCode]
+ * @param {string|null} [signal]
+ * @returns {{available: boolean, exhaustedUntil: string|null, reason: string}}
+ */
+export function normalizeProviderAvailability(runtimeOrDriver, response, exitCode = 0, signal = null) {
+  let envelope;
+  try {
+    envelope = response && typeof response === "object" && !Array.isArray(response) && typeof /** @type {Record<string, unknown>} */ (response).status === "string"
+      ? /** @type {ProviderEnvelope} */ (response)
+      : normalizeProviderResult(runtimeOrDriver, String(response ?? ""), exitCode, signal);
+  } catch (error) {
+    return { available: false, exhaustedUntil: null, reason: error instanceof Error ? error.message : "provider_unavailable" };
+  }
+  const error = envelope.error;
+  const code = typeof error?.code === "string" ? error.code : "";
+  const message = typeof error?.message === "string" ? error.message : "";
+  const text = `${code} ${message}`;
+  if (envelope.status === "done" || envelope.status === "no-op") return { available: true, exhaustedUntil: null, reason: "ready" };
+  if (envelope.status === "exhausted" || /quota|rate.?limit|usage limit|limit exhausted|1310/iu.test(text)) {
+    return { available: false, exhaustedUntil: resetTimestamp(envelope.exhaustedUntil ?? error?.resetAt ?? message), reason: code || "quota_exhausted" };
+  }
+  if (/auth|credential|unauthori[sz]ed|forbidden|invalid.*(?:key|token)|(?:api|access) key|login/iu.test(text)) {
+    return { available: false, exhaustedUntil: null, reason: "authentication_failed" };
+  }
+  return { available: false, exhaustedUntil: null, reason: code || "provider_unavailable" };
+}
+
+/** @param {unknown} value @returns {string|null} */
+function resetTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  if (typeof value !== "string") return null;
+  const match = /reset(?:s| at| on)?\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?)/iu.exec(value);
+  const input = match?.[1] ?? value;
+  const normalized = input.includes("T") || /(?:Z|[+-]\d{2}:?\d{2})$/u.test(input) ? input : `${input.replace(" ", "T")}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+/**
  * Validate a partial capability requirement against an adapter declaration.
  * The runtime JSON remains the authoritative source for requirement shape.
  *
@@ -251,6 +296,7 @@ export function probeRuntime(runtime, options = {}) {
     requiredCapabilitySets: requirementSets,
     ok: false,
     detail: null,
+    availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
   };
   const missing = missingCapabilitySets(base.capabilities, requirementSets);
   const args = driver.versionArgs(runtime);
@@ -270,6 +316,8 @@ export function probeRuntime(runtime, options = {}) {
     } catch (error) {
       settle({
         ...base,
+        availability: { available: false, exhaustedUntil: null, reason: error && typeof error === "object" && "code" in error && error.code === "ENOENT"
+          || /(?:ENOENT|not found|no such file)/iu.test(error instanceof Error ? error.message : String(error)) ? "not_found" : "provider_unavailable" },
         detail: `${identity(null)} · ${[missingEnvironmentDetail, redactSecrets(error instanceof Error ? error.message : String(error))].filter(Boolean).join(" · ")}`,
       });
       return;
@@ -292,19 +340,25 @@ export function probeRuntime(runtime, options = {}) {
       child.kill("SIGTERM");
       finish({
         ...base,
+        availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
         detail: `${identity(null)} · ${[missingEnvironmentDetail, `no response within ${timeoutSec}s`].filter(Boolean).join(" · ")}`,
       });
     }, timeoutSec * 1_000);
-    child.once("error", (error) => finish({
-      ...base,
-      detail: `${identity(null)} · ${[missingEnvironmentDetail, redactSecrets(error instanceof Error ? error.message : String(error))].filter(Boolean).join(" · ")}`,
-    }));
+    child.once("error", (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      finish({
+        ...base,
+        availability: { available: false, exhaustedUntil: null, reason: /(?:ENOENT|not found|no such file)/iu.test(message) ? "not_found" : "provider_unavailable" },
+        detail: `${identity(null)} · ${[missingEnvironmentDetail, redactSecrets(message)].filter(Boolean).join(" · ")}`,
+      });
+    });
     child.once("close", (exitCode, signal) => {
       const version = driver.parseVersion(redactSecrets(stdout), redactSecrets(stderr));
       const withVersion = { ...base, version };
       if (signal || exitCode !== 0) {
         finish({
           ...withVersion,
+          availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
           detail: `${identity(version)} · ${[missingEnvironmentDetail, lastLine(stderr) ?? `${executable} exited with code ${exitCode}`].filter(Boolean).join(" · ")}`,
         });
         return;
@@ -312,6 +366,7 @@ export function probeRuntime(runtime, options = {}) {
       if (!version) {
         finish({
           ...withVersion,
+          availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
           detail: `${identity(null)} · ${[missingEnvironmentDetail, "unable to determine version"].filter(Boolean).join(" · ")}`,
         });
         return;
@@ -322,6 +377,9 @@ export function probeRuntime(runtime, options = {}) {
       finish({
         ...withVersion,
         ok: problems.length === 0,
+        availability: problems.length === 0
+          ? { available: true, exhaustedUntil: null, reason: "ready" }
+          : { available: false, exhaustedUntil: null, reason: missingEnvironmentDetail ? "authentication_required" : "provider_unavailable" },
         detail: `${identity(version)}${problems.length ? ` · ${problems.join(" · ")}` : ""}`,
       });
     });

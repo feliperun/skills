@@ -228,7 +228,7 @@ function eventItem(event) {
 }
 
 /** Provider-reported quota and rate-limit text: exhaustion, never an ordinary provider failure. */
-const QUOTA_TEXT_PATTERN = /429|rate.?limit|usage limit|limit exhausted|quota|too many requests/iu;
+const QUOTA_TEXT_PATTERN = /429|1310|rate.?limit|usage limit|limit exhausted|quota|too many requests/iu;
 
 /**
  * @param {string|null|undefined} text
