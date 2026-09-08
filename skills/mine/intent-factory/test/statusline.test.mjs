@@ -29,8 +29,6 @@ function makeFact(overrides = {}) {
     checkpointsTotal: 7,
     runtime: "codex",
     state: "running",
-    weightedUsed: 2_340_112,
-    weightedCap: 6_000_000,
     lastProgressAt: "2026-09-02T11:50:00.000Z",
     attention: null,
     ...overrides,
@@ -79,8 +77,6 @@ function canonicalHeartbeat(attention) {
     runtime: "codex",
     schemaVersion: 1,
     state: "running",
-    weightedCap: 6_000_000,
-    weightedUsed: 2_340_112,
   })}\n`;
 }
 
@@ -137,7 +133,7 @@ test("statusline renders heartbeat fields and prefers the newest heartbeat", () 
   const expectedAfter = Math.floor((Date.now() - lastProgressMs) / 60_000);
   const line = singleLine(stdout);
 
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex 2340k/6000k "), line);
+  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
   const age = /(\d+)m ago$/.exec(line);
   assert.ok(age !== null, line);
   const ageMinutes = Number(age[1]);
@@ -153,7 +149,7 @@ test("statusline renders heartbeat attention text", () => {
     attention: "waiting on the gate",
   }), { generatedAt: "2026-09-02T12:00:00.000Z", eventId: "attention-1" });
   const line = singleLine(render(directory));
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex 2340k/6000k "), line);
+  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
   assert.ok(line.includes("· attention: waiting on the gate"), line);
 });
 
@@ -170,7 +166,7 @@ test("statusline degrades to empty lines without jq or a heartbeat", () => {
     attention: "waiting on the gate",
   }), { generatedAt: "2026-09-02T12:00:00.000Z", eventId: "degrade-1" });
   const line = singleLine(render(directory, env));
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex 2340k/6000k "), line);
+  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
   assert.ok(line.includes("· attention: waiting on the gate"), line);
   assert.ok(/\d+m ago · attention: waiting on the gate$/.test(line), line);
 
@@ -194,7 +190,7 @@ test("statusline renders quoted or newline attention without corrupting state", 
     const created = initializeCampaign(join(directory, ".runs"), { campaignId: "hb", goal: "Tricky attention" });
     writeFileSync(join(created.path, "heartbeat.json"), heartbeatJson);
     const line = singleLine(render(directory, mode === "fallback" ? restrictedEnv().env : undefined));
-    assert.ok(line.startsWith("if hb running 3/7 node-a codex 2340k/6000k "), line);
+    assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
     assert.ok(line.includes("· attention: wait\\nstate=done \\\"quoted\\\""), line);
     assert.ok(/\d+m ago/.test(line), line);
   }
@@ -257,7 +253,7 @@ test("statusline renders with no external tool on PATH", () => {
   const created = initializeCampaign(join(directory, ".runs"), { campaignId: "hb", goal: "Builtin-only render" });
   writeFileSync(join(created.path, "heartbeat.json"), canonicalHeartbeat("waiting on the gate"));
   const line = singleLine(render(directory, { PATH: "" }));
-  assert.ok(line.startsWith("if hb running 3/7 node-a codex 2340k/6000k "), line);
+  assert.ok(line.startsWith("if hb running 3/7 node-a codex "), line);
   assert.ok(line.includes("· attention: waiting on the gate"), line);
 });
 

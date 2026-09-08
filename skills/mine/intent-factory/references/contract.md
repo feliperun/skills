@@ -8,7 +8,7 @@ current releases. TypeScript is a development-only dependency for
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "contractVersion": "0.1.0",
   "id": "feature-42",
   "campaignId": "feature-42",
@@ -17,14 +17,6 @@ current releases. TypeScript is a development-only dependency for
   "maxParallel": 1,
   "stallTimeoutSec": 300,
   "timeoutSec": 2400,
-  "usagePolicy": {
-    "epoch": "2026-08",
-    "maxInputTokens": 900000,
-    "judgeReserveInputTokens": 120000,
-    "maxPhaseInputTokens": 180000,
-    "maxInvocationTokens": 100000,
-    "cacheReadWeight": 0.1
-  },
   "runtimeDefaults": {
     "worker": "luna",
     "judge": "sol"
@@ -110,69 +102,7 @@ is proven: either `proof` with `kind` `command` or `path` plus a `ref`, or
 `judgment: true` for a judge-assessed criterion. A schema-1 string item is
 rejected.
 
-## Continuity capsule
-
-The continuity kernel's portable handoff is a bounded, redacted, canonical JSON
-capsule produced only from a settled checkpoint. Its minimum shape is:
-
-```json
-{
-  "capsuleVersion": 1,
-  "runId": "opaque-id",
-  "nodeId": "opaque-id",
-  "attemptId": "opaque-id",
-  "objective": "The continuing objective",
-  "constraints": [],
-  "decisions": [],
-  "nonGoals": [],
-  "changedFiles": [],
-  "worktreeIdentity": { "gitHead": "full-sha", "dirty": false },
-  "receipts": [],
-  "verifications": [],
-  "artifacts": [],
-  "blockers": [],
-  "nextAction": "The next safe action",
-  "usage": { "inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0 },
-  "costUsd": 0,
-  "budgetRemaining": 0,
-  "continuationHint": null,
-  "digest": "lowercase-hex"
-}
-```
-
-The canonical UTF-8 JSON is at most 16 KiB; the builder never emits a capsule
-above the bound and throws when even a fully truncated capsule cannot fit.
-`runId`, `nodeId`, and `attemptId` are opaque identity strings; `objective` is
-at most 4 KiB, `nextAction` 1 KiB, and `continuationHint` 2 KiB; each
-string-list item is at most 1 KiB; receipts, verifications, and artifacts are
-capped at 64, 64, and 32 entries. The capsule carries bounded context and
-evidence only: no transcripts, logs, binaries, private hosts, recipients,
-credentials, authorization headers, or employer-specific relay details.
-Reject malformed capsules, unknown top-level fields, and digest mismatches.
-
-Redact before canonicalizing and digesting. Small deterministic rules replace
-environment assignments (`KEY=value`), bearer credential schemes, and
-high-entropy runs of 32 or more `[A-Za-z0-9_-]` characters that mix letters
-and digits with a stable `[redacted]` marker; the rules never read the
-building host's environment. Opaque identity fields (`runId`, `nodeId`,
-`attemptId`, `gitHead`, artifact `sha256`) are exempt, and free text is
-redacted before bounding so a secret cannot be shortened below its detector
-threshold first. Compute the lowercase hexadecimal SHA-256 digest over the
-canonical redacted JSON with `digest` omitted. Verify the digest before using
-a capsule; the digest authenticates the capsule contents, not an external
-effect.
-
-Oversize reduction is deterministic and explicit: artifact previews drop
-first, then list fields halve, replace items with the truncation marker, or
-empty (in artifacts, receipts, verifications, changedFiles, constraints,
-decisions, nonGoals, blockers order), then scalar fields shorten or remove
-(`continuationHint`, `nextAction`, `gitHead`, usage values, `costUsd`,
-`budgetRemaining`, then `objective`). List-field cuts and artifact-preview
-drops are flagged with a `*Truncated` boolean, shortened text carries an
-inline `…[truncated]` marker, and removed optional scalars become `null`, so a
-consumer can see exactly what was bounded.
-
-### Intents and settlements
+## Intents and settlements
 
 The intent/settlement lifecycle is:
 
@@ -205,37 +135,37 @@ attention. Reconciliation reuses the same intent and evidence, is idempotent,
 and must not create a second intent or invent service evidence.
 
 Cost is independent of effect status and travels as a plain nullable USD
-amount (`costUsd`) with the remaining campaign allowance (`budgetRemaining`)
-and raw usage token counts. Usage is persisted even when an invocation dies by
-kill, timeout, stall, or scope-gate failure; no amount is fabricated or
-promoted by a handoff.
+amount (`costUsd`) alongside raw usage token counts. Usage is persisted even
+when an invocation dies by kill, timeout, stall, or scope-gate failure; no
+amount is fabricated. Usage is a reporting record only, in `<run-dir>/usage.jsonl`
+— one line per worker or judge invocation with its tokens by kind and cost
+provenance — and no control path reads it to gate work.
 
-All intent, settlement, and capsule writes happen under the controller lease,
-so the handoff between controllers is serialized: a second controller is
-rejected while a healthy lease is held, and `resume` takes over the lease
-before recovering any operation.
+All intent and settlement writes happen under the controller lease, so a
+takeover between controllers is serialized: a second controller is rejected
+while a healthy lease is held, and `resume` takes over the lease before
+recovering any operation.
 
-## Driver protocol and handoff
+## Driver protocol
 
 Every driver invocation receives the closed task packet, an intent identifier,
-an optional portable capsule, and—when supported—an explicit native
-continuation handle. It emits one `run.started`, zero or more `message` events,
-and exactly one `run.completed` or `run.failed` terminal event. Usage and cost
-are included when available; diagnostics go to stderr; protocol output contains
-no credentials or private routing data. A failure after dispatch is
-`unknown_effect` unless the driver proves that the intent was not run.
+and—when supported—an explicit native continuation handle. It emits one
+`run.started`, zero or more `message` events, and exactly one `run.completed`
+or `run.failed` terminal event. Usage and cost are included when available;
+diagnostics go to stderr; protocol output contains no credentials or private
+routing data. A failure after dispatch is `unknown_effect` unless the driver
+proves that the intent was not run.
 
-Portable context is the correctness boundary. Native continuation is optional,
-driver-scoped state and must use the persisted explicit session ID; ambient
-most-recent CLI history is never selected. Codex and Claude native sessions are
-not interchangeable. A Codex-to-Claude handoff (or the reverse) first settles
-the current intent, exports and verifies the capsule, then starts a new native
-session from that capsule. Do not hand off from an executing or unknown-effect
-checkpoint.
+Native continuation is optional, driver-scoped state and must use the
+persisted explicit session ID; ambient most-recent CLI history is never
+selected. Codex and Claude native sessions are not interchangeable, so a
+runtime change between two phase-sibling nodes never resumes the prior
+session: the fresh attempt carries the prior nodes' structured summaries
+forward in its prompt instead (see phase reuse below). Do not adopt a session
+from an executing or unknown-effect checkpoint.
 
-The first release documents only this continuity kernel. Service-driver
-adapters, service-specific reconcile lookups, and a transactional store remain
-later phases and are not part of this contract.
+Service-driver adapters, service-specific reconcile lookups, and a
+transactional store remain later phases and are not part of this contract.
 
 Paths are relative to the contract file. `cwd` is the worker's repository. A node must contain exactly one of `taskPacket` (inline JSON) or `taskPacketFile` (a path relative to the contract). The legacy `prompt` and `promptFile` fields are rejected.
 
@@ -251,41 +181,23 @@ deterministic bounded handoff in a fresh session, never a continuation ID or a
 reuse marker. A completed invocation without a continuation ID is fresh on the
 next node.
 
-The adapter capability matrix is exact:
+The adapter continuation matrix is exact:
 
-| driver | continuation | token budget | monetary budget | explicit continuation/budget mechanism |
-| --- | --- | --- | --- | --- |
-| `codex` | yes | yes | no | persisted session resume; native rollout token budget |
-| `claude` | yes | no | yes | `--resume SESSION_ID`; `--max-budget-usd` |
-| `glm` | yes | no | yes | `--resume SESSION_ID`; `--max-budget-usd` |
-| `agy` | yes | no | no | `--conversation=SESSION_ID`; timeout/accounting fallback |
-| `exec-jsonl` | yes | yes | no | protocol `continuationId`; wrapper-enforced `maxInvocationTokens` |
-| `replay` | yes | yes | yes | recorded, not enforced: `--continuation` / `--max-invocation-tokens` / `--max-cost-usd` |
+| driver | continuation | explicit continuation mechanism |
+| --- | --- | --- |
+| `codex` | yes | persisted session resume |
+| `claude` | yes | `--resume SESSION_ID` |
+| `glm` | yes | `--resume SESSION_ID` |
+| `agy` | yes | `--conversation=SESSION_ID` |
+| `exec-jsonl` | yes | protocol `continuationId` |
+| `replay` | yes | recorded, not enforced: `--continuation` |
 
-`maxInvocationTokens` is sent only when the routed adapter declares the token
-budget capability. `maxCostUsd` is optional command data and is sent only when
-the adapter declares monetary-budget enforcement, using the smallest positive
-remaining node-level and campaign-level allowance. Providers without a native
-in-flight token boundary remain bounded by `timeoutSec` and campaign accounting.
-Continuation always uses the persisted explicit session ID; ambient most-recent
-CLI history is never selected.
-
-`usagePolicy` is required and is either `false` or an object. Its `epoch` is an
-explicit campaign-wide reset key; `maxInputTokens` is the hard weighted
-input limit, `judgeReserveInputTokens` is withheld from workers, and
-`maxPhaseInputTokens` is a soft context boundary. `maxInvocationTokens` is an
-in-flight provider boundary: Codex uses its native weighted rollout budget,
-while `exec-jsonl` forwards the value to the wrapper. Claude, GLM, and agy do
-not receive this field and remain protected by `timeoutSec`, so choose a short
-bounded timeout for them. `cacheReadWeight` controls campaign and phase
-budget charging while raw cache reads remain visible; use the provider's current
-cached-to-uncached rate ratio. Normalized `inputTokens`
-contains uncached input plus cache writes; `cacheReadInputTokens` is separate,
-and weighted budget input is `inputTokens + cacheReadInputTokens *
-cacheReadWeight`. The campaign ledger is exact-once by epoch and invocation ID, so a
-new run ID does not reset the budget. Choose a new epoch deliberately after a
-provider/account quota reset. If Codex omits usage when its native rollout
-budget stops a turn, the ledger conservatively charges `maxInvocationTokens`.
+Continuation always uses the persisted explicit session ID; ambient
+most-recent CLI history is never selected. There is no spend ceiling of any
+kind: `timeoutSec` and `stallTimeoutSec` bound an attempt, and a spent
+provider allowance is handled by runtime discovery re-tiering (rule 8), not by
+a token or dollar cap the operator had to guess. Usage recorded per invocation
+in `usage.jsonl` is a reporting record only.
 
 ## Task packets
 

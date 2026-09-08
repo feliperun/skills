@@ -38,20 +38,6 @@ import { delay, fixture, packet, withFakeCodex, writeContract } from "./helpers.
 const runnerPath = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 const sourceRoot = dirname(dirname(runnerPath));
 
-function budgetProfile() {
-  return {
-    estimatedWeightedInputTokens: 50,
-    estimatedTurns: 2,
-    contextWindowTokens: 1_000,
-    safetyFraction: 0.75,
-    minimumSegmentTokens: 10,
-    growthIncrementTokens: 10,
-    preambleBytes: 40,
-    tokenizerEstimate: { bytes: 4, tokens: 1, source: "campaign test measurement" },
-    continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
-  };
-}
-
 function tempRepo(runnerCode = "process.exit(0);\n") {
   const root = mkdtempSync(join(tmpdir(), "campaign-autonomy-"));
   mkdirSync(join(root, "repair-root"), { recursive: true });
@@ -70,8 +56,6 @@ function tempRepo(runnerCode = "process.exit(0);\n") {
       id: "build",
       type: "backend",
       taskPacket: packet({ verification: [{ argv: [process.execPath, "-e", "process.exit(0)"] }] }),
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 1, maxDryHeartbeats: 3 },
       gate: false,
     }],
   }));
@@ -85,8 +69,6 @@ function tempRepo(runnerCode = "process.exit(0);\n") {
       retryLimit: 1,
       repairLimit: 2,
       runtimeFailover: { allowedRuntimes: ["luna", "sol"], routes: [{ from: "luna", to: "sol" }] },
-      maxInputTokens: 100,
-      maxCostUsd: 1,
       irreversibleActionsForbidden: true,
     },
   });
@@ -167,7 +149,6 @@ test("classifies bounded retries, failover, repairs, attention, and completion",
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "provider_exhausted", currentRuntime: "sol" }).action, "attention");
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "provider_exhausted", currentRuntime: "luna", run: { failoverHistory: ["sol"] } }).action, "attention");
   assert.equal(classifyTransition({ authority, status: "exhausted", errorCode: "retry_limit_exhausted" }).reason, "unclassified_terminal_failure");
-  assert.equal(classifyTransition({ authority, status: "blocked", errorCode: "budget_exceeded" }).reason, "budget_exhausted");
   assert.equal(classifyTransition({ authority, status: "blocked", errorCode: "context_missing", repairCount: 0 }).action, "repair");
   assert.equal(classifyTransition({ authority, status: "failed", errorCode: "scope_violation" }).action, "attention");
   assert.equal(classifyTransition({ authority, allGreen: true }).action, "complete");
@@ -802,8 +783,6 @@ test("campaign sync attaches once per day, prints header, liveness and unseen ev
       activeNode: "build",
       runtime: "luna",
       state: "running",
-      weightedUsed: 100,
-      weightedCap: 6_000_000,
       lastProgressAt,
       attention: null,
       generatedAt: lastProgressAt + 60,

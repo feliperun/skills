@@ -87,6 +87,25 @@ const ENTRY_SHAPES = {
 };
 
 /**
+ * Fields a liveness fact carried before the budget ceiling was removed. A
+ * historical journal (like the live campaign's own) still has lines shaped
+ * like the pre-diet fact, so a read path drops them instead of rejecting the
+ * whole file; nothing writes them any more.
+ */
+const LEGACY_LIVENESS_FIELDS = ["weightedUsed", "weightedCap"];
+
+/**
+ * @param {JournalEntry} entry
+ * @returns {JournalEntry}
+ */
+function withoutLegacyLivenessFields(entry) {
+  if (entry.type !== "liveness") return entry;
+  const cleaned = /** @type {JournalEntry} */ ({ ...entry });
+  for (const field of LEGACY_LIVENESS_FIELDS) delete /** @type {JsonObject} */ (cleaned)[field];
+  return cleaned;
+}
+
+/**
  * @param {string} runsDir
  * @returns {string}
  */
@@ -339,7 +358,7 @@ export function readJournal(campaignPath) {
       continue;
     }
     try {
-      const entry = /** @type {JournalEntry} */ (JSON.parse(line));
+      const entry = withoutLegacyLivenessFields(/** @type {JournalEntry} */ (JSON.parse(line)));
       validateJournalEntry(entry);
       entries.push(entry);
     } catch (error) {
@@ -528,7 +547,7 @@ function readJournalDelta(campaignPath, fromByte) {
       let line = buffer.toString("utf8", start, newline);
       if (line.endsWith("\r")) line = line.slice(0, -1);
       if (line.trim()) {
-        const entry = /** @type {JournalEntry} */ (JSON.parse(line));
+        const entry = withoutLegacyLivenessFields(/** @type {JournalEntry} */ (JSON.parse(line)));
         validateJournalEntry(entry);
         entries.push(entry);
       }

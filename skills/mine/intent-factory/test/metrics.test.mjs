@@ -5,7 +5,6 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveGovernanceMetrics } from "../scripts/heartbeat.mjs";
 import { renderMetricsJson, renderMetricsReport } from "../scripts/metrics-report.mjs";
 import {
   DEFAULT_TOKENIZER_ESTIMATE,
@@ -17,7 +16,6 @@ import {
 
 /** Every indicator of TECH-SPEC 8.4 with the direction the spec table gives it. */
 const DIRECTIONS = {
-  weightedPerClosedCheckpoint: "down",
   wallClockPerClosedCheckpoint: "down",
   takesPerClosedCheckpoint: "down",
   firstPassGateRate: "up",
@@ -29,14 +27,11 @@ const DIRECTIONS = {
   sessionWakeCount: "down",
   heartbeatStalenessP95: "down",
   ambientCoverage: "up",
-  budgetDecisionAge: "down",
-  budgetHeadroomAtDispatch: "informative",
-  budgetExtensionRate: "informative",
-  continuationRate: "informative",
-  budgetAttentionLatencyP95: "down",
   silentStallRate: "down",
   workerPreambleTokens: "down",
   notifyLatencyP95: "down",
+  usageTokensByKind: "informative",
+  usageCostUsd: "down",
 };
 
 /** @param {number} minute @param {number} [second] @returns {string} */
@@ -74,20 +69,12 @@ function lifecycleEvents() {
   ];
 }
 
-/** @returns {Record<string, unknown>} a two-invocation ledger worth 2,000 weighted tokens */
-function usageLedger() {
-  return {
-    schemaVersion: 1,
-    epochs: {
-      "p4-01": {
-        policy: { epoch: "p4-01", cacheReadWeight: 0.1, maxInputTokens: 100_000 },
-        invocations: {
-          "inv-1": { role: "worker", planPhase: "p4-glm", usage: { inputTokens: 1000, cacheReadInputTokens: 2000 } },
-          "inv-2": { role: "judge", planPhase: "p4-glm", usage: { inputTokens: 800, cacheReadInputTokens: 0 } },
-        },
-      },
-    },
-  };
+/** @returns {Record<string, unknown>[]} two usage.jsonl records worth 1,800 input, 2,000 cache-read and 8 output tokens */
+function usageRecords() {
+  return [
+    { invocationId: "inv-1", role: "worker", inputTokens: 1000, cacheReadInputTokens: 2000, outputTokens: 5, costUsd: 0.01 },
+    { invocationId: "inv-2", role: "judge", inputTokens: 800, cacheReadInputTokens: 0, outputTokens: 3, costUsd: 0.02 },
+  ];
 }
 
 /** @param {Record<string, unknown>} record @returns {number} */
@@ -101,30 +88,36 @@ test("metrics per-closed-checkpoint indicators divide campaign totals by closed 
   // Two operator dispatches at this checkpoint; the three worker dispatches in
   // the events are the finer unit inside them and are not takes.
   const takeRunIds = ["run-initial", "run-take2"];
-  const metrics = projectMetrics({ events, takeRunIds, usageLedger: usageLedger() });
-  assert.deepEqual(metrics.weightedPerClosedCheckpoint, { value: 2000, direction: "down", count: 2 });
+  const metrics = projectMetrics({ events, takeRunIds });
   assert.deepEqual(metrics.wallClockPerClosedCheckpoint, { value: 3300, direction: "down", count: 7 });
   assert.deepEqual(metrics.takesPerClosedCheckpoint, { value: 2, direction: "down", count: 2 });
 
-  // Measured spend with nothing closed is not zero cost per checkpoint: the
-  // ratio has no denominator, so it is missing while its records still count.
-  const open = projectMetrics({ events: events.filter((event) => event.to !== "done"), takeRunIds, usageLedger: usageLedger() });
-  assert.deepEqual(open.weightedPerClosedCheckpoint, { value: null, direction: "down", count: 2 });
+  const open = projectMetrics({ events: events.filter((event) => event.to !== "done"), takeRunIds });
   assert.equal(open.takesPerClosedCheckpoint.value, null);
-
-  // A closed checkpoint with no ledger is a missing measurement, never 0 spend.
-  const unledgered = projectMetrics({ events, takeRunIds });
-  assert.deepEqual(unledgered.weightedPerClosedCheckpoint, { value: null, direction: "down", count: 0 });
-  assert.equal(unledgered.takesPerClosedCheckpoint.value, 2);
 
   // Takes are linked runs, so events alone cannot yield them: without the run
   // ids the indicator is a missing measurement, and the worker dispatches the
   // events do record are never substituted for it.
-  assert.deepEqual(projectMetrics({ events, usageLedger: usageLedger() }).takesPerClosedCheckpoint, {
+  assert.deepEqual(projectMetrics({ events }).takesPerClosedCheckpoint, {
     value: null,
     direction: "down",
     count: 0,
   });
+});
+
+test("metrics usageTokensByKind and usageCostUsd sum the run's usage.jsonl records", () => {
+  const metrics = projectMetrics({ usageRecords: usageRecords() });
+  assert.deepEqual(metrics.usageTokensByKind, {
+    value: { inputTokens: 1800, cacheReadInputTokens: 2000, outputTokens: 8 },
+    direction: "informative",
+    count: 2,
+  });
+  assert.deepEqual(metrics.usageCostUsd, { value: 0.03, direction: "down", count: 2 });
+
+  // A record with no measured usage is a missing measurement, never zero spend.
+  const unmeasured = projectMetrics({ usageRecords: [] });
+  assert.deepEqual(unmeasured.usageTokensByKind, { value: null, direction: "informative", count: 0 });
+  assert.deepEqual(unmeasured.usageCostUsd, { value: null, direction: "down", count: 0 });
 });
 
 test("metrics firstPassGateRate is reported per lane and never zero without a gate", () => {
@@ -270,47 +263,6 @@ test("metrics ambient liveness indicators measure the gaps between liveness fact
   assert.deepEqual(single.ambientCoverage, { value: null, direction: "up", count: 0 });
 });
 
-test("metrics budget indicators are the governance projection, wrapped with their record counts", () => {
-  const events = [
-    { at: at(0), node: "a", to: "running", budgetDecision: { extensionAllowanceTokens: 500, inputs: { runtimeId: "glm" } } },
-    { at: at(2), node: "a", to: "running", budgetAction: { type: "extension" } },
-  ];
-  const now = ms(10);
-  const governance = deriveGovernanceMetrics({ events, now });
-  const metrics = projectMetrics({ events, now });
-  assert.deepEqual(metrics.budgetDecisionAge, { value: governance.budgetDecisionAge, direction: "down", count: 1 });
-  assert.equal(metrics.budgetDecisionAge.value, 600);
-  assert.deepEqual(metrics.budgetHeadroomAtDispatch, { value: 500, direction: "informative", count: 1 });
-  assert.deepEqual(metrics.budgetExtensionRate, { value: governance.budgetExtensionRate, direction: "informative", count: 1 });
-  assert.equal(metrics.budgetExtensionRate.value, 1);
-  assert.deepEqual(metrics.continuationRate, { value: 0, direction: "informative", count: 1 });
-
-  // No decision was recorded: age, headroom and both rates are missing rather
-  // than an age of zero or a rate of zero.
-  const undecided = projectMetrics({ events: lifecycleEvents(), now });
-  for (const indicator of [
-    undecided.budgetDecisionAge,
-    undecided.budgetHeadroomAtDispatch,
-    undecided.budgetExtensionRate,
-    undecided.continuationRate,
-  ]) {
-    assert.deepEqual(indicator.value, null);
-    assert.equal(indicator.count, 0);
-  }
-});
-
-test("metrics budgetAttentionLatencyP95 pairs attention actions with their outbox record", () => {
-  const events = [{ at: at(0), node: "a", to: "running", budgetAction: { type: "attention" } }];
-  const outbox = [
-    { type: "run.attention", at: at(0, 30), requiresUser: true, data: { code: "budget_attention", nodeId: "a" } },
-  ];
-  const metrics = projectMetrics({ events, outbox });
-  assert.deepEqual(metrics.budgetAttentionLatencyP95, { value: 30, direction: "down", count: 1 });
-
-  const unnotified = projectMetrics({ events });
-  assert.deepEqual(unnotified.budgetAttentionLatencyP95, { value: null, direction: "down", count: 0 });
-});
-
 test("metrics silentStallRate holds its hard target of zero only where facts exist", () => {
   /** @param {string} stamp @returns {Record<string, unknown>} */
   const fact = (stamp) => ({ type: "liveness", eventId: stamp, at: stamp, state: "running" });
@@ -338,23 +290,19 @@ test("metrics silentStallRate holds its hard target of zero only where facts exi
 });
 
 test("metrics workerPreambleTokens is the mean measured preamble per runtime", () => {
-  /** @param {string} runtimeId @param {number} preambleTokens @param {number} minute @returns {Record<string, unknown>} */
-  const decision = (runtimeId, preambleTokens, minute) => ({
-    at: at(minute),
-    node: `n-${minute}`,
-    to: "running",
-    budgetDecision: { extensionAllowanceTokens: 0, inputs: { runtimeId, preambleBytes: preambleTokens * 4, preambleTokens } },
-  });
-  const metrics = projectMetrics({ events: [decision("glm", 1200, 0), decision("glm", 1400, 1), decision("deepseek-flash", 900, 2)] });
+  /** @param {string} runtimeId @param {number} preambleTokens @returns {Record<string, unknown>} */
+  const check = (runtimeId, preambleTokens) => ({ id: runtimeId, live: true, usage: { inputTokens: preambleTokens } });
+  const preflight = [{ checks: [check("glm", 1200), check("glm", 1400), check("deepseek-flash", 900)] }];
+  const metrics = projectMetrics({ preflight });
   assert.deepEqual(metrics.workerPreambleTokens, {
     value: { "deepseek-flash": 900, glm: 1300 },
     direction: "down",
     count: 3,
   });
 
-  // A decision recorded without the preflight measurement leaves the indicator
-  // missing rather than reporting a preamble of zero.
-  const unmeasured = projectMetrics({ events: [{ at: at(0), node: "a", to: "running", budgetDecision: { extensionAllowanceTokens: 0 } }] });
+  // A static preflight check never ran the probe, so it contributes no
+  // measurement rather than a preamble of zero.
+  const unmeasured = projectMetrics({ preflight: [{ checks: [{ id: "glm", live: false }] }] });
   assert.deepEqual(unmeasured.workerPreambleTokens, { value: null, direction: "down", count: 0 });
 });
 
@@ -391,7 +339,7 @@ test("metrics projects every indicator of 8.4, null and never zero without recor
 
 test("metrics projection is pure: identical records yield identical indicators", () => {
   const now = ms(90);
-  const input = () => ({ events: lifecycleEvents(), usageLedger: usageLedger(), now });
+  const input = () => ({ events: lifecycleEvents(), usageRecords: usageRecords(), now });
   assert.deepEqual(projectMetrics(input()), projectMetrics(input()));
   const events = lifecycleEvents();
   const before = JSON.stringify(events);
@@ -405,24 +353,25 @@ test("metrics projection is pure: identical records yield identical indicators",
  * `fixtures/metrics-20260829.json` is one bounded document distilled from the
  * recorded campaign `intent-factory-retrospective-20260829` under `.runs/`:
  * its `campaign.json` verbatim, the `runs[].id` and `runs[].kind` of its
- * `control-state.json`, its usage ledger reduced to each epoch's
- * `cacheReadWeight` and each invocation's input and cache-read tokens, all 89
- * transition events of its 18 linked runs reduced to the fields the projector
- * reads, its 90 notification records reduced likewise, and 3 of its 96 journal
- * entries — the two that bound the campaign and the retrospective that records
- * the baseline. The recorded journal holds no liveness fact, so the ambient
- * indicators are null here exactly as they were there. The document's own
- * `distilledFrom` block states what it was distilled from and what was kept;
- * projected over it, the indicators equal the ones projected over the campaign
- * tree itself. `.runs/` is never a test dependency: the test neither reads it
- * nor writes it.
+ * `control-state.json`, its usage ledger (the pre-diet record; schema 3 has no
+ * ledger, so the workspace below flattens it into `usage.jsonl` records for
+ * the projector to read) reduced to each invocation's input and cache-read
+ * tokens, all 89 transition events of its 18 linked runs reduced to the fields
+ * the projector reads, its 90 notification records reduced likewise, and 3 of
+ * its 96 journal entries — the two that bound the campaign and the
+ * retrospective that records the baseline. The recorded journal holds no
+ * liveness fact, so the ambient indicators are null here exactly as they were
+ * there. The document's own `distilledFrom` block states what it was
+ * distilled from and what was kept; projected over it, the indicators equal
+ * the ones projected over the campaign tree itself. `.runs/` is never a test
+ * dependency: the test neither reads it nor writes it.
  */
 /**
  * @typedef {{
  *   distilledFrom: {campaignId: string, source: string},
  *   campaign: {id: string, closedAt: string, linkedRunIds: string[]},
  *   controlState: {runs: {id: string, kind: string}[]},
- *   usageLedger: unknown,
+ *   usageLedger: {epochs: Record<string, {invocations: Record<string, {usage: {inputTokens: number|null, cacheReadInputTokens: number|null}}>}>},
  *   journal: unknown[],
  *   outbox: unknown[],
  *   runs: Record<string, unknown[]>,
@@ -452,13 +401,21 @@ function baselineWorkspace() {
   mkdirSync(campaignPath, { recursive: true });
   writeFileSync(join(campaignPath, "campaign.json"), JSON.stringify(FIXTURE.campaign));
   writeFileSync(join(campaignPath, "control-state.json"), JSON.stringify(FIXTURE.controlState));
-  writeFileSync(join(campaignPath, "usage-ledger.json"), JSON.stringify(FIXTURE.usageLedger));
   writeFileSync(join(campaignPath, "notification-outbox.json"), JSON.stringify(FIXTURE.outbox));
   writeFileSync(join(campaignPath, "journal.jsonl"), FIXTURE.journal.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
   for (const [runId, events] of Object.entries(FIXTURE.runs)) {
     mkdirSync(join(cwd, ".runs", runId), { recursive: true });
     writeFileSync(join(cwd, ".runs", runId, "events.jsonl"), events.map((event) => `${JSON.stringify(event)}\n`).join(""));
   }
+  // schema 3 has no ledger: the pre-diet invocations flatten into usage.jsonl
+  // records, all attached to the first linked run since the aggregate totals
+  // below never depend on which run an invocation belongs to.
+  const firstRunId = FIXTURE.campaign.linkedRunIds[0];
+  const usageRecordsList = Object.values(FIXTURE.usageLedger.epochs).flatMap((epoch) => Object.values(epoch.invocations));
+  writeFileSync(
+    join(cwd, ".runs", firstRunId, "usage.jsonl"),
+    usageRecordsList.map((invocation) => `${JSON.stringify({ inputTokens: invocation.usage.inputTokens, cacheReadInputTokens: invocation.usage.cacheReadInputTokens })}\n`).join(""),
+  );
   materialized = cwd;
   return cwd;
 }
@@ -516,8 +473,8 @@ test("metrics baseline reproduces the recorded 2026-08-29 campaign", () => {
   // The closed-checkpoint denominator is what the judge rate was measured over.
   const closed = metrics.judgeInvocationRate.count;
   assert.equal(closed, 3, "the campaign closed three checkpoints");
-  const weighted = /** @type {number} */ (metrics.weightedPerClosedCheckpoint.value) * closed;
-  assert.ok(Math.abs(weighted - 4_770_000) < 30_000, `weighted input ${weighted} is not the recorded ~4.77M`);
+  assert.equal(metrics.usageTokensByKind.value?.inputTokens, 1_746_500, "the flattened ledger's input tokens reach the projector unchanged");
+  assert.equal(metrics.usageTokensByKind.value?.cacheReadInputTokens, 30_208_960, "the flattened ledger's cache-read tokens reach the projector unchanged");
   const hours = /** @type {number} */ (metrics.wallClockPerClosedCheckpoint.value) * closed / 3600;
   assert.ok(Math.abs(hours - 81) < 1, `wall clock ${hours}h is not the recorded ~81h`);
   // Takes, in the unit the retrospective counted them: one take is one linked
@@ -563,7 +520,7 @@ test("metrics baseline report prints every indicator with its value and directio
   const report = renderMetricsReport(sources, metrics);
   const lines = report.trimEnd().split("\n");
   assert.equal(lines.length, Object.keys(metrics).length + 1, "one header plus one line per indicator");
-  assert.match(lines[0], new RegExp(`${BASELINE_CAMPAIGN} · 18 runs \\(17 takes, 1 repair\\) · 89 events · 20 indicators`, "u"));
+  assert.match(lines[0], new RegExp(`${BASELINE_CAMPAIGN} · 18 runs \\(17 takes, 1 repair\\) · 89 events · 16 indicators`, "u"));
   for (const [name, indicator] of Object.entries(metrics)) {
     const line = lines.find((candidate) => candidate.startsWith(name));
     assert.ok(line, `${name} is missing from the report`);
@@ -573,7 +530,7 @@ test("metrics baseline report prints every indicator with its value and directio
   }
   // Effectiveness and efficiency are never reported one without the other.
   assert.match(report, /firstPassGateRate\s+up\s+glm53-flash=0 sol-low=1 terra-medium=0/u);
-  assert.match(report, /weightedPerClosedCheckpoint\s+down\s+1589132 tokens/u);
+  assert.match(report, /usageTokensByKind\s+informative\s+inputTokens=1746500 cacheReadInputTokens=30208960 outputTokens=0\s+· 24 records/u);
   // The take line is the retrospective's seventeen over three closed
   // checkpoints, and it prints the take count as its record count.
   assert.match(report, /takesPerClosedCheckpoint\s+down\s+5\.6667\s+· 17 records/u);

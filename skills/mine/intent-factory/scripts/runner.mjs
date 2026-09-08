@@ -60,7 +60,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "./drivers/index.mjs";
-import { extractJson, isClaudeFamily, liveInputTokens, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
+import { extractJson, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
 import {
   addRuntimeRequirement,
   failoverTargets,
@@ -1310,14 +1310,17 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   if (identityMatches && canContinue) {
     return { prompt, continuationId: session.invocation.continuationId ?? null, mode: "reuse" };
   }
-  if (session && !canContinue) {
+  // Any other session (wrong identity, or a driver that cannot continue) is
+  // not resumable as-is, so the fresh attempt carries the prior nodes'
+  // structured summaries forward instead of starting blind.
+  if (session) {
     return {
       prompt: phaseHandoffPrompt(contract, node, state, runDir, role),
       continuationId: null,
       mode: "rotate",
     };
   }
-  return { prompt, continuationId: null, mode: session ? "rotate" : "fresh" };
+  return { prompt, continuationId: null, mode: "fresh" };
 }
 
 /**

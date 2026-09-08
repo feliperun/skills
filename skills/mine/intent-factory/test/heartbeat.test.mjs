@@ -44,8 +44,6 @@ function makeFact(overrides = {}) {
     checkpointsTotal: 7,
     runtime: "codex",
     state: "running",
-    weightedUsed: 2_340_112,
-    weightedCap: 6_000_000,
     lastProgressAt: PROGRESS_AT,
     attention: null,
     ...overrides,
@@ -119,8 +117,6 @@ test("heartbeat bounded derivation keeps the file at most 1024 bytes and oversiz
     attention: "😀".repeat(80),
     checkpointsDone: maxWeight,
     checkpointsTotal: maxWeight,
-    weightedUsed: maxWeight,
-    weightedCap: maxWeight,
   });
   const before = readFileSync(join(created.path, HEARTBEAT_FILE));
   assert.throws(
@@ -250,29 +246,6 @@ test("governance metrics are reproducible and silentStallRate is zero for D36 an
   assert.equal(first.silentStallRate, 0, "a stale gap covered by the stale_liveness attention is never silent");
   const uncovered = deriveGovernanceMetrics({ ...input, outbox: [] });
   assert.equal(uncovered.silentStallRate, 1, "an uncovered stale gap is fully silent");
-
-  /** @type {Record<string, unknown>[]} */
-  const events = [
-    { at: at(0), node: "a", from: "pending", to: "pending", budgetDecision: { extensionAllowanceTokens: 200 } },
-    { at: at(60), node: "a", from: "pending", to: "running", budgetAction: { type: "extension", grantedTokens: 10 } },
-    { at: at(120), node: "b", from: "pending", to: "pending", budgetDecision: { extensionAllowanceTokens: 100 } },
-    { at: at(180), node: "b", from: "pending", to: "running", budgetAction: { type: "continuation_activated", allocationTokens: 20 } },
-    { at: at(240), node: "c", from: "running", to: "running", budgetAction: { type: "attention", observedTokens: 900 } },
-    { at: at(250), node: "c", from: "running", to: "blocked" },
-  ];
-  const metrics = deriveGovernanceMetrics({ events, livenessFacts: [], outbox: [], now: metricsNow + 600 * 1000, staleSec: 2400 });
-  assert.equal(metrics.budgetHeadroomAtDispatch, 150);
-  assert.equal(metrics.budgetExtensionRate, 0.5);
-  assert.equal(metrics.continuationRate, 0.5);
-  assert.equal(metrics.budgetDecisionAge, 480, "newest decision belongs to a still-nonterminal node");
-  const latency = deriveGovernanceMetrics({
-    events,
-    livenessFacts: [],
-    outbox: [{ eventId: "ba-1", type: "run.attention", campaignId: "camp", at: at(400), summary: "budget attention", data: { code: "budget_attention", nodeId: "c" }, deliveredAt: null, attempts: 0, lastError: null }],
-    now: metricsNow + 600 * 1000,
-    staleSec: 2400,
-  });
-  assert.equal(latency.budgetAttentionLatencyP95, 160, "outbox minus the budgetAction attention event at");
 
   const { created } = makeCampaign();
   writeGovernanceMetrics(created.path, first);

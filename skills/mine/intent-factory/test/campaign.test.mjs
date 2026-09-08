@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -13,6 +13,7 @@ import {
   HANDOFF_FILE,
   HANDOFF_BYTES,
   HANDOFF_LIMIT,
+  JOURNAL_FILE,
   JOURNAL_TEXT_BYTES,
   initializeCampaign,
   PROJECTION_FILE,
@@ -337,8 +338,6 @@ test("liveness journal entries validate, dedupe by event id and stay out of the 
     checkpointsTotal: 7,
     runtime: "codex",
     state: "running",
-    weightedUsed: 2_340_112,
-    weightedCap: 6_000_000,
     lastProgressAt: at,
     attention: null,
   };
@@ -357,11 +356,40 @@ test("liveness journal entries validate, dedupe by event id and stay out of the 
   const handoff = renderHandoff(created.path, runsDir);
   assert.ok(existsSync(join(created.path, PROJECTION_FILE)));
   const projection = JSON.parse(readFileSync(join(created.path, PROJECTION_FILE), "utf8"));
-  assert.doesNotMatch(JSON.stringify(projection.projection), /live-1|node-1|weightedUsed/u);
+  assert.doesNotMatch(JSON.stringify(projection.projection), /live-1|node-1/u);
   assert.match(handoff, /Continue after liveness/u);
-  assert.doesNotMatch(handoff, /live-1|node-1|weightedUsed/u);
+  assert.doesNotMatch(handoff, /live-1|node-1/u);
   const handoffFile = readFileSync(join(created.path, HANDOFF_FILE), "utf8");
-  assert.doesNotMatch(handoffFile, /live-1|node-1|weightedUsed/u);
+  assert.doesNotMatch(handoffFile, /live-1|node-1/u);
+});
+
+test("readJournal ignores the pre-diet weightedUsed and weightedCap fields on a historical liveness fact", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-campaign-legacy-liveness-"));
+  const runsDir = join(directory, ".runs");
+  const created = initializeCampaign(runsDir, { campaignId: "legacy", goal: "Keep an old journal readable" });
+  const at = new Date().toISOString();
+  const legacyLine = JSON.stringify({
+    type: "liveness",
+    eventId: "live-legacy-1",
+    at,
+    campaignId: "legacy",
+    runId: "run-1",
+    nodeId: "scope-advisory",
+    phase: "worker",
+    checkpointsDone: 0,
+    checkpointsTotal: 3,
+    runtime: "sonnet",
+    state: "running",
+    weightedUsed: 0,
+    weightedCap: 6_000_000,
+    lastProgressAt: at,
+    attention: null,
+  });
+  appendFileSync(join(created.path, JOURNAL_FILE), `${legacyLine}\n`);
+  const journal = readJournal(created.path);
+  const entry = journal.find((item) => item.eventId === "live-legacy-1");
+  assert.ok(entry, "the legacy liveness line is read, not rejected");
+  assert.equal(/** @type {Record<string, unknown>} */ (entry).weightedUsed, undefined, "the legacy field is dropped, not carried forward");
 });
 
 test("handoff projection recovers from deletion and corruption", () => {

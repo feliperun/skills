@@ -5,7 +5,7 @@
  * decides how a measurement is printed. Both forms render the whole indicator
  * set and nothing else: effectiveness (`firstPassGateRate`, `ambientCoverage`)
  * is never printable without the efficiency it was bought with
- * (`weightedPerClosedCheckpoint`, `takesPerClosedCheckpoint`).
+ * (`wallClockPerClosedCheckpoint`, `takesPerClosedCheckpoint`).
  *
  * The report is bounded by construction — one header line plus one line per
  * indicator, with grouped values elided past `MAX_GROUPS` — so a campaign with
@@ -23,12 +23,10 @@ const METRICS_SCHEMA_VERSION = 1;
 const SECONDS_INDICATORS = new Set([
   "wallClockPerClosedCheckpoint",
   "heartbeatStalenessP95",
-  "budgetDecisionAge",
-  "budgetAttentionLatencyP95",
   "notifyLatencyP95",
 ]);
 /** Indicators whose value is a token total. */
-const TOKEN_INDICATORS = new Set(["weightedPerClosedCheckpoint", "sessionContextGrowth", "workerPreambleTokens"]);
+const TOKEN_INDICATORS = new Set(["sessionContextGrowth", "workerPreambleTokens"]);
 /** Groups printed per grouped indicator before the line is elided; the report stays bounded. */
 const MAX_GROUPS = 6;
 const NAME_WIDTH = 28;

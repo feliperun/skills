@@ -17,9 +17,7 @@ export const REPLAY_STATUSES = Object.freeze(new Set([
  * Deterministic provider stand-in. The recording holds already-normalized
  * envelopes consumed strictly in order through a `<recording>.cursor` sidecar,
  * so the controller exercises everything after provider normalization with
- * zero model invocations. Budget capabilities are declared on purpose: the
- * replay executable records `--max-invocation-tokens`/`--max-cost-usd` and
- * enforces nothing.
+ * zero model invocations.
  *
  * @type {import("./index.mjs").DriverAdapter}
  */

@@ -133,8 +133,6 @@ export function fixture(overrides = {}) {
     campaignId: "test-campaign",
     goal: "Prove the runner works",
     cwd: ".",
-    maxInputTokens: 1_000_000,
-    usagePolicy: false,
     runtimeDefaults: { worker: "luna", judge: "sol" },
     runtimes: {
       // sol declares its vendor outright, distinct from luna's driver-default

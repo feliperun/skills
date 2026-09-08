@@ -6,7 +6,7 @@
 # repository by modification time, and prints one bounded status line:
 #
 #   if <campaignId> <state> <done>/<total> <activeNode> <runtime> \
-#     <usedK>k/<capK>k <age>m ago[ · attention: <text>]
+#     <age>m ago[ · attention: <text>]
 #
 # Degradation is silent: no heartbeat, an unreadable file, or a heartbeat
 # larger than the 1 KiB cap prints an empty line and exits 0. Only stdin, the
@@ -231,21 +231,17 @@ if command -v jq >/dev/null 2>&1; then
     | (.state | txt) as $state
     | ((.checkpoints.done // -1) | uint) as $done
     | ((.checkpoints.total // -1) | uint) as $total
-    | ((.weightedUsed // -1) | uint) as $used
-    | ((.weightedCap // -1) | uint) as $cap
     | ((.lastProgressAt // -1) | uint) as $last
     | (.activeNode // null) as $active
     | (.runtime // null) as $runtime
     | (.attention // null) as $attention
-    | if $cid != "" and $state != "" and $done >= 0 and $total >= 0 and $used >= 0 and $cap >= 0 and $last >= 0 then
+    | if $cid != "" and $state != "" and $done >= 0 and $total >= 0 and $last >= 0 then
         (if $active == null or $active == "" then "-" else $active end) as $activeS
         | (if $runtime == null or $runtime == "" then "-" else $runtime end) as $runtimeS
         | ((now - $last) / 60 | floor) as $age
         | (if $age < 0 then 0 else $age end) as $ageC
-        | (($used / 1000) | floor) as $usedK
-        | (($cap / 1000) | floor) as $capK
         | (("if " + $cid + " " + $state + " " + ($done | tostring) + "/" + ($total | tostring) + " "
-             + $activeS + " " + $runtimeS + " " + ($usedK | tostring) + "k/" + ($capK | tostring) + "k "
+             + $activeS + " " + $runtimeS + " "
              + ($ageC | tostring) + "m ago"
              + (if $attention == null or $attention == "" then ""
                 elif ($attention | type) == "string" then " · attention: " + ($attention | tojson | .[1:-1])
@@ -271,8 +267,6 @@ hb_attention=
 hb_has_attention=0
 hb_done=
 hb_total=
-hb_used=
-hb_cap=
 hb_last=
 hb_generated=
 
@@ -289,8 +283,6 @@ assign_field() {
         hb_has_attention=1
       fi
       ;;
-    weightedUsed) hb_used=$2 ;;
-    weightedCap) hb_cap=$2 ;;
     lastProgressAt) hb_last=$2 ;;
     generatedAt) hb_generated=$2 ;;
   esac
@@ -392,8 +384,6 @@ if [ "$parse_error" -ne 0 ]; then valid=0; fi
 [ -n "$hb_state" ] || valid=0
 case $hb_done in ''|*[!0-9]*) valid=0 ;; esac
 case $hb_total in ''|*[!0-9]*) valid=0 ;; esac
-case $hb_used in ''|*[!0-9]*) valid=0 ;; esac
-case $hb_cap in ''|*[!0-9]*) valid=0 ;; esac
 case $hb_last in ''|*[!0-9]*) valid=0 ;; esac
 case $hb_generated in ''|*[!0-9]*) valid=0 ;; esac
 if [ "$valid" -ne 1 ]; then
@@ -403,12 +393,10 @@ fi
 
 age=$(( (hb_generated - hb_last) / 60 ))
 if [ "$age" -lt 0 ]; then age=0; fi
-used_k=$(( hb_used / 1000 ))
-cap_k=$(( hb_cap / 1000 ))
 if [ -z "$hb_active" ]; then hb_active=-; fi
 if [ -z "$hb_runtime" ]; then hb_runtime=-; fi
 
-line="if ${hb_campaign} ${hb_state} ${hb_done}/${hb_total} ${hb_active} ${hb_runtime} ${used_k}k/${cap_k}k ${age}m ago"
+line="if ${hb_campaign} ${hb_state} ${hb_done}/${hb_total} ${hb_active} ${hb_runtime} ${age}m ago"
 if [ "$hb_has_attention" -eq 1 ] && [ -n "$hb_attention" ]; then
   line="${line} · attention: ${hb_attention}"
 fi

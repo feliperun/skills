@@ -115,8 +115,6 @@ test("replay adapter declares explicit capabilities and builds stdin commands", 
   const runtime = { driver: "replay", model: "replay-model", executable: bin, config: { "replay.recording": recording } };
   const command = providerCommand(runtime, "prompt with spaces", {
     continuationId: "thread-1",
-    maxInvocationTokens: 4096,
-    maxCostUsd: 0.25,
     schema: JUDGE_SCHEMA,
   });
   assert.equal(command.driver, "replay");
@@ -131,10 +129,6 @@ test("replay adapter declares explicit capabilities and builds stdin commands", 
     recording,
     "--continuation",
     "thread-1",
-    "--max-invocation-tokens",
-    "4096",
-    "--max-cost-usd",
-    "0.25",
     "--schema",
   ]);
   assert.deepEqual(providerCommand(runtime, "p", { schemaPath: "/tmp/judge.schema.json" }).args, ["--recording", recording, "--schema"]);
@@ -1003,12 +997,12 @@ test("D30: a crash between the fact and the heartbeat write leaves the old heart
   // recordLiveness appends the durable fact first and only then writes the
   // heartbeat: a crash in that window is exactly the journal append alone.
   const crashedAt = new Date(Date.parse(String(newest.at)) + 60 * 1000).toISOString();
-  const crashed = /** @type {Record<string, unknown>} */ ({ ...newest, eventId: randomUUID(), at: crashedAt, weightedUsed: Number(newest.weightedUsed) + 7 });
+  const crashed = /** @type {Record<string, unknown>} */ ({ ...newest, eventId: randomUUID(), at: crashedAt, checkpointsDone: Number(newest.checkpointsDone) + 1 });
   appendJournal(replayed.campaignPath, crashed);
   assert.equal(readFileSync(heartbeatPath, "utf8"), recorded, "the old heartbeat is still pinned, byte for byte");
 
   const repaired = rebuildHeartbeat(replayed.campaignPath, { generatedAt: crashedAt });
-  assert.equal(repaired?.weightedUsed, Number(newest.weightedUsed) + 7, "the rebuild recovers the newest durable fact");
+  assert.equal(repaired?.checkpoints.done, Number(newest.checkpointsDone) + 1, "the rebuild recovers the newest durable fact");
   assert.notEqual(readFileSync(heartbeatPath, "utf8"), recorded, "and only the rebuild moves the heartbeat");
 });
 

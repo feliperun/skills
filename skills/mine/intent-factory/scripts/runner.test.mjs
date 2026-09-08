@@ -12,7 +12,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "./render.mjs";
-import { cancelRun, livenessState, preflightContract, runContract, resumeRun, superviseRun, rotationTrigger, ROTATION_AVG_CACHE_READ_TOKENS, ROTATION_HANDOFF_MAX_BYTES, ROTATION_MAX_TURNS, ROTATION_MAX_TURNS_CLAUDE_FAMILY, ROTATION_MIN_TURNS_FOR_AVERAGE } from "./runner.mjs";
+import { cancelRun, livenessState, preflightContract, runContract, resumeRun, superviseRun } from "./runner.mjs";
 import { invocationAlive, invocationResult, processStartToken, quotaResetSchedule } from "./supervisor.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts } from "./backoff.mjs";
@@ -20,7 +20,6 @@ import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { attemptWorktreePath, runRefName } from "./worktree.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
-import { deriveBudgetDecision } from "./budget.mjs";
 import { CAMPAIGN_PROGRESS_TYPE, readNotificationOutbox } from "./outbox.mjs";
 import {
   closeResult,
@@ -54,67 +53,6 @@ function nodeState(result, id = "build") {
  */
 function showRefFile(repo, ref, path) {
   return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], { encoding: "utf8" });
-}
-
-function budgetProfile(overrides = {}) {
-  return {
-    estimatedWeightedInputTokens: 500,
-    estimatedTurns: 2,
-    contextWindowTokens: 10_000,
-    safetyFraction: 0.75,
-    minimumSegmentTokens: 100,
-    growthIncrementTokens: 100,
-    preambleBytes: 400,
-    tokenizerEstimate: { bytes: 4, tokens: 1, source: "runner test measurement" },
-    continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
-    ...overrides,
-  };
-}
-
-/**
- * @param {string} directory
- * @param {{continuationDelayMs?: number}} [options] hold the continuation
- *   provider silent for the given delay before announcing its session so a
- *   test can observe the persisted pending budget segment mid-run
- */
-function budgetContinuationCodex(directory, options = {}) {
-  const continuationDelayMs = options.continuationDelayMs ?? 0;
-  const executable = join(directory, "budget-continuation-codex.mjs");
-  const calls = join(directory, ".runs", "budget-continuation-calls.jsonl");
-  writeFileSync(executable, `#!${process.execPath}
-import { appendFileSync, writeFileSync } from "node:fs";
-if (process.argv.includes("--version")) console.log("budget-continuation-codex 1.0.0");
-else {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", chunk => { input += chunk; });
-  process.stdin.on("end", () => {
-    const continuation = input.startsWith("Continue node build in a fresh provider session");
-    appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ continuation }) + "\\n");
-    const announce = () => {
-      console.log(JSON.stringify({ type: "thread.started", thread_id: continuation ? "segment-2" : "segment-1" }));
-      if (continuation) {
-        const resultPath = /file: (\\S+\\.json)/.exec(input)?.[1];
-        const result = JSON.stringify({ status: "done", summary: "continued exactly once", changedFiles: ["README.md"], verification: [], artifacts: [], missingContext: [] });
-        if (resultPath) writeFileSync(resultPath, result);
-        console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1 } }));
-        return;
-      }
-      writeFileSync("README.md", "budget progress\\n");
-      let turns = 0;
-      setInterval(() => {
-        turns += 1;
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turns * 20, output_tokens: 1 } }));
-      }, 30);
-    };
-    if (continuation && ${continuationDelayMs} > 0) setTimeout(announce, ${continuationDelayMs});
-    else announce();
-  });
-}
-`);
-  chmodSync(executable, 0o755);
-  return { executable, calls };
 }
 
 /** @param {import("node:child_process").ChildProcess} child @returns {number} */
@@ -403,117 +341,6 @@ async function withBrokenGateCodex(directory, fn) {
   }
 }
 
-/**
- * A codex-shaped provider for automatic worker rotation. The fat session
- * emits turn events until a rotation threshold is crossed and then parks
- * until the controller terminates it; the one-turn handoff writes an
- * intentionally oversized handoff document (or misbehaves per mode); the
- * fresh rotated session completes the node. "turns" crosses the turn
- * threshold, "cache" the average cache-read threshold, "no-threshold" stays
- * under both, "no-continuation" never exposes a session identity,
- * "handoff-missing" acknowledges without writing the document, and
- * "handoff-parks" never finishes the handoff turn so cancellation lands on
- * it. "fat-log" buries the 80 threshold-crossing turns under more than
- * 128 KiB of padding events first, so the rotation only fires when live
- * monitoring keeps observing past a fixed window.
- *
- * @param {string} directory
- * @param {"turns"|"cache"|"no-threshold"|"no-continuation"|"handoff-missing"|"handoff-parks"|"fat-log"} mode
- * @returns {{executable: string, argvLog: string}}
- */
-function rotatingCodex(directory, mode) {
-  const executable = join(mkdtempSync(join(tmpdir(), "runner-rotating-")), `rotating-${mode}.mjs`);
-  const argvLog = join(directory, ".runs", `rotating-${mode}-argv.jsonl`);
-  writeFileSync(executable, `#!${process.execPath}
-import { appendFileSync, writeFileSync } from "node:fs";
-const mode = ${JSON.stringify(mode)};
-if (process.argv.includes("--version")) {
-  console.log("fake-codex 1.0.0");
-} else {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (chunk) => { input += chunk; });
-  process.stdin.on("end", () => {
-    const prompt = input || process.argv.at(-1) || "";
-    const handoffTurn = prompt.startsWith("The worker session is being rotated");
-    const freshTurn = prompt.startsWith("Continue node build in a fresh provider session");
-    appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ resume: process.argv.includes("resume"), handoffTurn, freshTurn }) + "\\n");
-    const result = (summary) => JSON.stringify({ status: "done", summary, changedFiles: [], verification: [], artifacts: [], missingContext: [] });
-    if (handoffTurn) {
-      if (mode !== "handoff-missing" && mode !== "handoff-parks") {
-        const handoffPath = /to: (\\S+\\.md)/.exec(prompt)?.[1];
-        // Oversized on purpose: the controller must bound it to 16 KiB.
-        if (handoffPath) writeFileSync(handoffPath, "## Handoff\\n\\n- done: fat session work\\n- pending: fresh session completion\\n- commands: node --test passes\\n- files: README.md\\n\\n" + "x".repeat(20 * 1024));
-      }
-      if (mode === "handoff-parks") { setInterval(() => {}, 60_000); return; }
-      console.log(JSON.stringify({ type: "thread.started", thread_id: "fat-thread" }));
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "handoff written" } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 6, output_tokens: 1 } }));
-      return;
-    }
-    if (freshTurn) {
-      const resultPath = /file: (\\S+\\.json)/.exec(prompt)?.[1];
-      if (resultPath) writeFileSync(resultPath, result("fresh session complete"));
-      console.log(JSON.stringify({ type: "thread.started", thread_id: "fresh-thread" }));
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result("fresh session complete") } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 2 } }));
-      return;
-    }
-    // Fat worker session: emit turn evidence, then park until rotated.
-    if (mode !== "no-continuation") console.log(JSON.stringify({ type: "thread.started", thread_id: "fat-thread" }));
-    if (mode === "cache") {
-      // Two cumulative turn.completed records: the cache-read average is only
-      // trusted across at least two observed turns, so a single completed
-      // turn must never rotate a finishing invocation.
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 1, cached_input_tokens: 130000 } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2000, output_tokens: 1, cached_input_tokens: 260000 } }));
-    } else if (mode === "no-threshold") {
-      // 78 turn events plus the closing one stay strictly under 80 observed.
-      for (let index = 0; index < 78; index += 1) {
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
-      }
-      const resultPath = /file: (\\S+\\.json)/.exec(prompt)?.[1];
-      if (resultPath) writeFileSync(resultPath, result("completed without rotation"));
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result("completed without rotation") } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
-      return;
-    } else {
-      if (mode === "fat-log") {
-        // Padding first: a fixed live window would never reach the turns.
-        for (let index = 0; index < 60; index += 1) {
-          console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "p".repeat(4096) } }));
-        }
-      }
-      for (let index = 0; index < 80; index += 1) {
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 1, cached_input_tokens: 0 } }));
-      }
-    }
-    setInterval(() => {}, 60_000);
-  });
-}
-`);
-  chmodSync(executable, 0o755);
-  return { executable, argvLog };
-}
-
-/**
- * @param {string} directory
- * @param {"turns"|"cache"|"no-threshold"|"no-continuation"|"handoff-missing"|"handoff-parks"|"fat-log"} mode
- * @param {string} path
- * @returns {Promise<{result: import("./runner.mjs").RunOutcome, argvLog: string}>}
- */
-async function withRotatingCodex(directory, mode, path) {
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  const { executable, argvLog } = rotatingCodex(directory, mode);
-  process.env.INTENT_FACTORY_CODEX_BIN = executable;
-  try {
-    return { result: await runContract(path), argvLog };
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
-}
-
 test("runs the CLI through an installed symlink", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-symlink-"));
   const contractPath = writeContract(directory, fixture({
@@ -578,14 +405,12 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
   chmodSync(worker, 0o755);
   const contract = join(directory, "contract.json");
   writeFileSync(contract, `${JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     contractVersion: "0.1.0",
     id: "doctor-run",
     campaignId: "doctor-campaign",
     goal: "doctor",
     cwd: ".",
-    maxInputTokens: 1_000,
-    usagePolicy: false,
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
     runtimes: { wrapped: { driver: "exec-jsonl", model: "m", vendor: "wrapped-vendor", executable: "./my-worker.mjs" } },
     nodes: [{ id: "build", type: "backend", phase: "doctor", dependsOn: [], taskPacket: packet(), gate: false }],
@@ -2066,39 +1891,6 @@ test("a file write root does not authorize a path beneath a same-named directory
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["notes.md/nested.txt"]);
 });
 
-test("autonomous heartbeats observe progress made through a contained alias", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-scope-alias-heartbeat-"));
-  mkdirSync(join(directory, "src"));
-  // git tracks no empty directory: a placeholder makes "src" survive into
-  // the isolated attempt worktree the alias symlink must resolve against.
-  writeFileSync(join(directory, "src", ".keep"), "");
-  symlinkSync("src", join(directory, "alias"));
-  initializeGit(directory);
-  const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["alias"], verification: [] });
-  const path = writeContract(directory, fixture({
-    id: "scope-alias-heartbeat-run",
-    pollIntervalMs: 5,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: autonomousPacket,
-      progressPolicy: { graceSec: 0, intervalSec: 0.25, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const result = await withFakeCodex(directory, "alias-heartbeat", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "done", state.error?.message);
-  assert.equal(state.progress?.heartbeatCount, 3);
-  assert.equal(state.progress?.dryHeartbeatCount, 0);
-  assert.ok(state.scope?.boundary?.roots.includes("alias"));
-  assert.ok(state.scope?.boundary?.roots.includes("src"));
-  assert.ok(showRefFile(directory, runRefName("scope-alias-heartbeat-run"), "src/progress.txt"));
-});
-
-// Phase 1 gave every attempt its own isolated worktree, so the isolation
-// `maxParallel` used to wait for now exists: a contract may declare more
-// than one parallel slot without validation refusing it.
 test("accepts parallel execution now that attempt worktrees provide isolation", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-max-parallel-"));
   const path = writeContract(directory, fixture({ maxParallel: 2 }));
@@ -2853,59 +2645,6 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   assert.equal(finalAgain.usage.inputTokens, 30, "a second resume does not charge the orphan judge again");
 });
 
-test("invalid orphan judge usage survives a full worker restart exactly once", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-resume-invalid-restart-"));
-  const path = writeContract(directory, fixture({
-    id: "resume-invalid-restart-run",
-    pollIntervalMs: 10,
-    usagePolicy: { epoch: "resume-invalid-restart", maxInputTokens: 1000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1000, maxInvocationTokens: 500, cacheReadWeight: 0.1 },
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } }],
-  }));
-  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
-  const nodePath = join(runDir, "nodes", "build.json");
-  /** @type {{invocations: Array<{id: string, phase: string, stdoutPath: string, usage?: unknown}>}} */
-  const state = JSON.parse(readFileSync(nodePath, "utf8"));
-  const judgeInvocation = state.invocations.at(-1);
-  const workerInvocation = state.invocations.find((invocation) => invocation.phase === "worker");
-  assert.ok(judgeInvocation && workerInvocation, "persisted judge and worker invocations exist");
-  writeFileSync(workerInvocation.stdoutPath, "not a provider stream\n");
-  writeFileSync(judgeInvocation.stdoutPath, [
-    { type: "thread.started", thread_id: "orphan-judge" },
-    { type: "item.completed", item: { type: "agent_message", text: "not a structured verdict" } },
-    { type: "turn.completed", usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 0 } },
-  ].map((event) => JSON.stringify(event)).join("\n"));
-  const { usage: _judgeUsage, ...judgeWithoutUsage } = judgeInvocation;
-  writeFileSync(nodePath, JSON.stringify({
-    ...state,
-    status: "running",
-    phase: "judge",
-    usage: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0 },
-    invocations: state.invocations.map((invocation) => invocation.id === judgeInvocation.id ? judgeWithoutUsage : invocation),
-  }, null, 2));
-  const ledgerPath = join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json");
-  const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-  delete ledger.epochs["resume-invalid-restart"].invocations[judgeInvocation.id];
-  writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
-
-  const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
-  const final = nodeState(resumed);
-  assert.equal(final.status, "done");
-  assert.equal(final.attempt, 2, "an unusable worker forces a full worker restart");
-  assert.ok(final.usage, "usage persisted");
-  assert.equal(final.usage.inputTokens, 40, "the orphan judge usage is charged before the replacement phase");
-  const recoveredLedger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-  const recoveredEntries = Object.values(recoveredLedger.epochs["resume-invalid-restart"].invocations);
-  assert.equal(recoveredEntries.length, 4, "four invocation usages are present exactly once");
-  assert.ok(final.executionOverrides, "execution overrides persisted");
-  assert.equal(final.executionOverrides.filter((item) => item.invocationId === judgeInvocation.id).length, 1);
-  const resumedAgain = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
-  const finalAgain = nodeState(resumedAgain);
-  assert.ok(finalAgain.usage, "usage persisted on second resume");
-  assert.equal(finalAgain.usage.inputTokens, 40, "the second resume does not charge the judge again");
-  const resumedLedger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-  assert.equal(Object.keys(resumedLedger.epochs["resume-invalid-restart"].invocations).length, Object.keys(recoveredLedger.epochs["resume-invalid-restart"].invocations).length, "a second resume does not add a ledger entry");
-});
-
 test("resume restarts a node with no usable worker output", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-restart-"));
   const path = writeContract(directory, fixture({ id: "resume-restart-run", pollIntervalMs: 10 }));
@@ -2914,40 +2653,6 @@ test("resume restarts a node with no usable worker output", async () => {
   const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
   assert.equal(nodeState(resumed).status, "done");
   assert.equal(nodeState(resumed).attempt, 2);
-});
-
-test("orphan worker failure usage is recovered into the campaign ledger", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-orphan-failure-usage-"));
-  const path = writeContract(directory, fixture({
-    id: "orphan-failure-usage-run",
-    pollIntervalMs: 10,
-    usagePolicy: { epoch: "orphan-failure-usage", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-  }));
-  const runDir = await withFakeCodex(directory, "failure-with-usage", async () => (await runContract(path)).runDir);
-  const nodePath = join(runDir, "nodes", "build.json");
-  const state = JSON.parse(readFileSync(nodePath, "utf8"));
-  const invocation = state.invocations[0];
-  const { usage: _usage, costUsd: _cost, ...withoutAccounting } = invocation;
-  writeFileSync(nodePath, JSON.stringify({
-    ...state,
-    status: "running",
-    phase: "worker",
-    usage: undefined,
-    costUsd: undefined,
-    invocations: [{ ...withoutAccounting, status: "closed", usage: { inputTokens: null, outputTokens: null, cacheReadInputTokens: null }, costUsd: null }],
-  }, null, 2));
-  const ledgerPath = join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json");
-  const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-  ledger.epochs["orphan-failure-usage"].invocations = {};
-  writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
-
-  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  const final = nodeState(resumed);
-  assert.equal(final.status, "done");
-  assert.deepEqual(final.usage, { inputTokens: 15, outputTokens: 5, cacheReadInputTokens: 2 });
-  const finalLedger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-  assert.equal(Object.keys(finalLedger.epochs["orphan-failure-usage"].invocations).length, 2);
-  assert.deepEqual(finalLedger.epochs["orphan-failure-usage"].invocations[invocation.id].usage, { inputTokens: 5, outputTokens: 3, cacheReadInputTokens: 2 });
 });
 
 test("simultaneous resumes allow one controller and reject the other", async () => {
@@ -3159,87 +2864,6 @@ test("resume adopts a still-live orphan invocation after its stream completes", 
   }
 });
 
-test("resume applies the persisted progress heartbeat to a noisy live worker", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-live-progress-resume-"));
-  mkdirSync(join(directory, "src"));
-  const autonomousPacket = packet({ mode: "autonomous", readFiles: [], writeFiles: undefined, writeRoots: ["src"] });
-  const path = writeContract(directory, fixture({
-    id: "live-progress-resume-run",
-    pollIntervalMs: 5,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: autonomousPacket,
-      progressPolicy: { graceSec: 300, intervalSec: 120, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  const nodePath = join(runDir, "nodes", "build.json");
-  const state = JSON.parse(readFileSync(nodePath, "utf8"));
-  const stdoutPath = join(runDir, "logs", "active-progress.jsonl");
-  writeFileSync(stdoutPath, "working\n");
-  const child = spawn(process.execPath, ["-e", `const fs = require("node:fs"); setInterval(() => fs.appendFileSync(${JSON.stringify(stdoutPath)}, "working\\n"), 5);`], {
-    detached: process.platform !== "win32",
-    stdio: "ignore",
-  });
-  const snapshotPath = join(runDir, "logs", "active-progress.snapshot.json");
-  writeFileSync(snapshotPath, JSON.stringify(captureWorkspaceSnapshot(directory)));
-  const now = new Date().toISOString();
-  state.status = "running";
-  state.phase = "worker";
-  state.result = null;
-  state.progress = {
-    ...state.progress,
-    revision: 0,
-    heartbeatCount: 2,
-    dryHeartbeatCount: 2,
-    nextCheckAt: new Date(Date.now() - 1_000).toISOString(),
-  };
-  state.invocations = [{
-    id: "live-progress",
-    pid: childPid(child),
-    processGroupId: process.platform === "win32" ? null : childPid(child),
-    processStartToken: processStartToken(childPid(child)),
-    driver: "codex",
-    runtimeId: "luna",
-    runtimeFingerprint: "test-runtime",
-    runId: basename(runDir),
-    campaignId: "test-campaign",
-    planPhase: "fixture-phase-0",
-    role: "worker",
-    model: "gpt-5.6-luna",
-    reasoning: "xhigh",
-    sandbox: "workspace-write",
-    continuationId: null,
-    continuationMode: "fresh",
-    phase: "worker",
-    promptPath: null,
-    stdoutPath,
-    stderrPath: null,
-    startedAt: now,
-    updatedAt: now,
-    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
-    closedAt: null,
-    exitCode: null,
-    signal: null,
-    status: "active",
-    executable: process.execPath,
-    snapshotPath,
-  }];
-  writeFileSync(nodePath, JSON.stringify(state, null, 2));
-  try {
-    const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
-    const final = nodeState(resumed);
-    assert.equal(final.status, "stalled");
-    assert.equal(final.error?.code, "progress_stalled");
-    assert.equal(final.progress?.dryHeartbeatCount, 3);
-    assert.equal(final.invocations?.[0]?.status, "closed");
-  } finally {
-    try { process.kill(process.platform === "win32" ? childPid(child) : -childPid(child), "SIGKILL"); } catch {}
-  }
-});
-
 test("resume terminates an interrupted verification attempt and re-runs the phase", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-verification-resume-"));
   const path = writeContract(directory, fixture({ id: "verification-resume-run", pollIntervalMs: 10 }));
@@ -3400,62 +3024,6 @@ test("resume preserves a durable pending judge phase instead of resetting to wor
   assert.equal(final.attempt, 1, "the pending judge does not repeat the worker attempt");
 });
 
-test("ledger enforcement on resume lets a done budgeted worker reach its judge", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-judge-gate-budget-resume-"));
-  const path = writeContract(directory, fixture({
-    id: "judge-gate-budget-resume-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    usagePolicy: { epoch: "judge-gate-budget-resume", maxInputTokens: 1_000_000, judgeReserveInputTokens: 500_000, maxPhaseInputTokens: 1_000_000, maxInvocationTokens: 100_000, cacheReadWeight: 1 },
-    nodes: [
-      { id: "gated", type: "backend", taskPacket: packet({ objective: "Finish at the derived cap" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
-      { id: "revision", type: "backend", taskPacket: packet({ objective: "Re-dispatch for a gate revision" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
-      { id: "sibling", type: "backend", taskPacket: packet({ objective: "No persisted result" }), maxInputTokens: 500, budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }), progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 }, definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
-    ],
-  }));
-  const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
-  /** @param {string} id @returns {string} */
-  const persistedPath = (id) => join(runDir, "nodes", `${id}.json`);
-  /** @type {Array<[id: string, phase: string, keepResult: boolean]>} */
-  const plans = [["gated", "judge", true], ["revision", "worker", true], ["sibling", "worker", false]];
-  for (const [id, phase, keepResult] of plans) {
-    /** @type {{id: string, attempt: number, budgetState?: {currentCapTokens?: number}|null, invocations?: Array<{id: string, phase: string, usage?: {inputTokens?: number, outputTokens?: number, cacheReadInputTokens?: number}|null}>|null, result?: unknown|null, worktree?: import("./contract.mjs").WorktreeState|null}} */
-    const persisted = JSON.parse(readFileSync(persistedPath(id), "utf8"));
-    const cap = Math.max(1, Math.ceil(persisted.budgetState?.currentCapTokens ?? 500));
-    const worker = (persisted.invocations ?? []).find((invocation) => invocation.phase === "worker");
-    const invocations = (persisted.invocations ?? []).map((invocation) => invocation.id === worker?.id
-      ? { ...invocation, usage: { inputTokens: cap, outputTokens: 0, cacheReadInputTokens: 0 } }
-      : { ...invocation, usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 } });
-    writeFileSync(persistedPath(id), JSON.stringify({
-      ...persisted,
-      status: "pending",
-      phase,
-      result: keepResult ? persisted.result : null,
-      gate: null,
-      error: null,
-      usage: undefined,
-      costUsd: undefined,
-      invocations,
-      worktree: id === "gated" ? ensureAttemptWorktree(runDir, persisted) : persisted.worktree,
-    }, null, 2));
-  }
-
-  const resumed = await withAdvisoryGateCodex(directory, () => resumeRun(runDir));
-  const gated = nodeState(resumed, "gated");
-  assert.equal(gated.status, "done", `done worker must reach its judge: ${gated.error?.message ?? gated.status}`);
-  assert.equal(gated.phase, "complete");
-  assert.equal(gated.error, null);
-  assert.equal(gated.attempt, 1, "the pending judge does not repeat the worker attempt");
-  assert.ok(gated.gate, "the re-dispatched judge records a verdict");
-  assert.ok((gated.invocations ?? []).filter((invocation) => invocation.phase === "judge").length >= 2, "the gate judge starts after resume");
-  const sibling = nodeState(resumed, "sibling");
-  assert.equal(sibling.status, "blocked", `an equivalent node without a worker result stays capped: ${sibling.error?.message ?? sibling.status}`);
-  assert.equal(sibling.error?.code, "budget_attention");
-  const revision = nodeState(resumed, "revision");
-  assert.equal(revision.status, "blocked", `a pending worker owing a gate revision stays capped despite its done result: ${revision.error?.message ?? revision.status}`);
-  assert.equal(revision.error?.code, "budget_attention");
-});
-
 test("resume gives a never-started pending node zero usage", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-never-started-"));
   const path = writeContract(directory, fixture({ id: "resume-never-started-run", pollIntervalMs: 10 }));
@@ -3526,7 +3094,7 @@ test("status separates a live running node from an orphaned one", async () => {
   assert.match(renderStatus(runDir), /build still claims to be running/u);
 
   writeFileSync(join(runDir, "run.json"), JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     contractVersion: "0.1.0",
     pid: 2_147_483_647,
     startedAt: "2026-01-01T00:00:00.000Z",
@@ -4046,20 +3614,6 @@ test("judge provider failover preserves the completed worker result", async () =
   assert.equal(state.routing?.history?.[0]?.role, "judge");
 });
 
-test("rejects monetary budgets when a reachable runtime cannot return cost", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-cost-capability-"));
-  const path = join(directory, "contract.json");
-  writeFileSync(path, `${JSON.stringify(fixture({
-    maxCostUsd: 0.01,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }), null, 2)}\n`);
-  const checks = await withFakeCodex(directory, "pass", () => preflightContract(path, { static: true }));
-  assert.equal(checks[0].ok, false);
-  assert.match(checks[0].detail ?? "", /cost=false/u);
-  await assert.rejects(() => withFakeCodex(directory, "pass", () => runContract(path)), /cost capability/u);
-  assert.equal(existsSync(join(directory, ".runs")), false);
-});
-
 test("persists and recovers cost exactly once and reports totals", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-cost-recovery-"));
   writeFileSync(join(directory, "seed.txt"), "seed\n");
@@ -4068,7 +3622,6 @@ test("persists and recovers cost exactly once and reports totals", async () => {
   const path = writeContract(directory, fixture({
     id: "cost-recovery-run",
     pollIntervalMs: 10,
-    usagePolicy: { epoch: "cost-recovery", maxInputTokens: 100, judgeReserveInputTokens: 10, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
       jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
@@ -4080,8 +3633,8 @@ test("persists and recovers cost exactly once and reports totals", async () => {
   const first = nodeState(await resumeRun(runDir));
   assert.equal(first.costUsd, 0.02);
   assert.deepEqual((first.invocations ?? []).map((invocation) => invocation.costUsd), [0.01, 0.01]);
-  const ledger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-  assert.deepEqual(Object.values(ledger.epochs["cost-recovery"].invocations).map((invocation) => invocation.costUsd), [0.01, 0.01]);
+  const usageRecords = readFileSync(join(runDir, "usage.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(usageRecords.map((record) => record.costUsd), [0.01, 0.01]);
   assert.equal(JSON.parse(renderReportJson(runDir)).totals.costUsd, 0.02);
   assert.match(renderReport(runDir), /cost \$0\.020000/u);
   const nodePath = join(runDir, "nodes", "build.json");
@@ -4099,42 +3652,6 @@ test("persists and recovers cost exactly once and reports totals", async () => {
   const recovered = nodeState(await resumeRun(runDir));
   assert.equal(recovered.costUsd, 0.02);
   assert.deepEqual((recovered.invocations ?? []).map((invocation) => invocation.costUsd), [0.01, 0.01]);
-});
-
-test("blocks new work at contract and node monetary budgets", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-cost-budget-"));
-  writeFileSync(join(directory, "seed.txt"), "seed\n");
-  initializeGit(directory);
-  const executable = fakeExecJsonl(directory, "pass");
-  const path = writeContract(directory, fixture({
-    id: "cost-budget-run",
-    maxCostUsd: 0.01,
-    pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable } },
-    nodes: [
-      { id: "first", type: "backend", taskPacket: packet(), gate: false },
-      { id: "second", type: "backend", taskPacket: packet(), gate: false },
-    ],
-  }));
-  const result = await runContract(path);
-  assert.equal(nodeState(result, "first").status, "done");
-  assert.equal(nodeState(result, "second").status, "blocked");
-  assert.equal(nodeState(result, "second").error?.code, "cost_budget_exceeded");
-
-  const nodeBudgetPath = writeContract(directory, fixture({
-    id: "node-cost-budget-run",
-    pollIntervalMs: 10,
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
-    runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable },
-    },
-    nodes: [{ id: "build", type: "backend", maxCostUsd: 0.01, taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
-  }));
-  const nodeBudget = await runContract(nodeBudgetPath);
-  assert.equal(nodeState(nodeBudget).status, "blocked");
-  assert.equal(nodeState(nodeBudget).error?.code, "cost_budget_exceeded");
 });
 
 test("resume keeps the bounded wall-clock budget of a node that exhausted it", async () => {
@@ -4241,26 +3758,6 @@ test("resume removes a stale findings.json after driving the run to done", async
   assert.equal(existsSync(join(runDir, "findings.json")), false, "a done run leaves no stale artifact");
 });
 
-test("usagePolicy blocks pending nodes once the weighted budget is spent", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-token-budget-"));
-  const path = writeContract(directory, fixture({
-    id: "budget-run",
-    usagePolicy: { epoch: "test-budget", maxInputTokens: 5, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-    pollIntervalMs: 10,
-    nodes: [
-      { id: "first", type: "backend", taskPacket: packet(), gate: false },
-      { id: "second", type: "backend", taskPacket: packet({ objective: "Implement it too" }), dependsOn: ["first"], gate: false },
-    ],
-  }));
-  const result = await withFakeCodex(directory, "pass", () => runContract(path));
-  assert.equal(result.ok, false);
-  assert.equal(nodeState(result, "first").status, "done");
-  const blocked = nodeState(result, "second");
-  assert.equal(blocked.status, "blocked");
-  assert.ok(blocked.error, "budget block records an error");
-  assert.equal(blocked.error.code, "budget_exceeded");
-});
-
 test("a scope finding still persists the usage its invocation spent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-usage-"));
   const path = writeContract(directory, fixture({
@@ -4290,205 +3787,6 @@ test("a wall-clock kill persists usage backfilled from the transcript", async ()
   assert.equal(state.status, "exhausted");
   assert.equal(state.error?.code, "wall_clock_timeout");
   assert.ok((state.usage?.inputTokens ?? 0) > 0, "killed worker reports its observed input tokens");
-});
-
-test("budget attention D36 terminates an active worker at its derived cap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-node-cap-"));
-  const path = writeContract(directory, fixture({
-    id: "node-cap-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Flood tokens" }),
-      maxInputTokens: 500,
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "budget_attention");
-  assert.equal(state.budgetDecision?.initialAllocationTokens, 500);
-  assert.ok((state.usage?.inputTokens ?? 0) >= 500, "usage observed before the kill is persisted");
-  const outbox = readNotificationOutbox(join(directory, ".runs", "campaigns", "test-campaign"));
-  assert.ok(outbox.some((event) => event.type === "run.attention" && event.data?.code === "budget_attention"));
-});
-
-test("a judge invocation on a budgeted node is not killed by the worker input token cap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-judge-worker-cap-"));
-  const path = writeContract(directory, fixture({
-    id: "judge-worker-cap-run",
-    maxInputTokens: 5_000_000,
-    pollIntervalMs: 10,
-    timeoutSec: 10,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Complete and judge" }),
-      maxInputTokens: 500,
-      budgetProfile: budgetProfile({ estimatedWeightedInputTokens: 500 }),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: { failOn: ["critical"] },
-    }],
-  }));
-  const result = await withFakeCodex(directory, "complete-exit-1", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.phase, "complete");
-  assert.equal(state.error, null);
-});
-
-test("an active judge consumes its reserved budget after the run cap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-judge-reserve-"));
-  const release = join(directory, "judge-reserve-release");
-  const executable = join(directory, "judge-reserve-codex.mjs");
-  writeFileSync(executable, `#!${process.execPath}
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-const release = ${JSON.stringify(release)};
-const pause = () => new Promise((resolve) => setTimeout(resolve, 5));
-const waitForRelease = async () => { while (!existsSync(release)) await pause(); };
-if (process.argv.includes("--version")) {
-  console.log("judge-reserve-codex 1.0.0");
-} else {
-  let input = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (chunk) => { input += chunk; });
-  process.stdin.on("end", async () => {
-    const prompt = input || process.argv.at(-1) || "";
-    const judge = prompt.startsWith("Review node");
-    console.log(JSON.stringify({ type: "thread.started", thread_id: "judge-reserve-thread" }));
-    if (judge) {
-      // The judge reports cumulative spend while staying alive so the run cap
-      // crossing is observed by the controller, not raced against exit.
-      for (let turn = 1; turn <= 8; turn += 1) {
-        console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: turn * 100, output_tokens: 1 } }));
-      }
-      await waitForRelease();
-      const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: verdict } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 801, output_tokens: 1 } }));
-      return;
-    }
-    const resultPath = /(?:file|to): (\\S+\\.json)/.exec(prompt)?.[1];
-    const result = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
-    if (resultPath) {
-      const parent = resultPath.slice(0, resultPath.lastIndexOf("/"));
-      if (parent) mkdirSync(parent, { recursive: true });
-      writeFileSync(resultPath, result);
-    }
-    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result } }));
-    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 500, output_tokens: 1 } }));
-  });
-}
-`);
-  chmodSync(executable, 0o755);
-  const path = writeContract(directory, fixture({
-    id: "judge-reserve-overrun-run",
-    maxInputTokens: 1_000,
-    pollIntervalMs: 10,
-    timeoutSec: 30,
-    usagePolicy: { epoch: "judge-reserve-overrun", maxInputTokens: 1_200, judgeReserveInputTokens: 400, maxPhaseInputTokens: 2_000, maxInvocationTokens: 2_000, cacheReadWeight: 0.1 },
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Complete and use the judge reserve" }),
-      definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
-      gate: { failOn: ["critical"] },
-    }],
-  }));
-  const runDir = join(directory, ".runs", "judge-reserve-overrun-run");
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = executable;
-  try {
-    const runPromise = runContract(path);
-    try {
-      // Await the durable override event instead of racing provider output:
-      // the judge parks until the cap crossing is observed and recorded.
-      const override = await waitForValue(() => {
-        try {
-          const events = readFileSync(join(runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-          return events.find((event) => event.budgetAction?.type === "judge_reserve_override") ?? null;
-        } catch {
-          return null;
-        }
-      }, 20_000);
-      assert.ok(override, "the run cap is reached while the judge is active and the durable override is recorded");
-    } finally {
-      writeFileSync(release, "release");
-    }
-    const result = await runPromise;
-    const state = nodeState(result);
-    assert.equal(state.status, "done", state.error?.message);
-    assert.equal(state.gate?.verdict, "pass");
-    const judgeInvocations = (state.invocations ?? []).filter((invocation) => invocation.phase === "judge");
-    assert.equal(judgeInvocations.length, 1, "the active judge is never killed and completes exactly once");
-    assert.ok((judgeInvocations[0]?.usage?.inputTokens ?? 0) >= 500, "the judge completes from the judge reserve and reports its spend");
-    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    const overrides = events.filter((event) => event.budgetAction?.type === "judge_reserve_override");
-    assert.equal(overrides.length, 1);
-    assert.equal(overrides[0].budgetAction.reason, "an active judge is protected from the run worker cap");
-    assert.equal(overrides[0].budgetAction.judgeReserveInputTokens, 400);
-    const epoch = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8")).epochs["judge-reserve-overrun"];
-    const invocations = Object.values(epoch.invocations);
-    const spent = invocations.reduce((total, invocation) => total + (invocation.usage?.inputTokens ?? 0), 0);
-    assert.ok(spent >= epoch.policy.maxInputTokens, `worker plus judge spend (${spent}) reaches the campaign cap (${epoch.policy.maxInputTokens})`);
-    assert.ok(invocations.some((invocation) => invocation.role === "judge" && (invocation.usage?.inputTokens ?? 0) >= 500), "the judge spend is recorded against the campaign ledger");
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-    try { writeFileSync(release, "release"); } catch {}
-  }
-});
-
-test("an active worker stops before consuming the judge reserve", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-worker-reserve-"));
-  const path = writeContract(directory, fixture({
-    id: "worker-reserve-run",
-    maxInputTokens: 1_000,
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    usagePolicy: { epoch: "worker-reserve", maxInputTokens: 1_000, judgeReserveInputTokens: 500, maxPhaseInputTokens: 1_000, maxInvocationTokens: 200, cacheReadWeight: 0.1 },
-    nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood the worker allowance" }), gate: { failOn: ["critical"] } }],
-  }));
-  const result = await withFakeCodex(directory, "worker-reserve-flood", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "exhausted");
-  assert.equal(state.error?.code, "budget_exceeded");
-  assert.equal(state.usage?.inputTokens, 600);
-});
-
-test("budget failover boundary D37 never routes a local budget stop", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-budget-no-failover-"));
-  const path = writeContract(directory, fixture({
-    id: "budget-no-failover-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    runtimeDefaults: { worker: "primary", judge: "primary" },
-    runtimes: {
-      primary: { driver: "codex", model: "primary", fallback: "backup" },
-      backup: { driver: "codex", model: "backup" },
-    },
-    nodes: [{
-      id: "build",
-      type: "backend",
-      runtime: "primary",
-      taskPacket: packet({ objective: "Flood tokens locally" }),
-      maxInputTokens: 500,
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "blocked");
-  assert.equal(state.error?.code, "budget_attention");
-  assert.deepEqual(state.invocations?.map(invocation => invocation.runtimeId), ["primary"]);
-  assert.equal(state.routing?.history.length, 0);
 });
 
 /** @param {string} prefix @param {Record<string, unknown>} overrides @returns {import("./contract.mjs").ValidatedContract} */
@@ -4840,240 +4138,6 @@ test("quota exhaustion routes through the declared failover edge", async () => {
   assert.equal(settlement.error?.code, "quota_exhausted");
 });
 
-test("codex invocation limit derives from the current derived cap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-invocation-limit-"));
-  const executable = join(directory, "argv-recording-codex.mjs");
-  const argvLog = join(directory, ".runs", "codex-argv.jsonl");
-  writeFileSync(executable, `#!${process.execPath}
-import { appendFileSync } from "node:fs";
-if (process.argv.includes("--version")) console.log("argv-codex 1.0.0");
-else {
-  appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-  console.log(JSON.stringify({ type: "thread.started", thread_id: "limit-thread" }));
-  const text = JSON.stringify({ status: "done", summary: "worker complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] });
-  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
-  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
-}
-`);
-  chmodSync(executable, 0o755);
-  const cacheReadWeight = 0.2;
-  const maxInvocationTokens = 1000;
-  const profile = budgetProfile({ estimatedWeightedInputTokens: 120 });
-  const decision = deriveBudgetDecision(profile, {
-    packetHash: "a".repeat(64),
-    scopeHash: "b".repeat(64),
-    verificationHash: "c".repeat(64),
-    runtimeId: "primary",
-    packetBytes: 100,
-    phaseRemainingTokens: 10_000,
-    campaignRemainingTokens: 10_000,
-    judgeReserveTokens: 0,
-    pendingReserveTokens: 0,
-    explicitHardCeilingTokens: null,
-  });
-  assert.equal(decision.status, "allocated", decision.rejectReason ?? "");
-  const expectedLimit = Math.min(maxInvocationTokens, Math.floor(decision.initialAllocationTokens / cacheReadWeight));
-  const path = writeContract(directory, fixture({
-    id: "invocation-limit-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    usagePolicy: { epoch: "invocation-limit", maxInputTokens: 10_000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 10_000, maxInvocationTokens, cacheReadWeight },
-    runtimeDefaults: { worker: "primary", judge: "primary" },
-    runtimes: { primary: { driver: "codex", model: "primary", executable } },
-    nodes: [{
-      id: "build",
-      type: "backend",
-      runtime: "primary",
-      taskPacket: packet(),
-      budgetProfile: profile,
-      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
-      gate: false,
-    }],
-  }));
-  const result = await runContract(path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done", state.error?.message);
-  assert.equal(state.budgetDecision?.initialAllocationTokens, decision.initialAllocationTokens);
-  const args = /** @type {string[]} */ (JSON.parse(readFileSync(argvLog, "utf8").trim().split("\n")[0]));
-  const rollout = args.find((arg) => arg.startsWith("features.rollout_budget="));
-  assert.ok(rollout, "codex receives the native rollout budget");
-  assert.match(rollout, new RegExp(`limit_tokens=${expectedLimit}(?:[^0-9]|$)`));
-  const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  const limitEvents = events.filter((event) => event.budgetAction?.type === "invocation_limit");
-  assert.equal(limitEvents.length, 1);
-  assert.equal(limitEvents[0].budgetAction.limitTokens, expectedLimit);
-  assert.equal(limitEvents[0].budgetAction.remainingWeighted, decision.initialAllocationTokens);
-  assert.equal(limitEvents[0].budgetAction.cacheReadWeight, cacheReadWeight);
-});
-
-test("rollout budget exhaustion settles as a derived budget stop", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rollout-budget-stop-"));
-  const path = writeContract(directory, fixture({
-    id: "rollout-budget-stop-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    maxInputTokens: 2000,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Run against the native rollout budget" }),
-      budgetProfile: budgetProfile({
-        estimatedWeightedInputTokens: 500,
-        continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 500 },
-      }),
-      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
-      gate: false,
-    }],
-  }));
-  const result = await withFakeCodex(directory, "rollout-budget", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "budget_attention");
-  assert.equal(state.routing?.history?.length ?? 0, 0);
-  assert.equal(state.budgetState?.status, "attention");
-  assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["luna"]);
-});
-
-test("wall-clock kill without usage charges the remaining derived cap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-wallclock-estimate-"));
-  const path = writeContract(directory, fixture({
-    id: "wallclock-estimate-run",
-    pollIntervalMs: 10,
-    timeoutSec: 1,
-    usagePolicy: { epoch: "wallclock-estimate", maxInputTokens: 2000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 2000, maxInvocationTokens: 1000, cacheReadWeight: 0.1 },
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Run silently past the wall clock" }),
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 0.05, maxDryHeartbeats: 1000 },
-      gate: false,
-    }],
-  }));
-  const result = await withFakeCodex(directory, "silent", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "wall_clock_timeout");
-  const invocation = state.invocations?.[0];
-  assert.equal(invocation?.usageEstimated, true, "killed invocation usage is flagged as estimated");
-  assert.equal(invocation?.usage?.inputTokens, state.budgetState?.currentCapTokens, "estimate charges the remaining derived cap");
-  assert.equal(state.usage?.inputTokens, state.budgetState?.currentCapTokens);
-  const ledger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-  const entries = Object.values(ledger.epochs["wallclock-estimate"].invocations);
-  assert.equal(entries.length, 1, "the estimated charge reaches the campaign ledger once");
-  assert.equal(entries[0].usage.inputTokens, state.budgetState?.currentCapTokens);
-});
-
-test("budget continuation D35 checkpoints and activates one predeclared segment with identical continuation scope", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-budget-continuation-"));
-  // The continuation provider stays silent before announcing its session so
-  // the persisted pending segment is observable from the node snapshot while
-  // it exists, before activateBudgetContinuation settles it.
-  const provider = budgetContinuationCodex(directory, { continuationDelayMs: 350 });
-  const path = writeContract(directory, fixture({
-    id: "budget-continuation-run",
-    pollIntervalMs: 5,
-    timeoutSec: 5,
-    runtimes: { worker: { driver: "codex", model: "budget-test", executable: provider.executable } },
-    runtimeDefaults: { worker: "worker", judge: "worker" },
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Continue at the declared budget boundary" }),
-      maxInputTokens: 1_000,
-      budgetProfile: budgetProfile({
-        estimatedWeightedInputTokens: 500,
-        continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 500 },
-      }),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 100 },
-      gate: false,
-    }],
-  }));
-  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  const runDir = join(contract.cwd, ".runs", contract.id);
-  const nodePath = join(runDir, "nodes", "build.json");
-  /** @type {{status: string, phase: string, pending: Record<string, unknown>, decision: Record<string, unknown>}[]} */
-  const pendingSamples = [];
-  const sampler = setInterval(() => {
-    try {
-      const node = JSON.parse(readFileSync(nodePath, "utf8"));
-      const pending = /** @type {Record<string, unknown>|null|undefined} */ (node.budgetState?.pendingSegment);
-      const decision = /** @type {Record<string, unknown>|null|undefined} */ (node.budgetDecision);
-      if (pending && decision) pendingSamples.push({ status: node.status, phase: node.phase, pending, decision });
-    } catch {}
-  }, 2);
-  try {
-    const result = await runContract(path);
-    const state = nodeState(result);
-    assert.equal(state.status, "done", state.error?.message);
-    assert.deepEqual(state.budgetState?.activatedSegments, [1, 2]);
-    assert.equal(state.budgetState?.pendingSegment, null);
-    // While the predeclared continuation was pending, its frozen identity hashes
-    // must equal the budget decision that authorized it.
-    assert.ok(pendingSamples.length > 0, "observed the pending segment before it was activated");
-    for (const sample of pendingSamples) {
-      assert.equal(sample.pending.packetHash, sample.decision.packetHash, "pending packetHash matches the budget decision while the segment exists");
-      assert.equal(sample.pending.scopeHash, sample.decision.scopeHash, "pending scopeHash matches the budget decision while the segment exists");
-      assert.equal(sample.pending.verificationHash, sample.decision.verificationHash, "pending verificationHash matches the budget decision while the segment exists");
-    }
-    const calls = readFileSync(provider.calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.deepEqual(calls.map(call => call.continuation), [false, true]);
-    const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.equal(events.filter(event => event.budgetAction?.type === "continuation_planned").length, 1);
-    assert.equal(events.filter(event => event.budgetAction?.type === "continuation_activated").length, 1);
-    const planned = events.find((event) => event.budgetAction?.type === "continuation_planned");
-    const packetHash = state.budgetDecision?.packetHash;
-    assert.ok(packetHash && typeof planned?.budgetAction?.id === "string" && planned.budgetAction.id.startsWith(packetHash), `planned segment ${planned?.budgetAction?.id ?? ""} must carry the frozen decision packetHash ${packetHash ?? "missing"}`);
-  } finally {
-    clearInterval(sampler);
-  }
-});
-
-test("budget liveness D36 records heartbeat attention and a human-channel event within one supervisor interval", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-liveness-"));
-  const path = writeContract(directory, fixture({
-    id: "node-cap-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Flood tokens" }),
-      maxInputTokens: 500,
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const campaignPath = join(directory, ".runs", "campaigns", "test-campaign");
-  const notifier = join(directory, "notify-success.mjs");
-  writeFileSync(notifier, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n");
-  chmodSync(notifier, 0o755);
-  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
-  let result;
-  try {
-    result = await withFakeCodex(directory, "token-flood", () => runContract(path));
-  } finally {
-    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
-    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
-  }
-  const state = nodeState(result);
-  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "budget_attention");
-  const heartbeatPath = join(campaignPath, "heartbeat.json");
-  assert.equal(existsSync(heartbeatPath), true, "heartbeat.json exists in the campaign directory");
-  const heartbeat = JSON.parse(readFileSync(heartbeatPath, "utf8"));
-  assert.equal(heartbeat.state, "blocked");
-  assert.match(String(heartbeat.attention ?? ""), /budget/u, "heartbeat attention names the budget block");
-  const journal = readFileSync(join(campaignPath, "journal.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.ok(journal.some((entry) => entry.type === "liveness"), "journal.jsonl records at least one liveness fact");
-  const outbox = readNotificationOutbox(campaignPath);
-  const attention = outbox.find((event) => event.type === "run.attention" && event.data?.code === "budget_attention");
-  assert.ok(attention, "outbox holds the budget_attention run.attention event");
-  assert.notEqual(attention.deliveredAt, null, "the attention event reached the human-channel transport");
-});
-
 test("liveness progress ignores invocation-only churn and never uses the current time", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-liveness-progress-"));
   // The noise worker only emits provider turns (invocation updates rewrite
@@ -5111,7 +4175,6 @@ else {
     id: "liveness-progress-run",
     pollIntervalMs: 5,
     timeoutSec: 5,
-    maxInputTokens: 1_000_000,
     runtimes: { worker: { driver: "codex", model: "mixed", executable } },
     runtimeDefaults: { worker: "worker", judge: "worker" },
     nodes: [
@@ -5203,42 +4266,7 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
   assert.equal(terminalStates.at(-1), "failed", `the terminal run's final liveness fact reports failed (saw ${terminalStates.join(",")})`);
 });
 
-test("campaign maxInputTokens stops a running worker once the budget is spent", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cap-"));
-  const path = writeContract(directory, fixture({
-    id: "campaign-cap-run",
-    maxInputTokens: 2000,
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet({ objective: "Flood tokens" }), gate: false }],
-  }));
-  const result = await withFakeCodex(directory, "token-flood", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "exhausted", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "budget_exceeded");
-  assert.equal(result.ok, false);
-  assert.ok((state.usage?.inputTokens ?? 0) > 0, "stopped worker still reports its spend");
-});
-
-test("native rollout-budget exhaustion charges the declared ceiling when Codex omits usage", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rollout-budget-accounting-"));
-  const path = writeContract(directory, fixture({
-    id: "rollout-budget-accounting-run",
-    usagePolicy: { epoch: "rollout-budget-accounting", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const result = await withFakeCodex(directory, "rollout-budget", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "exhausted");
-  assert.deepEqual(state.usage, { inputTokens: 50, outputTokens: 0, cacheReadInputTokens: 0 });
-  const ledger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-  assert.deepEqual(Object.values(ledger.epochs["rollout-budget-accounting"].invocations).map((entry) => entry.usage), [
-    { inputTokens: 50, outputTokens: null, cacheReadInputTokens: null },
-  ]);
-});
-
-test("reuses one worker continuation per ordered phase and charges the campaign ledger once", async () => {
+test("reuses one worker continuation per ordered phase", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-phase-reuse-"));
   const requestLog = join(directory, ".runs", "phase-requests.jsonl");
   const executable = join(directory, "phase-wrapper.mjs");
@@ -5253,7 +4281,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   chmodSync(executable, 0o755);
   const path = writeContract(directory, fixture({
     id: "phase-reuse-run",
-    usagePolicy: { epoch: "phase-reuse", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
@@ -5266,41 +4293,8 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   const requests = readFileSync(requestLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(requests.map((request) => request.continuationId), [null, "phase-thread"]);
   assert.deepEqual(result.states.get("second")?.invocations?.map((invocation) => invocation.continuationMode), ["reuse"]);
-  const ledger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-  assert.equal(Object.keys(ledger.epochs["phase-reuse"].invocations).length, 2);
-  assert.equal(JSON.parse(renderReportJson(result.runDir)).campaignUsage, 2.2);
-  assert.equal(JSON.parse(renderReportJson(result.runDir)).campaignRawInput, 4);
-});
-
-test("rotates a phase continuation at the soft boundary with a deterministic handoff", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-phase-rotate-"));
-  const requestLog = join(directory, ".runs", "phase-requests.jsonl");
-  const executable = join(directory, "phase-wrapper.mjs");
-  writeFileSync(executable, `#!${process.execPath}
-import { appendFileSync } from "node:fs";
-if (process.argv.includes("--version")) console.log("phase-wrapper 1.0.0");
-else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; }); process.stdin.on("end", () => {
-  const request = JSON.parse(input); appendFileSync(${JSON.stringify(requestLog)}, JSON.stringify(request) + "\\n");
-  console.log(JSON.stringify({ schemaVersion: 1, type: "run.completed", result: JSON.stringify({ status: "done", summary: "phase complete", changedFiles: [], verification: [], artifacts: [], missingContext: [] }), continuationId: request.continuationId || "phase-thread", usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 1 }, costUsd: null }));
-}); }
-`);
-  chmodSync(executable, 0o755);
-  const path = writeContract(directory, fixture({
-    id: "phase-rotate-run",
-    usagePolicy: { epoch: "phase-rotate", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-    runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
-    nodes: [
-      { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
-      { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
-    ],
-  }));
-  const result = await runContract(path);
-  assert.equal(result.ok, true);
-  const requests = readFileSync(requestLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(requests.map((request) => request.continuationId), [null, null]);
-  assert.match(requests[1].prompt, /Prior structured node summaries/u);
-  assert.equal(result.states.get("second")?.invocations?.[0]?.continuationMode, "rotate");
+  const usageRecords = readFileSync(join(result.runDir, "usage.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(usageRecords.length, 2);
 });
 
 test("does not reuse a phase continuation after a runtime identity change", async () => {
@@ -5318,7 +4312,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   chmodSync(executable, 0o755);
   const path = writeContract(directory, fixture({
     id: "phase-runtime-identity-run",
-    usagePolicy: { epoch: "phase-runtime-identity", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
       primary: { driver: "exec-jsonl", model: "same-model", vendor: "primary-vendor", executable },
@@ -5334,10 +4327,10 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   const requests = readFileSync(requestLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(requests.map((request) => request.continuationId), [null, null]);
   // The runtime identity changed between the two nodes, so the second worker
-  // is composed from the portable continuation capsule instead of reusing or
-  // rotating the prior session.
-  assert.equal(result.states.get("second")?.invocations?.[0]?.continuationMode, "fresh");
-  assert.match(requests[1].prompt, /Portable continuation capsule \(digest /u);
+  // carries the prior node's structured summary forward instead of reusing
+  // its session.
+  assert.equal(result.states.get("second")?.invocations?.[0]?.continuationMode, "rotate");
+  assert.match(requests[1].prompt, /Prior structured node summaries/u);
 });
 
 test("selects the latest phase continuation by invocation chronology", async () => {
@@ -5356,7 +4349,6 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   chmodSync(executable, 0o755);
   const path = writeContract(directory, fixture({
     id: "phase-chronology-run",
-    usagePolicy: { epoch: "phase-chronology", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
     runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
@@ -5376,7 +4368,6 @@ test("Claude phase reuse passes the first explicit session through --resume", as
   const fake = fakeClaudeLike(directory);
   const path = writeContract(directory, fixture({
     id: "claude-phase-reuse-run",
-    usagePolicy: false,
     runtimeDefaults: { worker: "provider", judge: "provider" },
     runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
     nodes: [
@@ -5395,7 +4386,6 @@ test("a completed phase without a continuation ID remains a fresh invocation", a
   const fake = fakeClaudeLike(directory, { emitSessionId: false });
   const path = writeContract(directory, fixture({
     id: "phase-no-id-run",
-    usagePolicy: false,
     runtimeDefaults: { worker: "provider", judge: "provider" },
     runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
     nodes: [
@@ -5418,7 +4408,6 @@ test("a non-continuing runtime gets a deterministic fresh phase handoff", async 
   try {
     const path = writeContract(directory, fixture({
       id: "phase-no-continuation-run",
-      usagePolicy: false,
       runtimeDefaults: { worker: "provider", judge: "provider" },
       runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
       nodes: [
@@ -5436,29 +4425,6 @@ test("a non-continuing runtime gets a deterministic fresh phase handoff", async 
   }
 });
 
-test("Claude and GLM receive the smallest positive remaining monetary allowance", async () => {
-  for (const driver of ["claude", "glm"]) {
-    const directory = mkdtempSync(join(tmpdir(), `runner-${driver}-cost-cap-`));
-    const fake = fakeClaudeLike(directory, { costUsd: 0.2 });
-    const path = writeContract(directory, fixture({
-      id: `${driver}-cost-cap-run`,
-      maxCostUsd: 0.7,
-      usagePolicy: { epoch: `${driver}-cost-cap`, maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
-      runtimeDefaults: { worker: "provider", judge: "provider" },
-      runtimes: { provider: { driver, model: "test-model", executable: fake.executable } },
-      nodes: [
-        { id: "first", type: "backend", phase: "implementation", maxCostUsd: 0.6, taskPacket: packet(), gate: false },
-        { id: "second", type: "backend", phase: "implementation", maxCostUsd: 2, dependsOn: ["first"], taskPacket: packet(), gate: false },
-      ],
-    }));
-    const result = await runContract(path);
-    assert.equal(result.ok, true);
-    const requests = readFileSync(fake.requestLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(requests.map((request) => flagValue(request.args, "--max-budget-usd")), ["0.6", "0.5"]);
-    assert.deepEqual(requests.map((request) => flagValue(request.args, "--max-invocation-tokens")), [null, null]);
-  }
-});
-
 test("resume re-dispatches a capped live continuation as a fresh attempt in a fresh worktree", async () => {
   // Attempt isolation (TECH-SPEC lean v0.3, F23) ties continuation identity to
   // the attempt's own worktree: a timed-out invocation's continuation never
@@ -5467,7 +4433,6 @@ test("resume re-dispatches a capped live continuation as a fresh attempt in a fr
   const directory = mkdtempSync(join(tmpdir(), "runner-live-continuation-"));
   const path = writeContract(directory, fixture({
     id: "live-continuation-run",
-    usagePolicy: { epoch: "live-continuation", maxInputTokens: 100, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100, maxInvocationTokens: 50, cacheReadWeight: 0.1 },
     timeoutSec: 1,
     pollIntervalMs: 5,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
@@ -5480,15 +4445,15 @@ test("resume re-dispatches a capped live continuation as a fresh attempt in a fr
     assert.equal(firstState.status, "exhausted");
     assert.equal(firstState.invocations?.[0]?.continuationId, "fake-thread");
     assert.deepEqual(firstState.invocations?.[0]?.usage, { inputTokens: 4, outputTokens: 2, cacheReadInputTokens: 1 });
-    const firstLedger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-    assert.equal(Object.keys(firstLedger.epochs["live-continuation"].invocations).length, 1, "timeout usage reaches the campaign ledger");
+    const firstUsage = readFileSync(join(first.runDir, "usage.jsonl"), "utf8").trim().split("\n");
+    assert.equal(firstUsage.length, 1, "timeout usage reaches usage.jsonl");
     const resumed = await resumeRun(first.runDir);
     const resumedState = nodeState(resumed);
     assert.equal(resumedState.status, "done");
     assert.equal(resumedState.attempt, 2, "the capped invocation is re-dispatched as attempt plus one");
     assert.equal(resumedState.invocations?.at(-1)?.continuationMode, "fresh", "the new attempt's worktree starts a fresh session, never a resume");
-    const finalLedger = JSON.parse(readFileSync(join(directory, ".runs", "campaigns", "test-campaign", "usage-ledger.json"), "utf8"));
-    assert.equal(Object.keys(finalLedger.epochs["live-continuation"].invocations).length, 2, "resumed invocation is ledgered once");
+    const finalUsage = readFileSync(join(first.runDir, "usage.jsonl"), "utf8").trim().split("\n");
+    assert.equal(finalUsage.length, 2, "resumed invocation is recorded once");
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
@@ -5800,315 +4765,6 @@ test("blocks downstream nodes after a failed dependency", async () => {
   }
 });
 
-test("rotation triggers at exactly 80 turns or 120000 average cache-read tokens per turn", () => {
-  assert.equal(ROTATION_MAX_TURNS, 80);
-  assert.equal(ROTATION_AVG_CACHE_READ_TOKENS, 120_000);
-  assert.equal(ROTATION_MIN_TURNS_FOR_AVERAGE, 2);
-  assert.equal(ROTATION_MAX_TURNS_CLAUDE_FAMILY, 600);
-  assert.equal(ROTATION_HANDOFF_MAX_BYTES, 16 * 1024);
-  assert.equal(rotationTrigger({ turns: 0, cacheReadInputTokens: 10_000_000, completed: false }), null, "no observed turn means no trusted per-turn average");
-  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 10_000_000, completed: false }), null, "a single observed turn never triggers the average rule");
-  assert.equal(rotationTrigger({ turns: 79, cacheReadInputTokens: 79 * 119_999, completed: false }), null, "79 turns under the average stay put");
-  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2 * ROTATION_AVG_CACHE_READ_TOKENS - 1, completed: false }), null, "one token under the average is not premature");
-  assert.match(rotationTrigger({ turns: 80, cacheReadInputTokens: 0, completed: false }) ?? "", /observed turns 80 >= 80/u);
-  assert.match(rotationTrigger({ turns: 3, cacheReadInputTokens: 3 * ROTATION_AVG_CACHE_READ_TOKENS, completed: false }) ?? "", /weighted cache-read input 120000/u);
-  // The cache-read trigger weights cache reads: a bounded-preamble worker that
-  // re-reads a large but cheap context each turn must not rotate every turn.
-  assert.equal(rotationTrigger({ turns: 1, cacheReadInputTokens: 374_400, completed: false }, 0.1), null, "cheap cache reads under the weighted threshold stay put");
-  assert.match(rotationTrigger({ turns: 2, cacheReadInputTokens: 2_600_000, completed: false }, 0.1) ?? "", /weighted cache-read input 130000 >= 120000/u, "genuinely bloated weighted context still rotates across two turns");
-  // claude-family drivers fold one record per assistant turn: the 80-turn
-  // provider ceiling would hand off a reading-heavy glm worker every few
-  // minutes, so the family gets its own much higher turn ceiling while the
-  // cache-read average rule stays identical.
-  assert.equal(rotationTrigger({ turns: 81, cacheReadInputTokens: 0, completed: false }, 1, "claude"), null, "81 claude assistant turns never rotate");
-  assert.equal(rotationTrigger({ turns: 81, cacheReadInputTokens: 0, completed: false }, 1, "glm"), null, "81 glm assistant turns never rotate");
-  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }, 1, "claude") ?? "", /observed turns 600 >= 600/u);
-  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }, 1, "glm") ?? "", /observed turns 600 >= 600/u);
-  assert.match(rotationTrigger({ turns: 600, cacheReadInputTokens: 0, completed: false }) ?? "", /observed turns 600 >= 80/u, "codex keeps the provider-turn ceiling");
-  assert.equal(rotationTrigger({ turns: 80, cacheReadInputTokens: 10_000_000, completed: true }), null, "a completed invocation is never rotated, whatever the observed turns");
-  assert.equal(rotationTrigger({ turns: 2, cacheReadInputTokens: 2_600_000, completed: true }, 0.1), null, "the completed flag outranks the cache-read trigger");
-});
-
-test("automatic rotation turns a fat worker session over at 80 observed turns", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-turns-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-turns-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result, argvLog } = await withRotatingCodex(directory, "turns", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done");
-  const invocations = state.invocations ?? [];
-  assert.equal(invocations.length, 3, "fat session, one-turn handoff, fresh session");
-  assert.equal(invocations[1].continuationMode, "reuse", "the handoff resumes the rotated session for one turn");
-  assert.equal(invocations[1].continuationId, "fat-thread");
-  assert.equal(invocations[2].continuationMode, "fresh", "the post-rotation session is a fresh provider session");
-  assert.notEqual(invocations[2].continuationId, "fat-thread", "the fresh session never carries the rotated session identity");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(rotations.length, 2, "trigger and handoff overrides are durable");
-  assert.match(rotations[0].reason ?? "", /observed turns 80 >= 80/u);
-  assert.equal(rotations[1].decision, "rotated", "the commissioned handoff is consumed exactly once");
-  const runs = readFileSync(argvLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(runs.map((run) => [run.handoffTurn, run.freshTurn]), [[false, false], [true, false], [false, true]]);
-  assert.equal(runs[1].resume, true, "the handoff turn resumes the rotated session");
-  assert.equal(runs[2].resume, false, "the fresh session does not resume anything");
-  const handoff = readFileSync(join(attemptWorktreePath(result.runDir, "rotation-turns-run", "build", 1), ".runs", "rotations", "build.1.1.md"), "utf8");
-  assert.ok(Buffer.byteLength(handoff, "utf8") <= ROTATION_HANDOFF_MAX_BYTES, "the materialized handoff never exceeds 16 KiB");
-  assert.match(handoff, /## Handoff/u);
-  assert.match(handoff, /- done: fat session work/u);
-  const freshPrompt = readFileSync(/** @type {string} */ (invocations[2].promptPath), "utf8");
-  assert.match(freshPrompt, /Continue node build in a fresh provider session/u);
-  assert.match(freshPrompt, /Rotation handoff from the previous session/u);
-  assert.match(freshPrompt, /- pending: fresh session completion/u, "the handoff content carries over");
-  assert.match(freshPrompt, /Bounded git status --short/u);
-  assert.match(freshPrompt, /Current closed task packet/u);
-  assert.equal(freshPrompt.includes("fat session work"), true);
-  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "fresh session complete");
-});
-
-test("automatic rotation triggers on average cache-read input without 80 turns", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-cache-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-cache-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result } = await withRotatingCodex(directory, "cache", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(rotations.length, 2);
-  assert.match(rotations[0].reason ?? "", /weighted cache-read input 130000 >= 120000 tokens\/turn over 2 turns/u);
-  assert.equal((state.invocations ?? []).length, 3, "the cache trigger also rotates through the handoff into a fresh session");
-});
-
-test("automatic rotation still fires when the transcript outgrows the live observation window", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-fat-log-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-fat-log-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result } = await withRotatingCodex(directory, "fat-log", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(rotations.length, 2, "trigger and handoff fire despite the padding");
-  assert.match(rotations[0].reason ?? "", /observed turns 80 >= 80/u);
-  assert.equal((state.invocations ?? []).length, 3, "fat session, one-turn handoff, fresh session");
-  assert.equal((state.invocations ?? []).at(-1)?.continuationMode, "fresh");
-});
-
-test("a session under both rotation thresholds completes without rotating", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-under-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-under-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result } = await withRotatingCodex(directory, "no-threshold", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done");
-  assert.equal((state.invocations ?? []).length, 1, "no rotation, no handoff turn, no fresh session");
-  assert.deepEqual((state.executionOverrides ?? []).filter((item) => item.kind === "rotation"), [], "no premature rotation is recorded");
-  assert.equal(existsSync(join(result.runDir, "rotations")), false, "no handoff artifact materializes");
-  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "completed without rotation");
-});
-
-test("a rotation without a resumable session fails with a precise bounded error", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-unresumable-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-unresumable-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result } = await withRotatingCodex(directory, "no-continuation", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.equal(state.error?.code, "rotation_continuation_unavailable");
-  assert.match(state.error?.message ?? "", /no continuation identity/u, "the failure names exactly what is missing");
-  assert.ok(Buffer.byteLength(state.error?.message ?? "", "utf8") < 512, "the failure stays bounded");
-  assert.equal((state.invocations ?? []).length, 1, "no handoff turn was spent without a session to resume");
-});
-
-test("a rotation handoff that writes no document fails bounded instead of restarting work", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-handoff-missing-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-handoff-missing-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const { result } = await withRotatingCodex(directory, "handoff-missing", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "failed");
-  assert.equal(state.error?.code, "rotation_handoff_missing");
-  assert.match(state.error?.message ?? "", /wrote no document/u);
-  assert.equal((state.invocations ?? []).length, 2, "the fresh session never started");
-});
-
-test("cancellation during a rotation handoff cancels the node without resurrecting it", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-cancel-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-cancel-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const runDir = join(directory, ".runs", "rotation-cancel-run");
-  const canceler = (async () => {
-    await waitForValue(() => {
-      try {
-        const snapshot = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8"));
-        return (snapshot.invocations ?? []).length >= 2 && snapshot.status === "running" ? true : null;
-      } catch {
-        return null;
-      }
-    }, 30_000);
-    writeFileSync(join(runDir, "cancel.request.json"), "{}\n");
-  })();
-  const executable = rotatingCodex(directory, "handoff-parks").executable;
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = executable;
-  let result;
-  try {
-    result = await runContract(path);
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-  }
-  await canceler;
-  const state = nodeState(result);
-  assert.equal(state.status, "canceled");
-  assert.equal((state.invocations ?? []).length, 2, "the parked handoff turn is the last invocation");
-  assert.equal(result.ok, false);
-});
-
-test("resume continues a commissioned rotation handoff in a fresh session", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-rotation-resume-"));
-  const path = writeContract(directory, fixture({
-    id: "rotation-resume-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  // Rewind to the rotation boundary: the handoff is commissioned but the
-  // fresh session has not started, exactly as if the controller died there.
-  const handoffPath = join(runDir, "rotations", "build.1.1.md");
-  mkdirSync(join(runDir, "rotations"));
-  writeFileSync(handoffPath, "## Handoff\n\n- done: rotation\n- pending: resume\n");
-  const nodePath = join(runDir, "nodes", "build.json");
-  const persisted = JSON.parse(readFileSync(nodePath, "utf8"));
-  writeFileSync(nodePath, JSON.stringify({
-    ...persisted,
-    status: "pending",
-    phase: "worker",
-    attempt: 1,
-    result: null,
-    gate: null,
-    error: null,
-    verification: null,
-    executionOverrides: [
-      { kind: "rotation", at: new Date().toISOString(), decision: "trigger", invocationId: persisted.invocations?.[0]?.id ?? "invocation", phase: "worker", reason: "observed turns 80 >= 80" },
-      { kind: "rotation", at: new Date().toISOString(), decision: "handoff", invocationId: "handoff-invocation", phase: "worker", reason: "observed turns 80 >= 80", result: handoffPath },
-    ],
-  }, null, 2));
-
-  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  const state = nodeState(resumed);
-  assert.equal(state.status, "done");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(rotations[1].decision, "rotated", "the resumed fresh session consumed the handoff exactly once");
-  const fresh = state.invocations?.at(-1);
-  assert.equal(fresh?.continuationMode, "fresh", "resume starts the fresh rotated session, not the rotated provider session");
-  assert.notEqual(fresh?.id, rotations[1].invocationId);
-  const freshPrompt = readFileSync(/** @type {string} */ (fresh?.promptPath), "utf8");
-  assert.match(freshPrompt, /Continue node build in a fresh provider session/u);
-  assert.match(freshPrompt, /- pending: resume/u, "the durable handoff content carries into the resumed fresh session");
-  assert.match(freshPrompt, /Bounded git status --short/u);
-  assert.match(freshPrompt, /Current closed task packet/u);
-});
-
-test("a completed worker turn with a non-zero exit code is adopted as done without rotation or continuation", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-complete-exit-1-"));
-  const path = writeContract(directory, fixture({
-    id: "complete-exit-1-run",
-    pollIntervalMs: 10,
-    usagePolicy: { epoch: "complete-exit-1-epoch", maxInputTokens: 100_000_000, judgeReserveInputTokens: 0, maxPhaseInputTokens: 100_000_000, maxInvocationTokens: 100_000_000, cacheReadWeight: 0.1 },
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const result = await withFakeCodex(directory, "complete-exit-1", () => runContract(path));
-  const state = nodeState(result);
-  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal((state.invocations ?? []).length, 1, "the finished turn is adopted, never rotated or continued");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(
-    rotations.some((item) => item.decision === "trigger" || item.decision === "handoff"),
-    false,
-    "a finishing invocation is never rotation-terminated; an advise-fresh decision is allowed",
-  );
-  assert.equal(existsSync(join(result.runDir, "results", "build.json")), true, "the durable canonical result survives");
-  assert.equal(/** @type {{summary: string}} */ (state.result).summary, "completed despite non-zero exit");
-});
-
-test("budget stop never dispatches a rotation handoff the node cannot afford, and a dispatched handoff settles", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-budget-bounded-"));
-  const path = writeContract(directory, fixture({
-    id: "budget-bounded-run",
-    pollIntervalMs: 10,
-    timeoutSec: 5,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Flood tokens" }),
-      maxInputTokens: 1_000_000,
-      budgetProfile: budgetProfile({
-        estimatedWeightedInputTokens: 500,
-        contextWindowTokens: 300_000,
-        continuation: { enabled: false, maxSegments: 1, segmentReserveTokens: 0 },
-      }),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  // The cache-rotating session crosses its derived cap mid-flight: the live
-  // budget stop (or the rotation dispatch gate) must refuse the one-turn
-  // rotation handoff and settle the node through the budget attention path
-  // instead of dispatching a bounded call that would then be terminated.
-  const { result } = await withRotatingCodex(directory, "cache", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "blocked", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  assert.equal(state.error?.code, "budget_attention");
-  assert.equal(state.budgetState?.status, "attention");
-  assert.equal((state.invocations ?? []).length, 1, "no one-turn rotation handoff was dispatched beyond the node budget");
-  const rotations = (state.executionOverrides ?? []).filter((item) => item.kind === "rotation");
-  assert.equal(rotations.some((item) => item.decision === "handoff"), false, "the unaffordable bounded handoff never starts, so nothing budget-terminates it");
-});
-
-test("a dispatched rotation handoff settles under a derived budget before the node completes", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-budget-handoff-settles-"));
-  const path = writeContract(directory, fixture({
-    id: "budget-handoff-settles-run",
-    pollIntervalMs: 10,
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: packet({ objective: "Rotate within budget" }),
-      maxInputTokens: 1_000_000,
-      budgetProfile: budgetProfile(),
-      progressPolicy: { graceSec: 0, intervalSec: 0.01, maxDryHeartbeats: 3 },
-      gate: false,
-    }],
-  }));
-  const { result } = await withRotatingCodex(directory, "turns", path);
-  const state = nodeState(result);
-  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  const invocations = state.invocations ?? [];
-  assert.equal(invocations.length, 3, "the one-turn handoff and the fresh session both ran to settlement");
-  assert.equal(invocations[1].continuationMode, "reuse", "the handoff resumes the rotated session for one bounded turn");
-  assert.equal(invocations[1].status, "closed", "the bounded handoff invocation settled normally, never canceled by a budget stop");
-  assert.equal(state.error, null);
-});
-
 test("a continuation attempt adopts an existing canonical worker result instead of deleting it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-continuation-adopts-"));
   const path = writeContract(directory, fixture({
@@ -6133,8 +4789,6 @@ test("a continuation attempt adopts an existing canonical worker result instead 
     gate: null,
     error: null,
     verification: null,
-    budgetState: null,
-    budgetDecision: null,
   }, null, 2));
 
   // The continuation attempt fails at the provider, yet the durable result
@@ -6147,45 +4801,6 @@ test("a continuation attempt adopts an existing canonical worker result instead 
     JSON.parse(readFileSync(join(runDir, "results", "build.json"), "utf8")).summary,
     "pre-written canonical result",
     "startWorker never cleared the valid canonical file",
-  );
-});
-
-test("an advise-fresh override forces the next continuation into a fresh session", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-advise-fresh-"));
-  const path = writeContract(directory, fixture({
-    id: "advise-fresh-run",
-    pollIntervalMs: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  const nodePath = join(runDir, "nodes", "build.json");
-  const persisted = JSON.parse(readFileSync(nodePath, "utf8"));
-  const sourceInvocation = persisted.invocations?.[0];
-  writeFileSync(nodePath, JSON.stringify({
-    ...persisted,
-    status: "pending",
-    phase: "worker",
-    attempt: 1,
-    result: null,
-    gate: null,
-    error: null,
-    verification: null,
-    executionOverrides: [
-      { kind: "rotation", at: new Date().toISOString(), decision: "advise-fresh", invocationId: sourceInvocation?.id ?? "invocation", phase: "worker", reason: "completed worker turn with weighted cache-read input 130000 >= 120000 tokens/turn" },
-    ],
-  }, null, 2));
-
-  const resumed = await withFakeCodex(directory, "pass", () => resumeRun(runDir));
-  const state = nodeState(resumed);
-  assert.equal(state.status, "done", `unexpected status: ${state.status} ${state.error?.message ?? ""}`);
-  const fresh = state.invocations?.at(-1);
-  assert.equal(fresh?.continuationMode, "fresh", "the advise-fresh decision is consumed like a rotation: the next attempt is fresh");
-  assert.notEqual(fresh?.id, sourceInvocation?.id, "the fresh continuation starts a new invocation rather than resuming the bloated one");
-  assert.notEqual(fresh?.promptPath, undefined, "the fresh continuation carries its own prompt");
-  assert.equal(
-    (state.executionOverrides ?? []).filter((item) => item.kind === "rotation" && item.decision === "advise-fresh").length,
-    0,
-    "the advise-fresh decision was consumed exactly once",
   );
 });
 
@@ -6378,7 +4993,7 @@ async function withCodexBinary(executable, body) {
   }
 }
 
-/** @param {string} runDir @returns {{budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[], sourceIdentity: {gitHead: string|null}}} */
+/** @param {string} runDir @returns {{identityWarnings?: string[], sourceIdentity: {gitHead: string|null}}} */
 function runMetadata(runDir) {
   return JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
 }
@@ -6599,40 +5214,6 @@ test("resume leaves unknown_effect_reconciled alone and retries it only with --r
   const reconciled = await withFakeCodex(directory, "pass", () => resumeRun(runDir, { reconcile: "build" }));
   assert.equal(nodeState(reconciled).status, "done", nodeState(reconciled).error?.message);
   assert.ok(recoveryDecisions(runDir).includes("reconcile_acknowledged"), "the acknowledgement is recorded in events.jsonl");
-});
-
-test("resume reports an exhausted budget as attention and continues with --max-input-tokens", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "retry-budget-"));
-  const path = writeContract(directory, fixture({
-    id: "retry-budget-run",
-    pollIntervalMs: 10,
-    maxInputTokens: 10,
-    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
-  }));
-  const failed = await withFakeCodex(directory, "failure-with-usage", () => runContract(path));
-  assert.equal(nodeState(failed).status, "failed");
-  // The run already spent its ceiling: the contract on disk records a budget
-  // the recorded usage has exhausted.
-  const contractPath = join(failed.runDir, "contract.json");
-  const persisted = JSON.parse(readFileSync(contractPath, "utf8"));
-  persisted.maxInputTokens = 1;
-  writeFileSync(contractPath, `${JSON.stringify(persisted, null, 2)}\n`);
-
-  const refused = await withFakeCodex(directory, "pass", () => resumeRun(failed.runDir));
-  assert.equal(refused.ok, false, "an exhausted budget is attention, not a silent continuation");
-  assert.equal(nodeState(refused).status, "failed", "nothing is re-dispatched");
-  assert.equal(nodeState(refused).attempt, 1, "no attempt is spent against an exhausted budget");
-  assert.equal(runMetadata(failed.runDir).budgetExtension, undefined, "no extension is recorded without the flag");
-  assert.match(readFileSync(join(failed.runDir, "findings.json"), "utf8"), /budget/u);
-
-  const extended = await withFakeCodex(directory, "pass", () => resumeRun(failed.runDir, { maxInputTokens: 1000 }));
-  assert.equal(extended.ok, true);
-  assert.equal(nodeState(extended).status, "done");
-  assert.equal(nodeState(extended).attempt, 2);
-  const extension = runMetadata(failed.runDir).budgetExtension;
-  assert.equal(extension?.previous, 1, "the extension records the previous ceiling");
-  assert.equal(extension?.maxInputTokens, 1000, "the extension records the new ceiling");
-  assert.ok(extension?.at, "the extension records a timestamp");
 });
 
 test("resume accepts a descendant head and records it on the run", async () => {

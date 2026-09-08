@@ -13,12 +13,11 @@ actionable verdicts into the session.
 
 | You need | Read |
 | --- | --- |
-| Contract, packets, results, capsule, driver protocol, states, resume | [contract.md](references/contract.md) |
+| Contract, packets, results, driver protocol, states, resume | [contract.md](references/contract.md) |
 | Attempt worktrees, integration, and recovery | [operations.md](references/operations.md) |
 | Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
 | Campaign plan, transition table, authority, failover routes, commands | [campaign-autonomy.md](references/campaign-autonomy.md) |
 | Heartbeat, outbox, sync/ack, judge gate, metrics, resilience | [release-1.md](references/release-1.md) |
-| Budget profiles, `budgetDecision`/`budgetState` schemas | [budget-governance.md](references/budget-governance.md) |
 | Status line, notifications, notify transport | [feedback.md](references/feedback.md) |
 | Harness-side ambient rendering | [harness-feedback.md](references/harness-feedback.md) |
 | Session save/resume protocol | [session-memory.md](references/session-memory.md) |
@@ -77,11 +76,10 @@ Default `failOn` to `critical`, set `maxRevisions` explicitly, keep judge and
 worker runtimes different. After two rejections or an exhaustion, create one
 targeted fix node from the verbatim finding — never copy the graph.
 
-**Budgets.** `maxInputTokens` is mandatory per contract and may be tightened
-per node; `usagePolicy` must be an explicit object or `false`. A node over its
-cap dies with `token_budget_exceeded`, the contract budget stops every worker
-with `budget_exceeded`, and either becomes visible attention within one
-supervisor interval — never a silent provider change.
+**No spend ceiling.** `timeoutSec` and `stallTimeoutSec` bound an attempt;
+there is no `maxInputTokens`, `maxCostUsd`, or `usagePolicy`. A spent provider
+allowance is handled by discovery (rule 8), never a ceiling the operator had
+to guess. Usage is recorded per attempt in `usage.jsonl` for reporting only.
 
 **Foreground children.** Worker prompts run builds, watchers, and servers in
 the foreground; only the runner is detached. Keep output bounded
@@ -95,10 +93,9 @@ as `nodes[].runtime`, then `runtimeDefaults.worker`; a judge as
 `nodes[].gate.runtime`, then `runtimeDefaults.judge`.
 
 Each runtime may declare one `fallback` runtime id. Only provider exhaustion
-takes that single hop — a local budget, scope, or authority stop never
-rotates runtime — and a worker/fallback pair is admissible only when the
-judge keeps a different resolved `vendor`. Details:
-[contract.md](references/contract.md).
+takes that single hop — a scope or authority stop never rotates runtime — and
+a worker/fallback pair is admissible only when the judge keeps a different
+resolved `vendor`. Details: [contract.md](references/contract.md).
 
 ## Safety
 

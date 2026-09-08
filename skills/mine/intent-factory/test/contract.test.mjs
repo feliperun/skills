@@ -71,8 +71,6 @@ function fixture(overrides = {}) {
     campaignId: "campaign-test",
     goal: "validate protocol",
     cwd: ".",
-    maxInputTokens: 1_000_000,
-    usagePolicy: false,
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: { worker: { driver: "codex", model: "test-model" } },
     ...overrides,
@@ -115,31 +113,13 @@ test("source identity ignores only the managed AGENTS signal block", () => {
   assert.notEqual(captureSourceIdentity(contract).dirtyTreeFingerprint, initial.dirtyTreeFingerprint);
 });
 
-test("validation requires an explicit usage policy and node phase", () => {
-  const missingPolicy = helpers.fixture();
-  delete missingPolicy.usagePolicy;
-  const policyPath = helpers.writeContract(mkdtempSync(join(tmpdir(), "runner-missing-policy-")), missingPolicy);
-  assert.throws(() => validateContract(JSON.parse(readFileSync(policyPath, "utf8")), policyPath), /usagePolicy is required/u);
-
+test("validation requires a node phase", () => {
   const missingPhase = helpers.fixture();
   const missingPhaseNodes = /** @type {Record<string, unknown>[]} */ (missingPhase.nodes);
   const { phase: _phase, ...missingPhaseNode } = missingPhaseNodes[0];
   missingPhaseNodes[0] = missingPhaseNode;
   const phasePath = helpers.writeContract(mkdtempSync(join(tmpdir(), "runner-missing-phase-")), missingPhase);
   assert.throws(() => validateContract(JSON.parse(readFileSync(phasePath, "utf8")), phasePath), /nodes\[0\]\.phase/u);
-});
-
-test("persisted loading rejects a missing budget instead of defaulting it", () => {
-  const path = helpers.writeContract(mkdtempSync(join(tmpdir(), "runner-persisted-default-")), helpers.fixture());
-  const { maxInputTokens: _omitted, ...raw } = helpers.fixture();
-  assert.throws(() => validateContract(raw, path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
-  // An invalid explicit value still fails under persisted loading.
-  assert.throws(() => validateContract(helpers.fixture({ maxInputTokens: 0 }), path, { persisted: true }), /contract\.maxInputTokens must be a positive integer/u);
-  // A frozen run authored before budget profiles keeps its literal node cap readable.
-  const legacyNode = { id: "build", type: "backend", maxInputTokens: 500_000, taskPacket: packet(), gate: false };
-  const legacy = helpers.fixture({ nodes: [legacyNode] });
-  assert.equal(validateContract(legacy, path, { persisted: true }).nodes[0].maxInputTokens, 500_000);
-  assert.throws(() => validateContract(legacy, path), /requires budgetProfile provenance/u);
 });
 
 test("schema 2 rejects a schema-1 string Definition of Done item and an item without proof", () => {
@@ -179,26 +159,17 @@ test("same-phase nodes must have a dependency order", () => {
   assert.equal(validateContract(JSON.parse(readFileSync(ordered, "utf8")), ordered).nodes.length, 2);
 });
 
-test("usage policy validates its reserve and soft phase boundary", () => {
-  const { path } = writeFixture({ usagePolicy: { epoch: "epoch-1", maxInputTokens: 100, judgeReserveInputTokens: 20, maxPhaseInputTokens: 40, maxInvocationTokens: 30, cacheReadWeight: 0.1 } });
-  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.deepEqual(contract.usagePolicy, { epoch: "epoch-1", maxInputTokens: 100, judgeReserveInputTokens: 20, maxPhaseInputTokens: 40, maxInvocationTokens: 30, cacheReadWeight: 0.1 });
-  for (const usagePolicy of [
-    { epoch: "epoch-1", maxInputTokens: 0, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 1, cacheReadWeight: 0.1 },
-    { epoch: "epoch-1", maxInputTokens: 10, judgeReserveInputTokens: 11, maxPhaseInputTokens: 1, maxInvocationTokens: 1, cacheReadWeight: 0.1 },
-    { epoch: "epoch-1", maxInputTokens: 10, judgeReserveInputTokens: 0, maxPhaseInputTokens: 0, maxInvocationTokens: 1, cacheReadWeight: 0.1 },
-    { epoch: "epoch-1", maxInputTokens: 10, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 0, cacheReadWeight: 0.1 },
-    { epoch: "epoch-1", maxInputTokens: 10, judgeReserveInputTokens: 0, maxPhaseInputTokens: 1, maxInvocationTokens: 1, cacheReadWeight: 2 },
-  ]) {
-    const invalid = writeFixture({ usagePolicy });
-    assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /usagePolicy/u);
-  }
-});
-
 test("validation rejects unknown fields at every protocol layer", () => {
   const cases = [
     [{ typo: true }, /contract has unexpected field typo/u],
+    [{ usagePolicy: false }, /contract has unexpected field usagePolicy/u],
+    [{ maxInputTokens: 100 }, /contract has unexpected field maxInputTokens/u],
+    [{ maxCostUsd: 1 }, /contract has unexpected field maxCostUsd/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, typo: true }] }, /nodes\[0\] has unexpected field typo/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, maxInputTokens: 100 }] }, /nodes\[0\] has unexpected field maxInputTokens/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, maxCostUsd: 1 }] }, /nodes\[0\] has unexpected field maxCostUsd/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, budgetProfile: budgetProfile() }] }, /nodes\[0\] has unexpected field budgetProfile/u],
+    [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, progressPolicy: { graceSec: 0, intervalSec: 1, maxDryHeartbeats: 3 } }] }, /nodes\[0\] has unexpected field progressPolicy/u],
     [{ runtimes: { worker: { driver: "codex", model: "m", typo: true } } }, /runtime worker has unexpected field typo/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { typo: true } }] }, /nodes\[0\]\.gate has unexpected field typo/u],
   ];
@@ -211,6 +182,8 @@ test("validation rejects unknown fields at every protocol layer", () => {
 test("validation rejects unsupported protocol versions and stale packet hashes", () => {
   const versioned = writeFixture({ schemaVersion: 99 });
   assert.throws(() => validateContract(JSON.parse(readFileSync(versioned.path, "utf8")), versioned.path), new RegExp(`schemaVersion must be ${PROTOCOL_SCHEMA_VERSION}`, "u"));
+  const schema2 = writeFixture({ schemaVersion: 2 });
+  assert.throws(() => validateContract(JSON.parse(readFileSync(schema2.path, "utf8")), schema2.path), new RegExp(`schemaVersion must be ${PROTOCOL_SCHEMA_VERSION}`, "u"));
   const stale = writeFixture({ nodes: [{ id: "build", type: "backend", taskPacket: packet(), packetHash: "0".repeat(64), gate: false }] });
   assert.throws(() => validateContract(JSON.parse(readFileSync(stale.path, "utf8")), stale.path), /packetHash does not match/u);
 });
@@ -984,46 +957,6 @@ test("an autonomous write root may name an existing regular file", () => {
   assert.deepEqual(contract.nodes[0].taskPacket.writeRoots, ["docs/NOTES.md"]);
 });
 
-test("validates node budgets and bounded progress policy", () => {
-  const { path } = writeFixture({
-    nodes: [{
-      id: "build",
-      type: "backend",
-      maxInputTokens: 100,
-      budgetProfile: budgetProfile(),
-      maxCostUsd: 2.5,
-      progressPolicy: { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 },
-      taskPacket: packet(),
-      gate: false,
-    }],
-  });
-  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(contract.nodes[0].maxInputTokens, 100);
-  assert.equal(contract.nodes[0].budgetProfile?.estimatedWeightedInputTokens, 100);
-  assert.equal(contract.nodes[0].maxCostUsd, 2.5);
-  assert.deepEqual(contract.nodes[0].progressPolicy, { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 });
-
-  for (const [field, value] of /** @type {[string, unknown][]} */ ([
-    ["maxInputTokens", 0],
-    ["maxCostUsd", Infinity],
-    ["progressPolicy", { graceSec: -1, intervalSec: 10, maxDryHeartbeats: 3 }],
-    ["progressPolicy", { graceSec: 5, intervalSec: 0, maxDryHeartbeats: 3 }],
-    ["progressPolicy", { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 1.5 }],
-  ])) {
-    const invalid = writeFixture({
-      nodes: [{ id: "build", type: "backend", [field]: value, ...(field === "maxInputTokens" ? { budgetProfile: budgetProfile(), progressPolicy: { graceSec: 5, intervalSec: 10, maxDryHeartbeats: 3 } } : {}), taskPacket: packet(), gate: false }],
-    });
-    assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /maxInputTokens|maxCostUsd|progressPolicy/u);
-  }
-});
-
-test("budget provenance rejects a per-node ceiling without a profile", () => {
-  const { path } = writeFixture({
-    nodes: [{ id: "build", type: "backend", maxInputTokens: 100, taskPacket: packet(), gate: false }],
-  });
-  assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /maxInputTokens requires budgetProfile provenance/u);
-});
-
 test("replayPolicy defaults to safe and accepts only its enumerated values", () => {
   const defaulted = writeFixture();
   const contract = validateContract(JSON.parse(readFileSync(defaulted.path, "utf8")), defaulted.path);
@@ -1046,22 +979,6 @@ test("replayPolicy defaults to safe and accepts only its enumerated values", () 
       /replayPolicy must be one of safe, reconcile, never/u,
     );
   }
-});
-
-test("autonomous workers receive durable progress defaults", () => {
-  const autonomousPacket = packet({ mode: "autonomous", writeRoots: ["src"] });
-  const { writeFiles: _writeFiles, ...autonomousPacketWithoutFiles } = autonomousPacket;
-  const { path } = writeFixture({
-    nodes: [{
-      id: "build",
-      type: "backend",
-      taskPacket: autonomousPacketWithoutFiles,
-      gate: false,
-    }],
-  });
-  mkdirSync(join(dirname(path), "src"));
-  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.deepEqual(contract.nodes[0].progressPolicy, { graceSec: 300, intervalSec: 120, maxDryHeartbeats: 3 });
 });
 
 test("runtime fallback is a declared one-hop edge and rejects self-loops", () => {
@@ -1251,7 +1168,7 @@ test("a node snapshot accepts a bounded previousAttempt section and rejects an o
   );
 });
 
-test("run metadata records a budget extension and identity warnings", () => {
+test("run metadata records identity warnings and rejects a budget extension field", () => {
   const metadata = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     contractVersion: INTENT_FACTORY_VERSION,
@@ -1259,22 +1176,18 @@ test("run metadata records a budget extension and identity warnings", () => {
     startedAt: new Date().toISOString(),
     sourceIdentity: { kind: "run", id: "run" },
   };
-  assert.equal(validateRunMetadata(metadata).budgetExtension, undefined);
-
-  const extended = validateRunMetadata({
+  const warned = validateRunMetadata({
     ...metadata,
-    budgetExtension: { previous: 1000, maxInputTokens: 5000, at: new Date().toISOString() },
     identityWarnings: ["source tree fingerprint changed since the run started"],
   });
-  assert.equal(extended.budgetExtension?.maxInputTokens, 5000);
-  assert.deepEqual(extended.identityWarnings, ["source tree fingerprint changed since the run started"]);
+  assert.deepEqual(warned.identityWarnings, ["source tree fingerprint changed since the run started"]);
 
-  assert.throws(
-    () => validateRunMetadata({ ...metadata, budgetExtension: { previous: 5000, maxInputTokens: 1000, at: new Date().toISOString() } }),
-    /maxInputTokens must exceed previous/u,
-  );
   assert.throws(
     () => validateRunMetadata({ ...metadata, identityWarnings: [42] }),
     /identityWarnings\[0\] must be a string/u,
+  );
+  assert.throws(
+    () => validateRunMetadata({ ...metadata, budgetExtension: { previous: 1000, maxInputTokens: 5000, at: new Date().toISOString() } }),
+    /run metadata has unexpected field budgetExtension/u,
   );
 });
