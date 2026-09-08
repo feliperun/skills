@@ -7,7 +7,7 @@ import { execJsonlDriver } from "./exec-jsonl.mjs";
 import { replayDriver } from "./replay.mjs";
 
 /** Current wire-contract version for runner protocol artifacts. */
-export const PROTOCOL_SCHEMA_VERSION = 2;
+export const PROTOCOL_SCHEMA_VERSION = 3;
 
 /** Version of the runner protocol implementation. */
 export const INTENT_FACTORY_VERSION = "0.1.0";
@@ -64,7 +64,7 @@ const CAPABILITY_NAMES = new Set([
  * @typedef {{foregroundOnly: boolean, maxToolOutputBytes: number|null}} ToolPolicy
  */
 
-/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, maxInvocationTokens?: number, maxCostUsd?: number, toolPolicy?: ToolPolicy}} CommandOptions */
+/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, toolPolicy?: ToolPolicy}} CommandOptions */
 
 /** @typedef {{preferStructured?: boolean, exitCode?: number|null, signal?: string|null}} NormalizeOptions */
 

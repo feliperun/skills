@@ -15,7 +15,6 @@ const STRING_FIELD_CHARS = 64;
 const ATTENTION_CHARS = 80;
 const GOVERNANCE_STALE_SEC = 2400;
 const ISO_8601_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/u;
-const GOVERNANCE_TERMINAL_STATUSES = new Set(["done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled", "cancelled"]);
 const STATE_SET = new Set(HEARTBEAT_STATES);
 const LIVENESS_FIELDS = new Set([
   "type",
@@ -29,8 +28,6 @@ const LIVENESS_FIELDS = new Set([
   "checkpointsTotal",
   "runtime",
   "state",
-  "weightedUsed",
-  "weightedCap",
   "lastProgressAt",
   "attention",
 ]);
@@ -42,16 +39,14 @@ const HEARTBEAT_FIELDS = new Set([
   "activeNode",
   "runtime",
   "state",
-  "weightedUsed",
-  "weightedCap",
   "lastProgressAt",
   "attention",
   "generatedAt",
 ]);
 
 /** @typedef {Record<string, unknown>} JsonObject */
-/** @typedef {{type: "liveness", eventId: string, at: string, campaignId: string, runId: string, nodeId: string|null, phase: string, checkpointsDone: number, checkpointsTotal: number, runtime: string|null, state: string, weightedUsed: number, weightedCap: number, lastProgressAt: string, attention: string|null}} LivenessFact */
-/** @typedef {{schemaVersion: 1, campaignId: string, phase: string, checkpoints: {done: number, total: number}, activeNode: string|null, runtime: string|null, state: string, weightedUsed: number, weightedCap: number, lastProgressAt: number, attention: string|null, generatedAt: number}} Heartbeat */
+/** @typedef {{type: "liveness", eventId: string, at: string, campaignId: string, runId: string, nodeId: string|null, phase: string, checkpointsDone: number, checkpointsTotal: number, runtime: string|null, state: string, lastProgressAt: string, attention: string|null}} LivenessFact */
+/** @typedef {{schemaVersion: 1, campaignId: string, phase: string, checkpoints: {done: number, total: number}, activeNode: string|null, runtime: string|null, state: string, lastProgressAt: number, attention: string|null, generatedAt: number}} Heartbeat */
 
 /**
  * Validate one liveness journal fact. Rejects unknown fields, missing fields
@@ -79,8 +74,6 @@ export function validateLivenessFact(value) {
   optionalIdentifier(fact.runtime, "liveness.runtime");
   requireNonNegativeInteger(fact.checkpointsDone, "liveness.checkpointsDone");
   requireNonNegativeInteger(fact.checkpointsTotal, "liveness.checkpointsTotal");
-  requireNonNegativeInteger(fact.weightedUsed, "liveness.weightedUsed");
-  requireNonNegativeInteger(fact.weightedCap, "liveness.weightedCap");
   if (!STATE_SET.has(/** @type {string} */ (fact.state))) {
     throw new TypeError(`liveness.state must be one of ${HEARTBEAT_STATES.join(", ")}`);
   }
@@ -107,8 +100,6 @@ export function deriveHeartbeat(fact, { generatedAt = new Date().toISOString() }
     activeNode: fact.nodeId === null ? null : truncateChars(fact.nodeId, STRING_FIELD_CHARS),
     runtime: fact.runtime === null ? null : truncateChars(fact.runtime, STRING_FIELD_CHARS),
     state: fact.state,
-    weightedUsed: fact.weightedUsed,
-    weightedCap: fact.weightedCap,
     lastProgressAt: unixSeconds(fact.lastProgressAt, "lastProgressAt"),
     attention: fact.attention === null ? null : truncateChars(fact.attention, ATTENTION_CHARS),
     generatedAt: unixSeconds(generatedAt, "generatedAt"),
@@ -272,7 +263,6 @@ function validateHeartbeat(value) {
   if (!isNullableBoundedString(record.activeNode, STRING_FIELD_CHARS)) return false;
   if (!isNullableBoundedString(record.runtime, STRING_FIELD_CHARS)) return false;
   if (!STATE_SET.has(/** @type {string} */ (record.state))) return false;
-  if (!isNonNegativeInteger(record.weightedUsed) || !isNonNegativeInteger(record.weightedCap)) return false;
   if (!isNonNegativeInteger(record.lastProgressAt) || !isNonNegativeInteger(record.generatedAt)) return false;
   if (record.attention !== null && (typeof record.attention !== "string" || Array.from(record.attention).length > ATTENTION_CHARS)) {
     return false;
@@ -390,46 +380,13 @@ function requireNonNegativeInteger(value, label) {
 /**
  * Pure, deterministic projection of the run governance metrics (Addendum 02
  * B4.6). Inputs are timestamps and structured fields only; prose is never
- * parsed. Rates and percentiles are rounded to 4 decimals, ages are seconds.
+ * parsed. Rates are rounded to 4 decimals.
  *
  * @param {{events?: unknown[], livenessFacts?: unknown[], outbox?: unknown[], now?: number, staleSec?: number}} [input]
- * @returns {{budgetDecisionAge: number|null, budgetHeadroomAtDispatch: number|null, budgetExtensionRate: number|null, continuationRate: number|null, budgetAttentionLatencyP95: number|null, silentStallRate: number}}
+ * @returns {{silentStallRate: number}}
  */
 export function deriveGovernanceMetrics({ events = [], livenessFacts = [], outbox = [], now = Date.now(), staleSec = GOVERNANCE_STALE_SEC } = {}) {
-  const decisions = [];
-  for (const rawEvent of events) {
-    const event = jsonObjectOf(rawEvent);
-    if (event !== null && isJsonObject(event.budgetDecision)) decisions.push(event);
-  }
-  let newestDecisionMs = null;
-  /** @type {number[]} */
-  const headrooms = [];
-  for (const event of decisions) {
-    const decision = /** @type {JsonObject} */ (event.budgetDecision);
-    const allowance = typeof decision.extensionAllowanceTokens === "number" && Number.isFinite(decision.extensionAllowanceTokens)
-      ? decision.extensionAllowanceTokens
-      : Number.NaN;
-    if (Number.isFinite(allowance)) headrooms.push(allowance);
-    const atMs = timestampMs(event.at);
-    if (!Number.isFinite(atMs)) continue;
-    if (typeof event.node === "string" && nodeIsTerminal(events, event.node)) continue;
-    if (newestDecisionMs === null || atMs > newestDecisionMs) newestDecisionMs = atMs;
-  }
-  const decisionCount = decisions.length;
-  const budgetDecisionAge = newestDecisionMs === null
-    ? null
-    : round4(Math.max(0, (now - newestDecisionMs) / 1000));
-  const budgetHeadroomAtDispatch = headrooms.length === 0
-    ? null
-    : round4(headrooms.reduce((sum, value) => sum + value, 0) / headrooms.length);
-  const budgetExtensionRate = decisionCount === 0 ? null : round4(Math.min(1, countBudgetActions(events, "extension") / decisionCount));
-  const continuationRate = decisionCount === 0 ? null : round4(Math.min(1, countBudgetActions(events, "continuation_activated") / decisionCount));
   return {
-    budgetDecisionAge,
-    budgetHeadroomAtDispatch,
-    budgetExtensionRate,
-    continuationRate,
-    budgetAttentionLatencyP95: budgetAttentionLatencyP95(events, outbox),
     silentStallRate: silentStallRateOf(livenessFacts, outbox, staleSec),
   };
 }
@@ -446,91 +403,10 @@ export function writeGovernanceMetrics(campaignPath, metrics) {
 }
 
 /**
- * A node is terminal when its newest transition event settles it; decisions
- * of already settled nodes do not contribute to budgetDecisionAge.
- *
- * @param {unknown[]} events
- * @param {string} nodeId
- * @returns {boolean}
- */
-function nodeIsTerminal(events, nodeId) {
-  let status = null;
-  let newestMs = Number.NEGATIVE_INFINITY;
-  for (const rawEvent of events) {
-    const event = jsonObjectOf(rawEvent);
-    if (event === null || event.node !== nodeId || typeof event.to !== "string") continue;
-    const atMs = timestampMs(event.at);
-    if (!Number.isFinite(atMs) || atMs < newestMs) continue;
-    newestMs = atMs;
-    status = event.to;
-  }
-  return status !== null && GOVERNANCE_TERMINAL_STATUSES.has(status);
-}
-
-/**
- * @param {unknown[]} events
- * @param {string} actionType
- * @returns {number}
- */
-function countBudgetActions(events, actionType) {
-  let count = 0;
-  for (const rawEvent of events) {
-    const event = jsonObjectOf(rawEvent);
-    const action = event === null ? null : jsonObjectOf(event.budgetAction);
-    if (action !== null && action.type === actionType) count += 1;
-  }
-  return count;
-}
-
-/**
- * 95th percentile in seconds of attention outbox latency: the first
- * budget_attention run.attention event for a node minus that node's
- * budgetAction attention event timestamp.
- *
- * @param {unknown[]} events
- * @param {unknown[]} outbox
- * @returns {number|null}
- */
-function budgetAttentionLatencyP95(events, outbox) {
-  /** @type {Map<string, number>} */
-  const firstOutboxAtByNode = new Map();
-  for (const rawEvent of outbox) {
-    const event = jsonObjectOf(rawEvent);
-    if (event === null || event.type !== "run.attention") continue;
-    const data = jsonObjectOf(event.data);
-    if (data === null || data.code !== "budget_attention" || typeof data.nodeId !== "string") continue;
-    const atMs = timestampMs(event.at);
-    if (!Number.isFinite(atMs)) continue;
-    const current = firstOutboxAtByNode.get(data.nodeId);
-    if (current === undefined || atMs < current) firstOutboxAtByNode.set(data.nodeId, atMs);
-  }
-  /** @type {number[]} */
-  const latencies = [];
-  for (const [nodeId, outboxAtMs] of firstOutboxAtByNode) {
-    let actionAtMs = null;
-    for (const rawEvent of events) {
-      const event = jsonObjectOf(rawEvent);
-      if (event === null || event.node !== nodeId) continue;
-      const action = jsonObjectOf(event.budgetAction);
-      if (action === null || action.type !== "attention") continue;
-      const atMs = timestampMs(event.at);
-      if (Number.isFinite(atMs) && (actionAtMs === null || atMs < actionAtMs)) actionAtMs = atMs;
-    }
-    if (actionAtMs === null) continue;
-    const latencySeconds = (outboxAtMs - actionAtMs) / 1000;
-    if (latencySeconds >= 0) latencies.push(latencySeconds);
-  }
-  if (latencies.length === 0) return null;
-  const ordered = [...latencies].sort((left, right) => left - right);
-  const rank = Math.min(ordered.length - 1, Math.ceil(ordered.length * 0.95) - 1);
-  return round4(ordered[rank]);
-}
-
-/**
  * Fraction of consecutive liveness facts of a nonterminal run whose gap
- * exceeded staleSec with no stale_liveness or budget_attention event between
- * them. Terminal facts (done/failed) end the measured sequence; 0 when there
- * are no qualifying gaps.
+ * exceeded staleSec with no stale_liveness event between them. Terminal facts
+ * (done/failed) end the measured sequence; 0 when there are no qualifying
+ * gaps.
  *
  * @param {unknown[]} livenessFacts
  * @param {unknown[]} outbox
@@ -571,7 +447,7 @@ function hasCoveringAttention(outbox, fromMs, toMs) {
     const event = jsonObjectOf(rawEvent);
     if (event === null || event.type !== "run.attention") continue;
     const data = jsonObjectOf(event.data);
-    if (data === null || (data.code !== "stale_liveness" && data.code !== "budget_attention")) continue;
+    if (data === null || data.code !== "stale_liveness") continue;
     const atMs = timestampMs(event.at);
     if (Number.isFinite(atMs) && atMs > fromMs && atMs <= toMs) return true;
   }
@@ -584,11 +460,6 @@ function hasCoveringAttention(outbox, fromMs, toMs) {
  */
 function jsonObjectOf(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? /** @type {JsonObject} */ (value) : null;
-}
-
-/** @param {unknown} value @returns {boolean} */
-function isJsonObject(value) {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 /** @param {unknown} value @returns {number} */

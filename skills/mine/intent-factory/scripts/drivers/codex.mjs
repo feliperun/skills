@@ -63,9 +63,6 @@ export const codexDriver = {
     for (const [key, value] of Object.entries(runtime.config ?? {})) {
       args.push("-c", `${key}=${toml(value)}`);
     }
-    if (options.maxInvocationTokens) {
-      args.push("-c", `features.rollout_budget={enabled=true,limit_tokens=${options.maxInvocationTokens},reminder_at_remaining_tokens=[],sampling_token_weight=1.0,prefill_token_weight=1.0}`);
-    }
     args.push("-c", `model=${toml(runtime.model)}`);
     if (runtime.reasoning) args.push("-c", `model_reasoning_effort=${toml(runtime.reasoning)}`);
     if (options.schemaPath) args.push("--output-schema", options.schemaPath);

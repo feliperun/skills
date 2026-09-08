@@ -296,9 +296,6 @@ export async function doctorCommand(contractPath, values) {
       const runtimes = reachableRuntimes(contract);
       routedRuntimes = runtimes;
       dispatchCwd = contract.cwd;
-      if (contract.maxCostUsd !== undefined || contract.nodes.some((node) => node.maxCostUsd !== undefined)) {
-        for (const entry of runtimes.values()) entry.requiredCapabilitySets.push({ cost: true });
-      }
       usedDrivers = new Set([...runtimes.values()].map(({ runtime }) => runtime.driver));
       for (const runtime of Object.values(contract.runtimes)) {
         if (typeof runtime.executable === "string") overriddenDrivers.add(runtime.driver);

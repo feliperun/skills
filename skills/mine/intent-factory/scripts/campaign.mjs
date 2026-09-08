@@ -63,7 +63,7 @@ const SESSION_REQUIRED_TYPES = new Set([
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {{id: string, goal: string, status: "active"|"closed", linkedRunIds: string[], createdAt: string, updatedAt: string, closedAt?: string}} Campaign */
-/** @typedef {{type: string, eventId: string, at: string, sessionId?: string, text?: string, tool?: string, transcript?: string|null, transcriptUnavailable?: boolean, format?: string|null, cursor?: string|null, decisionId?: string, supersedes?: string, runId?: string, questionId?: string, campaignId?: string, nodeId?: string|null, phase?: string, checkpointsDone?: number, checkpointsTotal?: number, runtime?: string|null, state?: string, weightedUsed?: number, weightedCap?: number, lastProgressAt?: string, attention?: string|null}} JournalEntry */
+/** @typedef {{type: string, eventId: string, at: string, sessionId?: string, text?: string, tool?: string, transcript?: string|null, transcriptUnavailable?: boolean, format?: string|null, cursor?: string|null, decisionId?: string, supersedes?: string, runId?: string, questionId?: string, campaignId?: string, nodeId?: string|null, phase?: string, checkpointsDone?: number, checkpointsTotal?: number, runtime?: string|null, state?: string, lastProgressAt?: string, attention?: string|null}} JournalEntry */
 /** @typedef {{updatedAt: string|null, decisions: Record<string, JournalEntry>, questions: Record<string, JournalEntry>, constraints: JournalEntry[], intents: JournalEntry[], outcomes: JournalEntry[], sessions: JournalEntry[], next: JournalEntry|null, evicted: Record<string, number>}} Projection */
 /** @typedef {{cursor: number, byte: number, size: number, projection: Projection}} ProjectionRecord */
 /** @typedef {{id: string, exists: boolean, total: number, summary: string, attention: {id: string, status: string, note: string}[], unreadable: string|null}} RunSummary */
@@ -83,7 +83,7 @@ const ENTRY_SHAPES = {
   "open-question": ["at", "type", "eventId", "sessionId", "questionId", "text"],
   "question.resolved": ["at", "type", "eventId", "sessionId", "questionId", "text"],
   retrospective: ["at", "type", "eventId", "sessionId", "text"],
-  liveness: ["at", "type", "eventId", "campaignId", "runId", "nodeId", "phase", "checkpointsDone", "checkpointsTotal", "runtime", "state", "weightedUsed", "weightedCap", "lastProgressAt", "attention"],
+  liveness: ["at", "type", "eventId", "campaignId", "runId", "nodeId", "phase", "checkpointsDone", "checkpointsTotal", "runtime", "state", "lastProgressAt", "attention"],
 };
 
 /**

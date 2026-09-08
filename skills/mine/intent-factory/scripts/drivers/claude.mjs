@@ -73,7 +73,6 @@ export const claudeDriver = {
     ];
     if (options.toolPolicy) args.push("--settings", JSON.stringify(hookSettings(options.toolPolicy)));
     if (runtime.reasoning) args.push("--effort", runtime.reasoning);
-    if (options.maxCostUsd !== undefined) args.push("--max-budget-usd", String(options.maxCostUsd));
     if (options.schema) args.push("--json-schema", JSON.stringify(options.schema));
     return { executable: this.executable(runtime), args, promptTransport: "stdin", input: prompt };
   },

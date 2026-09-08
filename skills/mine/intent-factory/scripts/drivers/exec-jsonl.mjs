@@ -3,9 +3,8 @@
  *
  * The executable receives one UTF-8 JSON line on stdin:
  * `{schemaVersion:1,type:"run.request",model,prompt,structuredOutput,
- * outputSchema,continuationId,maxInvocationTokens}`. When
- * `maxInvocationTokens` is non-null, a compliant wrapper MUST enforce it for
- * this invocation. The request deliberately carries no tool policy: an
+ * outputSchema,continuationId}`. The request deliberately carries no tool
+ * policy: an
  * arbitrary wrapper executable cannot prove enforcement, so the mechanical
  * policy travels only where a hook surface can enforce it (claude/glm). It
  * writes JSONL events to stdout:
@@ -84,7 +83,6 @@ export const execJsonlDriver = {
       structuredOutput: Boolean(options.schema || options.schemaPath),
       outputSchema: options.schema ?? options.schemaPath ?? null,
       continuationId: options.continuationId ?? null,
-      maxInvocationTokens: options.maxInvocationTokens ?? null,
     };
     const args = runtime.args ?? [];
     return {

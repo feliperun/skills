@@ -109,7 +109,6 @@ import {
 } from "./store.mjs";
 import {
   detectStalls,
-  checkRecoveredProgress,
   invocationAlive,
   invocationResult,
   latestTimeoutSec,
@@ -131,7 +130,6 @@ import {
 import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "./scope-findings.mjs";
 import { finalVerificationCommands } from "./final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
-import { buildCapsule, DEFAULT_CAPSULE_BYTES, parseCapsule } from "./capsule.mjs";
 import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { contractCli, validateContractFile } from "./contract-cli.mjs";
@@ -152,14 +150,7 @@ import {
 } from "./outbox.mjs";
 import { projectEvent } from "./events.mjs";
 import { deriveGovernanceMetrics, LIVENESS_JOURNAL_TYPE, recordLiveness, writeGovernanceMetrics } from "./heartbeat.mjs";
-import { METRICS_OPTIONS, renderCampaignMetrics, weightedInput } from "./metrics.mjs";
-import {
-  canonicalBudgetHash,
-  deriveBudgetDecision,
-  grantBudgetExtension,
-  initialBudgetState,
-  planBudgetContinuation,
-} from "./budget.mjs";
+import { METRICS_OPTIONS, renderCampaignMetrics } from "./metrics.mjs";
 import {
   attemptWorktreePath,
   createAttemptWorktree,
@@ -199,9 +190,6 @@ import { integrateAttempt, recoverIntegrations } from "./integrate.mjs";
 /** @typedef {import("./campaign.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
 /** @typedef {import("./lib.mjs").JudgeVerdict} JudgeVerdict */
-/** @typedef {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, conservativeInputTokens: number, budgetInputTokens: number, workerBudgetInputTokens: number, judgeBudgetInputTokens: number, remainingWorkerAllowance: number|null, judgeReserveInputTokens: number|null, maxInputTokens: number|null, phases: Record<string, {budgetInputTokens: number, conservativeInputTokens: number, invocations: number}>}} CampaignUsage */
-/** @typedef {{policy: {epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}, invocations: Record<string, {runId?: string, campaignId?: string, role?: "worker"|"judge", planPhase?: string, usage: Usage, costUsd: number|null}>}} UsageLedgerEpoch */
-/** @typedef {{schemaVersion: number, epochs: Record<string, UsageLedgerEpoch>}} UsageLedger */
 /** @typedef {{kind: "adopted"|"rejudge"|"restart"|"reconciled"|"exhausted"|"stalled", phase?: "worker"|"judge", result?: unknown, usage?: Usage, costUsd?: number|null, error?: {code: string, message: string}|null, invocationId?: string, reason?: string}} RecoveryOutcome */
 /** @typedef {{runDir: string, states: Map<string, NodeSnapshot>, ok: boolean, error?: Error}} RunOutcome */
 /** @typedef {import("node:child_process").ChildProcess & {bootstrapNonce?: string, bootstrapProcessStartToken?: string|null}} DetachedChild */
@@ -366,20 +354,7 @@ function recordRunLiveness(campaign, runDir, contract, states, { attention: atte
   try {
     const nodes = contract.nodes;
     const active = activeLivenessNode(contract, states);
-    const usagePolicy = contract.usagePolicy;
-    const weightedUsed = usagePolicy === false
-      ? Math.round(nodes.reduce((total, node) => total + weightedInput(states.get(node.id)?.usage, 1), 0))
-      : Math.round(campaignUsage(campaign.path, usagePolicy).budgetInputTokens);
-    const weightedCap = usagePolicy === false ? contract.maxInputTokens : usagePolicy.maxInputTokens;
     let attention = attentionOption || null;
-    if (attention === null) {
-      for (const state of states.values()) {
-        if (state.status === "blocked" && state.error?.code === "budget_attention") {
-          attention = boundedChars(state.error.message, 80);
-          break;
-        }
-      }
-    }
     const currentProgress = lastLivenessProgressAt(states, runDir);
     const previousMax = livenessProgressByRun.get(runDir);
     const observed = previousMax === undefined ? currentProgress : newestIso(currentProgress, previousMax);
@@ -397,8 +372,6 @@ function recordRunLiveness(campaign, runDir, contract, states, { attention: atte
       checkpointsTotal: nodes.length,
       runtime: active?.runtime?.id ?? null,
       state: livenessState(states),
-      weightedUsed,
-      weightedCap,
       lastProgressAt: observed,
       attention,
     };
@@ -456,7 +429,6 @@ function renderCampaignHandoffSafely(campaign, runsDir, runDir) {
 export async function runContract(contractPath) {
   const absoluteContractPath = resolve(contractPath);
   const contract = validateContract(JSON.parse(readFileSync(absoluteContractPath, "utf8")), absoluteContractPath);
-  assertCostCapability(contract);
   const runDir = join(contract.cwd, ".runs", contract.id);
   if (existsSync(runDir)) throw new Error(`run already exists: ${runDir}`);
   mkdirSync(join(contract.cwd, ".runs"), { recursive: true });
@@ -479,7 +451,6 @@ export async function runContract(contractPath) {
     lease.assert();
     const runsDir = join(contract.cwd, ".runs");
     const campaign = resolveCampaign(runsDir, contract.campaignId);
-    ensureCampaignUsageLedger(campaign.path, contract.usagePolicy);
     mkdirSync(join(runDir, "nodes"), { recursive: true });
     mkdirSync(join(runDir, "logs"), { recursive: true });
     writeJsonAtomic(join(runDir, "contract.json"), serializableContract(contract));
@@ -519,8 +490,6 @@ export async function runContract(contractPath) {
           availability: runtimePlan.availability,
         },
         progress: null,
-        budgetDecision: null,
-        budgetState: null,
         invocations: [],
         executionOverrides: [],
         worktree: { status: "unassigned", path: null, branch: null, commit: null, baseSha: null },
@@ -567,10 +536,9 @@ async function runtimeAssignments(contract) {
 
 /**
  * @param {string} runDirPath
- * @param {{node?: string, reconcile?: string, maxInputTokens?: number}} [options] `node`
- *   limits the retry in place to one node and its dependants, `reconcile`
- *   acknowledges a node stopped as `unknown_effect_reconciled`, and
- *   `maxInputTokens` raises the run's exhausted budget ceiling
+ * @param {{node?: string, reconcile?: string}} [options] `node` limits the
+ *   retry in place to one node and its dependants, and `reconcile`
+ *   acknowledges a node stopped as `unknown_effect_reconciled`
  * @returns {Promise<RunOutcome>}
  */
 export async function resumeRun(runDirPath, options = {}) {
@@ -578,7 +546,6 @@ export async function resumeRun(runDirPath, options = {}) {
   assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
-  assertCostCapability(contract);
   const lease = acquireControllerLease(runDir, {
     contractVersion: INTENT_FACTORY_VERSION,
     processStartToken: processStartToken(process.pid),
@@ -607,26 +574,12 @@ export async function resumeRun(runDirPath, options = {}) {
     const runsDir = join(runDir, "..");
     const campaign = resolveCampaign(runsDir, contract.campaignId);
     registerRun(campaign.path, contract.id);
-    ensureCampaignUsageLedger(campaign.path, contract.usagePolicy);
-    await synchronizeCampaignUsage(campaign.path, contract.usagePolicy, states);
     await recoverIntegrationTransactions(contract, runDir, states, lease, campaign.path);
-    // An exhausted run budget is a stop boundary: attention, and no further
-    // dispatch, until the operator raises the ceiling explicitly. The extension
-    // is recorded on the run; the contract file itself stays frozen.
-    const budgetExtension = extendRunBudget(contract, states, options.maxInputTokens);
-    if (budgetExtension === null) {
-      const spend = runWeightedInputTokens(contract, states);
-      writeFindingsArtifact(runDir, contract, states);
-      process.stdout.write(`[run] ${contract.id} attention · run input-token budget exhausted (${spend} of ${contract.maxInputTokens}) · resume with --max-input-tokens <n> to extend it\n`);
-      lease.release();
-      return { runDir, states, ok: false };
-    }
     const plan = planResumeRetry(contract, states, { node: options.node, reconcile: options.reconcile });
     for (const item of plan.attention) {
       process.stdout.write(`[run] ${contract.id} attention · ${item.id} · ${item.reason}\n`);
     }
     const resumeMetadata = {
-      ...(budgetExtension ? { budgetExtension } : {}),
       ...(identity.warnings.length ? { identityWarnings: identity.warnings } : {}),
     };
     for (const node of contract.nodes) {
@@ -668,7 +621,7 @@ export async function resumeRun(runDirPath, options = {}) {
       const recovery = (state.status === "running" || pendingStart) && persistedRecovery
         ? recoveryFromOverride(persistedRecovery, lastInvocationId)
         : await recoverOrphan(runDir, contract, node, recoveryState, lease);
-      await persistRecoveryUsage(campaign.path, contract.usagePolicy, runDir, state, recovery, lease);
+      await persistRecoveryUsage(runDir, state, recovery, lease);
       if (recovery?.kind === "reconciled") {
         transition(runDir, state, "blocked", {
           phase: recovery.phase ?? "worker",
@@ -763,32 +716,6 @@ export async function resumeRun(runDirPath, options = {}) {
           const invocation = recovery.kind === "rejudge"
             ? [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker")
             : state.invocations?.find((item) => item.id === recovery.invocationId);
-          // A one-turn rotation handoff acknowledges itself, not the node: its
-          // message must never be adopted as a worker result. The durable
-          // handoff override schedules the fresh rotated session instead.
-          if (isRotationHandoffInvocation(invocation)) {
-            // The handoff turn had no workspace authority: any persisted
-            // change across the window is as terminal as for materialization.
-            if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, { materialization: true })) continue;
-            const handoffInvocation = state.invocations?.find((item) => item.id === recovery.invocationId);
-            state.invocations = closePersistedInvocation(state.invocations, recovery.invocationId, recovery.usage, recovery.costUsd);
-            state.costUsd = invocationCost(state);
-            settleInvocation(runDir, /** @type {string | Invocation} */ (handoffInvocation ?? recovery.invocationId), {
-              status: "adopted",
-              usage: handoffInvocation?.usage ?? recovery.usage ?? null,
-              costUsd: typeof handoffInvocation?.costUsd === "number" ? handoffInvocation.costUsd : recovery.costUsd ?? null,
-              reason: "rotation handoff turn adopted; the fresh rotated session continues the node",
-            });
-            if (!persistedRecovery) recordExecutionOverride(runDir, state, {
-              kind: "recovery",
-              decision: "adopted",
-              invocationId: recovery.invocationId,
-              phase: "worker",
-              reason: "rotation handoff turn adopted after controller loss",
-            }, lease);
-            transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
-            continue;
-          }
           // A recovered result-materialization turn keeps its live-path rule:
           // the turn had no workspace authority, so any change is a violation.
           if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, {
@@ -857,10 +784,6 @@ export async function resumeRun(runDirPath, options = {}) {
             ? `judge invocation ${recovery.invocationId} was not adopted; completed worker stream was re-judged`
             : `${recovery.phase} invocation ${recovery.invocationId} completed after controller loss`,
         }, lease);
-        if (recovery.phase === "worker") {
-          persistNodeCapsule(contract, node, state, runDir, lease, "continue from the adopted worker result");
-          consumeManualHandoff(state);
-        }
         if (recovery.phase === "worker" && node.gate.enabled) {
           transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
         } else if (recovery.phase === "judge") {
@@ -895,28 +818,6 @@ export async function resumeRun(runDirPath, options = {}) {
             phase: "worker",
             error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result before the controller was interrupted" },
           }, lease);
-          continue;
-        }
-        // An interrupted one-turn rotation handoff must not become fresh
-        // implementation work either: the durable handoff override already
-        // commissions the fresh rotated session, with the written handoff
-        // file when the turn got that far and the portable capsule otherwise.
-        if (restartInvocation?.phase === "worker" && isRotationHandoffInvocation(restartInvocation)) {
-          // No workspace authority: prove the window stayed clean before the
-          // fresh rotated session builds on top of it.
-          if (!checkPersistedWorkerScope(contract, runDir, state, node, restartInvocation, lease, { materialization: true })) continue;
-          if (recovery.invocationId) {
-            state.invocations = closePersistedInvocation(state.invocations, recovery.invocationId, recovery.usage, recovery.costUsd);
-            if (!hasOperationSettlement(runDir, recovery.invocationId)) {
-              settleInvocation(runDir, restartInvocation, {
-                status: "restarted",
-                reason: "rotation handoff turn interrupted; the durable handoff override continues the rotation",
-                nextState: operationNextState(state),
-              });
-            }
-          }
-          state.costUsd = invocationCost(state);
-          transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
           continue;
         }
         if (recoveryPhase === "worker" || recoveryPhase === "judge") {
@@ -959,9 +860,7 @@ export async function resumeRun(runDirPath, options = {}) {
                 : resolution.reason,
             }, lease);
             if (resolution.action === "replay") {
-              if (recoveryPhase === "worker") {
-                persistNodeCapsule(contract, node, state, runDir, lease, "retry the closed task packet on a fresh attempt");
-              } else {
+              if (recoveryPhase === "judge") {
                 // A judge has no workspace effect of its own. Replaying it
                 // must keep the accepted worker result and schedule a fresh
                 // judge invocation rather than rerunning the worker.
@@ -1062,7 +961,7 @@ function isUnknownEffectTerminal(state) {
  * @param {CampaignRef} campaign
  * @param {LeaseHandle} lease
  * @param {SourceIdentity} sourceIdentity
- * @param {{budgetExtension?: import("./contract.mjs").RunMetadata["budgetExtension"], identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
+ * @param {{identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
  * @returns {Promise<RunOutcome>}
  */
 export async function driveRun(contract, runDir, states, campaign, lease, sourceIdentity, resume = {}) {
@@ -1169,22 +1068,6 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         `${runId}:${state.id}`,
       );
       recordRunLiveness(campaign, runDir, contract, states);
-      if (state.phase === "budget" && state.error?.code === "budget_attention") {
-        const attentionKey = `${runId}:${state.id}:budget_attention`;
-        await notifyCampaign(
-          campaign.path,
-          projectEvent({
-            type: "run.attention",
-            campaignId: campaign.campaign.id,
-            runId,
-            nodeId: state.id,
-            identifiers: { errorCode: "budget_attention" },
-            data: { runId, nodeId: state.id, code: "budget_attention" },
-            key: attentionKey,
-          }),
-          attentionKey,
-        );
-      }
     }
     const fingerprint = statesFingerprint(states);
     if (fingerprint === notificationFingerprint) return;
@@ -1229,9 +1112,6 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         await Promise.all(jobs.map((job) => terminateProcess(job)));
         const envelopes = new Map();
         for (const job of jobs) envelopes.set(job.invocation.id, recordInvocationUsage(job, { accumulate: false }));
-        // A controller kill can land before the provider reported usage; charge
-        // the conservative estimate so the canceled work is never free.
-        for (const job of jobs) applyUsageEstimate(contract, job.state, job.invocation.id);
         for (const job of jobs) {
           const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
           const scopeOk = job.phase !== "worker" || checkWorkerScope(contract, runDir, job, lease);
@@ -1254,14 +1134,10 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       await finalizeClosedJobs(contract, runDir, states, running, lease, campaign.path);
       await detectStalls(contract, running, async (job, status, error) => {
         const envelope = recordInvocationUsage(job);
-        // A stall, wall-clock deadline, or cancellation can kill an invocation
-        // before the provider reported usage (codex meters only at turn end);
-        // charge the remaining derived cap and flag the estimate.
-        applyUsageEstimate(contract, job.state, job.invocation.id);
         job.state.usage = invocationUsage(job.state);
         job.state.costUsd = invocationCost(job.state);
         const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
-        await recordCampaignUsage(campaign.path, contract.usagePolicy, invocation);
+        appendUsageRecord(runDir, invocation);
         if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) {
           settleInvocation(runDir, invocation, {
             status: "failed",
@@ -1292,27 +1168,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       }, async (job) => {
         writeNode(runDir, job.state, lease);
       });
-      await enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeightOf(contract));
       blockDependents(contract, runDir, states, lease);
-      enforceTokenBudget(contract, runDir, states, running, lease, campaign.path);
-      enforceLedgerBudget(contract, runDir, states, lease, campaign.path);
-      enforceCostBudget(contract, runDir, states, lease, campaign.path);
-
-      // A provider that finishes its turn but never exits must not pin the
-      // run forever: enforce each invocation's wall-clock deadline in the
-      // live loop, not only on resume.
-      const now = Date.now();
-      for (const [nodeId, job] of running) {
-        if (job.closed || job.budgetStop) continue;
-        const startedAt = Date.parse(job.invocation.startedAt);
-        const timeoutSec = latestTimeoutSec(job.state, job.node.timeoutSec ?? contract.timeoutSec);
-        if (!Number.isFinite(startedAt) || !Number.isFinite(timeoutSec)) continue;
-        if (now - startedAt > timeoutSec * 1000) {
-          job.budgetStop = "wallclock";
-          process.stdout.write(`[node] ${nodeId} wall-clock budget reached (${timeoutSec}s) · terminating\n`);
-          void terminateProcess(job).catch(() => {});
-        }
-      }
 
       const slots = contract.maxParallel - running.size;
       if (slots > 0) {
@@ -1327,7 +1183,6 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
             await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaign.path);
             continue;
           }
-          if (!ensureBudgetDecision(contract, node, state, states, campaign.path, runDir, lease)) continue;
           state.attempt += 1;
           const prompt = state.gate?.verdict === "fail" ? retryPrompt(node, state.gate) : node.prompt;
           startWorker(contract, node, state, runDir, running, prompt, lease, states, campaign.path);
@@ -1380,7 +1235,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
 /**
  * @param {LeaseHandle} lease
  * @param {SourceIdentity} sourceIdentity
- * @param {{budgetExtension?: import("./contract.mjs").RunMetadata["budgetExtension"], identityWarnings?: string[]}} [resume]
+ * @param {{identityWarnings?: string[]}} [resume]
  * @param {string} [integrationRef]
  * @returns {RunMetadata}
  */
@@ -1399,7 +1254,6 @@ function createRunMetadata(lease, sourceIdentity, resume = {}, integrationRef = 
     leaseExpiresAt: current.expiresAt,
     sourceIdentity,
     ...(integrationRef ? { integrationRef } : {}),
-    ...(resume.budgetExtension ? { budgetExtension: resume.budgetExtension } : {}),
     ...(resume.identityWarnings?.length ? { identityWarnings: resume.identityWarnings } : {}),
   };
   return validateRunMetadata(metadata, { requireLease: true });
@@ -1427,230 +1281,6 @@ function routeRuntimeForState(contract, node, state, role) {
 }
 
 /**
- * Automatic worker rotation (RETROSPECTIVE-2026-08-28 P0.1): a worker session
- * is rotated at 80 observed turns or an average of 120000 *weighted* cache-read
- * input tokens per turn, whichever lands first. The handoff the dying session
- * writes is bounded to 16 KiB so the fresh session starts small.
- *
- * The cache-read trigger is weighted by the campaign's `cacheReadWeight`: a
- * cache read is a performance cost, not a correctness cost, and prompt caching
- * is exactly what makes a long session affordable. Comparing raw cache reads
- * rotated a bounded-preamble flash worker on turn one, every turn, because it
- * re-reads its whole (cheap) context each turn — the opposite of the intent.
- */
-export const ROTATION_MAX_TURNS = 80;
-/**
- * claude-family transcripts fold one record per assistant turn, so the
- * 80-turn ceiling calibrated for provider turns would force a handoff every
- * few minutes on glm workers that mostly read and grep. The higher ceiling
- * is calibrated for those per-record turns; the cache-read average rule is
- * driver-independent and still applies.
- */
-export const ROTATION_MAX_TURNS_CLAUDE_FAMILY = 600;
-export const ROTATION_AVG_CACHE_READ_TOKENS = 120_000;
-/** The cache-read average is only trusted across at least two observed turns. */
-export const ROTATION_MIN_TURNS_FOR_AVERAGE = 2;
-export const ROTATION_HANDOFF_MAX_BYTES = 16 * 1024;
-
-/** First line of the one-turn rotation-handoff prompt. */
-const ROTATION_HANDOFF_PROMPT_HEADER = "The worker session is being rotated.";
-
-/**
- * The rotation trigger for one live worker observation, or null when the
- * session is still within budget. A finished session never triggers: once the
- * driver's terminal record was folded, rotation is a decision about the next
- * continuation, not a reason to disturb work already delivered. Zero observed
- * turns never trigger either, and the cache-read average is only trusted
- * across at least ROTATION_MIN_TURNS_FOR_AVERAGE turns.
- *
- * @param {{turns: number, cacheReadInputTokens: number, completed?: boolean}} metrics
- * @param {number} [cacheReadWeight] campaign cache-read weight; 1 preserves the raw comparison
- * @param {string} [driver] provider driver; claude-family drivers fold per-record turns
- * @returns {string|null}
- */
-export function rotationTrigger(metrics, cacheReadWeight = 1, driver = "codex") {
-  if (metrics.completed === true) return null;
-  const turnCeiling = isClaudeFamily(driver) ? ROTATION_MAX_TURNS_CLAUDE_FAMILY : ROTATION_MAX_TURNS;
-  if (metrics.turns >= turnCeiling) {
-    return `observed turns ${metrics.turns} >= ${turnCeiling}`;
-  }
-  const weightedCacheRead = metrics.cacheReadInputTokens * cacheReadWeight;
-  if (metrics.turns >= ROTATION_MIN_TURNS_FOR_AVERAGE && weightedCacheRead >= metrics.turns * ROTATION_AVG_CACHE_READ_TOKENS) {
-    return `weighted cache-read input ${Math.round(weightedCacheRead / metrics.turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${metrics.turns} turns`;
-  }
-  return null;
-}
-
-/**
- * Rotate any live worker session whose observed metrics crossed a rotation
- * threshold, or advise a fresh session for the next continuation of a worker
- * that already finished with a bloated weighted cache read. The trigger is
- * persisted before the provider is terminated so a controller loss between
- * trigger and termination still resumes honestly; a finished invocation is
- * never terminated.
- *
- * @param {string} runDir
- * @param {Map<string, Job>} running
- * @param {LeaseHandle} lease
- * @param {number} [cacheReadWeight] campaign cache-read weight for the trigger
- */
-async function enforceAutomaticWorkerRotation(runDir, running, lease, cacheReadWeight = 1) {
-  for (const [nodeId, job] of running) {
-    if (job.closed || job.phase !== "worker" || job.rotationReason || job.rotationHandoff || job.resultMaterialization) continue;
-    const metrics = monitorInvocation(job);
-    const reason = rotationTrigger(metrics, cacheReadWeight, job.runtime.driver);
-    if (!reason) {
-      const weightedCacheRead = metrics.cacheReadInputTokens * cacheReadWeight;
-      if (metrics.completed === true && weightedCacheRead >= ROTATION_AVG_CACHE_READ_TOKENS
-        && !rotationOverrideForInvocation(job.state, job.invocation.id)) {
-        const turns = Math.max(1, metrics.turns);
-        const adviseReason = `completed worker turn with weighted cache-read input ${Math.round(weightedCacheRead / turns)} >= ${ROTATION_AVG_CACHE_READ_TOKENS} tokens/turn over ${turns} turns; the next continuation starts fresh`;
-        recordExecutionOverride(runDir, job.state, {
-          kind: "rotation",
-          decision: "advise-fresh",
-          invocationId: job.invocation.id,
-          phase: "worker",
-          reason: adviseReason,
-        }, lease);
-        process.stdout.write(`[node] ${nodeId} completed worker session advises a fresh continuation · ${adviseReason}\n`);
-      }
-      continue;
-    }
-    job.rotationReason = reason;
-    recordExecutionOverride(runDir, job.state, {
-      kind: "rotation",
-      decision: "trigger",
-      invocationId: job.invocation.id,
-      phase: "worker",
-      reason,
-    }, lease);
-    process.stdout.write(`[node] ${nodeId} rotating worker session · ${reason}\n`);
-    await terminateProcess(job);
-  }
-}
-
-/** @param {NodeSnapshot} state @returns {Set<string>} */
-function rotationInvocationIds(state) {
-  return new Set((state.executionOverrides ?? [])
-    .filter((item) => item.kind === "rotation" && typeof item.invocationId === "string")
-    .map((item) => /** @type {string} */ (item.invocationId)));
-}
-
-/**
- * Whether a rotation override was already recorded for one invocation, so an
- * advise-fresh decision is persisted exactly once per invocation.
- *
- * @param {NodeSnapshot} state
- * @param {string} invocationId
- * @returns {boolean}
- */
-function rotationOverrideForInvocation(state, invocationId) {
-  return (state.executionOverrides ?? []).some((item) => item.kind === "rotation"
-    && item.invocationId === invocationId);
-}
-
-/**
- * The most recent unconsumed advise-fresh decision awaiting the next
- * continuation of the node, mirroring pendingRotationHandoff.
- *
- * @param {NodeSnapshot} state
- * @returns {{at: string}|null}
- */
-function pendingAdviseFresh(state) {
-  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
-    if (item.kind !== "rotation" || item.decision !== "advise-fresh") continue;
-    if (typeof item.at !== "string") continue;
-    return { at: item.at };
-  }
-  return null;
-}
-
-/**
- * Consume the advise-fresh decision so exactly one fresh continuation is
- * started per completed bloated invocation; later attempts never replay it.
- *
- * @param {NodeSnapshot} state
- * @param {string} at
- */
-function consumeAdviseFresh(state, at) {
-  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
-    if (item.kind === "rotation" && item.decision === "advise-fresh" && item.at === at) {
-      item.decision = "advised";
-      return;
-    }
-  }
-}
-
-/**
- * The commissioned rotation handoff awaiting its fresh session. The override
- * is recorded when the one-turn handoff is spawned, so the durable record
- * survives controller loss and resume schedules the fresh session itself.
- *
- * @param {NodeSnapshot} state
- * @returns {{at: string, handoffPath: string}|null}
- */
-function pendingRotationHandoff(state) {
-  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
-    if (item.kind !== "rotation" || item.decision !== "handoff") continue;
-    if (typeof item.result !== "string" || typeof item.at !== "string") continue;
-    return { at: item.at, handoffPath: item.result };
-  }
-  return null;
-}
-
-/**
- * Consume the pending handoff so exactly one fresh session is started per
- * rotation; later attempts (revisions, resumes) never replay it.
- *
- * @param {NodeSnapshot} state
- * @param {string} at
- */
-function consumeRotationHandoff(state, at) {
-  for (const item of [...(state.executionOverrides ?? [])].reverse()) {
-    if (item.kind === "rotation" && item.decision === "handoff" && item.at === at) {
-      item.decision = "rotated";
-      return;
-    }
-  }
-}
-
-/**
- * Compose the fresh post-rotation prompt from exactly three inputs: the
- * closed task packet, the bounded rotation handoff, and a bounded
- * `git status --short`. No transcript and no native continuation carry over;
- * a missing handoff file falls back to the portable capsule.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {string} handoffPath
- * @returns {string}
- */
-function rotationFreshPrompt(contract, node, state, runDir, handoffPath) {
-  let handoff = null;
-  try {
-    handoff = boundedUtf8(readFileSync(handoffPath, "utf8"), ROTATION_HANDOFF_MAX_BYTES);
-  } catch {}
-  if (handoff === null) {
-    const capsule = loadLatestCapsule(runDir, node.id, state.attempt)
-      ?? buildNodeCapsule(contract, node, state, runDir, "continue from the last settled checkpoint");
-    handoff = boundedUtf8(JSON.stringify(capsule, null, 2), ROTATION_HANDOFF_MAX_BYTES);
-  }
-  const status = spawnSync("git", ["-C", attemptWorkspace(state) ?? contract.cwd, "status", "--short"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  const gitStatus = status.status === 0 ? boundedUtf8(status.stdout, 2 * 1024) : "(git status unavailable)";
-  return boundedUtf8([
-    `Continue node ${node.id} in a fresh provider session. The previous session was rotated at a settled boundary; nothing else from it carries over.`,
-    "Rotation handoff from the previous session:",
-    handoff,
-    "Bounded git status --short:",
-    gitStatus,
-    "Current closed task packet:",
-    boundedUtf8(node.prompt, 48 * 1024),
-  ].join("\n\n"), 60 * 1024);
-}
-
-/**
  * Select the only continuation that is allowed for this plan phase and role.
  * The search is intentionally limited to persisted node snapshots in this run.
  *
@@ -1664,10 +1294,7 @@ function rotationFreshPrompt(contract, node, state, runDir, handoffPath) {
  */
 function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   const runId = basename(runDir);
-  const rotatedAway = rotationInvocationIds(state);
-  const candidates = phaseSessionCandidates(contract, node, state, runDir, role)
-    .filter(({ invocation }) => !rotatedAway.has(invocation.id));
-  const session = candidates.at(-1);
+  const session = phaseSessionCandidates(contract, node, state, runDir, role).at(-1);
   const runtime = routeRuntimeForState(contract, node, state, role);
   const identityMatches = session && session.invocation.runId === runId
     && session.invocation.campaignId === contract.campaignId
@@ -1679,68 +1306,11 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
     && session.invocation.model === runtime.model
     && session.invocation.reasoning === (runtime.reasoning ?? null)
     && session.invocation.sandbox === (runtime.sandbox ?? null);
-  const priorNode = session?.nodeId ?? null;
-  const phaseUsage = campaignUsage(campaignUsagePath(contract), contract.usagePolicy)
-    .phases[`${role}:${node.phase}`]?.budgetInputTokens ?? 0;
-  const softRotate = contract.usagePolicy !== false
-    && phaseUsage >= contract.usagePolicy.maxPhaseInputTokens
-    && priorNode !== null
-    && priorNode !== node.id;
   const canContinue = runtime.capabilities.continuation === true;
-  // A commissioned rotation handoff outranks every continuation: the fresh
-  // session must never resume (nor require) the rotated provider session.
-  if (role === "worker") {
-    if (state.budgetState?.pendingSegment) {
-      assertBudgetContinuationIdentity(node, state);
-      return {
-        prompt: capsuleHandoffPrompt(contract, node, state, runDir),
-        continuationId: null,
-        mode: "fresh",
-      };
-    }
-    const rotation = pendingRotationHandoff(state);
-    if (rotation) {
-      consumeRotationHandoff(state, rotation.at);
-      return {
-        prompt: rotationFreshPrompt(contract, node, state, runDir, rotation.handoffPath),
-        continuationId: null,
-        mode: "fresh",
-      };
-    }
-    // A completed bloated invocation advised a fresh continuation: like a
-    // consumed rotation, the next attempt never reuses that provider session.
-    const advise = pendingAdviseFresh(state);
-    if (advise) {
-      consumeAdviseFresh(state, advise.at);
-      return {
-        prompt: capsuleHandoffPrompt(contract, node, state, runDir),
-        continuationId: null,
-        mode: "fresh",
-      };
-    }
-  }
-  if (role === "worker" && isManualHandoff(state)) {
-    return {
-      prompt: capsuleHandoffPrompt(contract, node, state, runDir),
-      continuationId: null,
-      mode: "fresh",
-    };
-  }
-  // Cross-harness handoff: the last accepted state came from a different
-  // runtime identity, so the fresh attempt composes its prompt from the
-  // portable capsule instead of raw summaries or native continuation.
-  if (role === "worker" && session && session.invocation.runtimeFingerprint
-    && session.invocation.runtimeFingerprint !== fingerprintRuntime(runtime)) {
-    return {
-      prompt: capsuleHandoffPrompt(contract, node, state, runDir),
-      continuationId: null,
-      mode: "fresh",
-    };
-  }
-  if (identityMatches && !softRotate && canContinue) {
+  if (identityMatches && canContinue) {
     return { prompt, continuationId: session.invocation.continuationId ?? null, mode: "reuse" };
   }
-  if (softRotate || (session && !canContinue)) {
+  if (session && !canContinue) {
     return {
       prompt: phaseHandoffPrompt(contract, node, state, runDir, role),
       continuationId: null,
@@ -1809,29 +1379,6 @@ function fingerprintRuntime(runtime) {
   return createHash("sha256").update(stableJson({ runtime, executable })).digest("hex");
 }
 
-/**
- * A manual handoff override has no routing rule metadata. Provider failover
- * overrides carry a rule, hop, or nextRuntime field and keep their existing
- * provider-specific routing behavior.
- *
- * @param {NodeSnapshot} state
- * @returns {boolean}
- */
-function isManualHandoff(state) {
-  const override = state.routing?.currentOverride;
-  return override?.role === "worker"
-    && typeof override.reason === "string"
-    && override.ruleIndex === undefined
-    && override.rule === undefined
-    && override.hop === undefined
-    && override.nextRuntime === undefined;
-}
-
-/** @param {NodeSnapshot} state */
-function consumeManualHandoff(state) {
-  if (isManualHandoff(state) && state.routing) state.routing.currentOverride = null;
-}
-
 /** @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {"worker"|"judge"} role @returns {string} */
 function phaseHandoffPrompt(contract, node, state, runDir, role) {
   const summaries = phaseSessionCandidates(contract, node, state, runDir, role)
@@ -1874,8 +1421,8 @@ function workerToolPolicy(runtime) {
 
 /**
  * Build the bounded options shared by workers, judges, and gate revisions.
- * Capability declarations decide which in-flight provider controls are sent;
- * timeout and campaign accounting remain universal fallbacks.
+ * Only provider session continuation travels here; time is the controller's
+ * only attempt control.
  *
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
@@ -1888,60 +1435,10 @@ function workerToolPolicy(runtime) {
  * @returns {import("./drivers/index.mjs").CommandOptions}
  */
 function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, extra = {}) {
-  const options = {
+  return {
     ...extra,
     continuationId: runtime.capabilities.continuation === true ? phasePlan.continuationId : null,
   };
-  if (runtime.capabilities.tokenBudget === true) {
-    const derived = invocationBudgetLimit(contract, state);
-    if (derived) {
-      const limitTokens = contract.usagePolicy === false
-        ? derived.limitTokens
-        : Math.min(contract.usagePolicy.maxInvocationTokens, derived.limitTokens);
-      options.maxInvocationTokens = limitTokens;
-      appendTransitionEvent(runDir, state, state.status, state.status, {
-        budgetAction: {
-          type: "invocation_limit",
-          remainingWeighted: derived.remainingWeighted,
-          cacheReadWeight: derived.cacheReadWeight,
-          limitTokens,
-        },
-      }, lease);
-    } else if (contract.usagePolicy !== false) {
-      options.maxInvocationTokens = contract.usagePolicy.maxInvocationTokens;
-    }
-  }
-  if (runtime.capabilities.costBudget === true) {
-    const allowance = remainingMonetaryAllowance(contract, node, state);
-    if (allowance !== null) options.maxCostUsd = allowance;
-  }
-  return options;
-}
-
-/**
- * Native invocation token bound derived from the node's current weighted cap.
- * A driver that reports usage only at turn end (codex) cannot be budgeted
- * live by the controller, so the native rollout budget bounds the invocation
- * instead. The conversion is cache-dominated: for a flash worker whose input
- * is overwhelmingly prompt cache reads, raw tokens are approximately the
- * weighted tokens divided by the campaign cache-read weight.
- *
- * @param {ValidatedContract} contract
- * @param {NodeSnapshot} state
- * @returns {{limitTokens: number, remainingWeighted: number, cacheReadWeight: number}|null}
- */
-function invocationBudgetLimit(contract, state) {
-  const decision = state.budgetDecision;
-  const budget = state.budgetState;
-  if (!decision || !budget) return null;
-  const cacheReadWeight = cacheReadWeightOf(contract);
-  if (cacheReadWeight <= 0) return null;
-  const remainingWeighted = Math.max(0, budget.currentCapTokens - roundBudgetTokens(weightedInput(state.usage, cacheReadWeight)));
-  const limitTokens = Math.max(
-    Math.floor(decision.minimumSegmentTokens / cacheReadWeight),
-    Math.floor(remainingWeighted / cacheReadWeight),
-  );
-  return { limitTokens, remainingWeighted, cacheReadWeight };
 }
 
 /** @param {NodeSnapshot|undefined} state @returns {string|null} */
@@ -2077,10 +1574,9 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
   }
   const runtime = routeRuntimeForState(contract, node, state, "worker");
   const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "worker", prompt);
-  // Whichever prompt-building strategy phaseInvocationPlan chose — reuse,
-  // rotate, or a capsule handoff — the previous-attempt section still has to
-  // survive on a retried attempt, so it is appended to the resolved prompt
-  // rather than the candidate handed to phaseInvocationPlan.
+  // The previous-attempt section still has to survive on a retried attempt,
+  // so it is appended to the resolved prompt rather than the candidate handed
+  // to phaseInvocationPlan.
   phasePlan.prompt = appendPreviousAttempt(phasePlan.prompt, state.previousAttempt);
   // The worker prompt directs the provider to write the canonical result file;
   // make sure the directory exists before the provider is asked to.
@@ -2143,7 +1639,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
         stampInvocation(invocation, contract, node, runtime, state, runDir, "worker", phasePlan.mode, phasePlan.continuationId);
         invocation.snapshotPath = snapshotPath;
         currentJob.scopeBaseline = baseline;
-        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
+        persistInvocation(runDir, state, invocation, currentJob, lease);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "worker",
@@ -2151,14 +1647,10 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
           runtimeFingerprint: fingerprintRuntime(runtime),
           prompt: effectivePrompt,
         });
-        activateBudgetContinuation(runDir, node, state, lease, contract, states, campaignPath);
       },
       onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
       onProgress: () => writeNode(runDir, state, lease),
     });
-    if (state.budgetState && state.budgetState.lastGrantedProgressSignature === null && state.progress?.heartbeatCount === 0) {
-      state.budgetState.lastGrantedProgressSignature = state.progress.progressSignature ?? null;
-    }
     transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lease);
     running.set(node.id, job);
   } catch (error) {
@@ -2234,7 +1726,7 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
         invocation.snapshotPath = `${paths.prompt}.snapshot.json`;
         currentJob.resultMaterialization = true;
         currentJob.recoveryBaseline = baseline;
-        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
+        persistInvocation(runDir, state, invocation, currentJob, lease);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "worker",
@@ -2250,140 +1742,6 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
   } catch (error) {
     transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_failed", message: errorMessage(error) } }, lease);
   }
-}
-
-/**
- * Finish a triggered rotation at a settled boundary. The rotated session is
- * resumed for exactly one turn whose only job is writing the bounded handoff
- * document; it has no workspace authority. Starting the fresh session itself
- * never requires a native continuation — only this one-turn handoff does, and
- * without a resumable session the node fails with a precise bounded error
- * instead of silently discarding the rotation.
- *
- * @param {ValidatedContract} contract
- * @param {string} runDir
- * @param {Map<string, Job>} running
- * @param {Job} job the rotation-terminated worker job
- * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
- * @param {ProviderEnvelope} envelope
- */
-function startRotationHandoff(contract, runDir, running, job, state, lease, envelope) {
-  const node = job.node;
-  const workspace = attemptWorkspace(state) ?? contract.cwd;
-  const runtime = job.runtime.id ? runtimeSnapshot(contract, job.runtime.id) : null;
-  const continuationId = envelope.continuationId ?? job.invocation.continuationId ?? null;
-  if (!runtime || runtime.capabilities.continuation !== true || !continuationId) {
-    const detail = !runtime
-      ? `runtime ${job.runtime.id ?? "unknown"} is no longer resolvable`
-      : runtime.capabilities.continuation !== true
-        ? `runtime ${runtime.id} declares no resumable provider session`
-        : "the rotating provider session exposed no continuation identity";
-    transition(runDir, state, "failed", {
-      phase: "worker",
-      error: {
-        code: "rotation_continuation_unavailable",
-        message: excerpt(`automatic rotation triggered (${job.rotationReason}); ${detail}; the one-turn handoff needs a resumable provider session`),
-      },
-    }, lease);
-    return;
-  }
-  const sequence = Math.max(1, (state.executionOverrides ?? []).filter((item) => item.kind === "rotation").length);
-  const handoffPath = join(workspace, ".runs", "rotations", `${node.id}.${state.attempt}.${sequence}.md`);
-  mkdirSync(dirname(handoffPath), { recursive: true });
-  const prompt = [
-    `${ROTATION_HANDOFF_PROMPT_HEADER} Do not inspect, implement, verify, or invoke tools.`,
-    `Your only job in this single bounded turn is to write the continuation handoff for node ${node.id} to: ${handoffPath}`,
-    `The handoff is markdown of at most ${ROTATION_HANDOFF_MAX_BYTES} bytes covering: work already done, work still pending, commands that pass or fail, and files touched.`,
-    "Then reply with a single line: handoff written",
-  ].join("\n\n");
-  const paths = logPaths(runDir, node.id, "worker", state.attempt);
-  let baseline;
-  try {
-    baseline = captureWorkspaceSnapshot(workspace);
-    writeJsonAtomic(`${paths.prompt}.snapshot.json`, baseline);
-  } catch (error) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "rotation_handoff_snapshot_invalid", message: errorMessage(error) } }, lease);
-    return;
-  }
-  state.phase = "worker";
-  state.runtime = runtime;
-  state.error = { code: "rotation_handoff_pending", message: `awaiting one-turn rotation handoff (${job.rotationReason ?? "rotation threshold reached"})` };
-  writeNode(runDir, state, lease);
-  try {
-    const rotationJob = startProcess({
-      contract, node, state, runtime, workspace, prompt, paths, phase: "worker",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, {
-        prompt,
-        continuationId,
-        mode: "reuse",
-      }, runDir, lease, {
-        toolPolicy: workerToolPolicy(runtime),
-      }),
-      onInvocation: (invocation, currentJob) => {
-        stampInvocation(invocation, contract, node, runtime, state, runDir, "worker", "reuse", continuationId);
-        invocation.snapshotPath = `${paths.prompt}.snapshot.json`;
-        currentJob.rotationHandoff = true;
-        currentJob.rotationHandoffPath = handoffPath;
-        currentJob.recoveryBaseline = baseline;
-        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
-        persistInvocationIntent(runDir, invocation, {
-          nodeId: node.id,
-          role: "worker",
-          attempt: state.attempt,
-          runtimeFingerprint: fingerprintRuntime(runtime),
-          prompt,
-        });
-        // The commissioned handoff is durable before the turn runs, so a
-        // controller loss resumes into the fresh session, not a lost rotation.
-        recordExecutionOverride(runDir, state, {
-          kind: "rotation",
-          decision: "handoff",
-          invocationId: invocation.id,
-          phase: "worker",
-          reason: job.rotationReason ?? "rotation threshold reached",
-          result: handoffPath,
-        }, lease);
-      },
-      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
-    });
-    transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lease);
-    running.set(node.id, rotationJob);
-  } catch (error) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "rotation_handoff_failed", message: errorMessage(error) } }, lease);
-  }
-}
-
-/**
- * Adopt the one-turn rotation handoff: the written document is bounded to the
- * rotation limit, the node returns to pending, and the next scheduling pass
- * starts the fresh provider session from packet, handoff, and git status.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {Job} job the one-turn rotation-handoff job
- * @param {LeaseHandle} lease
- * @param {ProviderEnvelope} envelope
- */
-function finishRotationHandoff(contract, node, state, runDir, job, lease, envelope) {
-  const handoffPath = /** @type {string} */ (job.rotationHandoffPath);
-  if (!existsSync(handoffPath)) {
-    transition(runDir, state, "failed", {
-      phase: "worker",
-      error: {
-        code: "rotation_handoff_missing",
-        message: excerpt(`the one-turn rotation handoff wrote no document at ${handoffPath}${envelope.error ? `: ${envelope.error.message}` : ""}`),
-      },
-    }, lease);
-    return;
-  }
-  const handoff = boundedUtf8(readFileSync(handoffPath, "utf8"), ROTATION_HANDOFF_MAX_BYTES);
-  writeTextAtomic(handoffPath, handoff);
-  persistNodeCapsule(contract, node, state, runDir, lease, "continue the node in a fresh rotated provider session");
-  transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
-  process.stdout.write(`[node] ${node.id} rotation handoff materialized · ${Buffer.byteLength(handoff, "utf8")} bytes · fresh session next\n`);
 }
 
 /** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when the review mode is `none` or no judgment item exists. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
@@ -2428,8 +1786,7 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
     })}${reask ? judgeReaskInstruction(reaskReason) : ""}`;
     const phasePlan = phaseInvocationPlan(contract, node, state, runDir, "judge", prompt);
     // judgePrompt already carries the section when phaseInvocationPlan reuses
-    // that candidate; appendPreviousAttempt is a no-op then and only adds it
-    // when a rotate/handoff prompt replaced the candidate outright.
+    // that candidate; appendPreviousAttempt is a no-op then.
     phasePlan.prompt = appendPreviousAttempt(phasePlan.prompt, state.previousAttempt);
     if (Buffer.byteLength(phasePlan.prompt, "utf8") > 64 * 1024) {
       const error = /** @type {Error & {code: string}} */ (new Error("judge prompt exceeds 65536 bytes"));
@@ -2446,7 +1803,7 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, state, runDir, "judge", phasePlan.mode, phasePlan.continuationId);
-        persistInvocation(runDir, state, invocation, currentJob, lease, contract.usagePolicy);
+        persistInvocation(runDir, state, invocation, currentJob, lease);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "judge",
@@ -2479,9 +1836,8 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
  * @param {Invocation} invocation
  * @param {Job} job
  * @param {LeaseHandle} lease
- * @param {ValidatedContract["usagePolicy"]} usagePolicy
  */
-function persistInvocation(runDir, state, invocation, job, lease, usagePolicy) {
+function persistInvocation(runDir, state, invocation, job, lease) {
   state.invocations = [...(state.invocations ?? []), invocation];
   state.updatedAt = invocation.updatedAt;
   writeNode(runDir, state, lease);
@@ -2497,7 +1853,7 @@ function persistInvocation(runDir, state, invocation, job, lease, usagePolicy) {
       try {
         const envelope = normalizeProviderResult(job.runtime, readBoundedTail(job.paths.stdout), job.exitCode, null, { preferStructured: job.phase === "judge" });
         continuationId = envelope.continuationId ?? continuationId;
-        usage = usageWithBudgetFallback(envelope.usage, envelope.error?.message, usagePolicy);
+        usage = envelope.usage;
         costUsd = envelope.costUsd;
         envelopeStatus = envelope.status;
         structuredResult = Boolean(envelope.result);
@@ -2848,130 +2204,6 @@ function sourceWorkerRuntime(state) {
 }
 
 /**
- * Build the portable continuation capsule from the node's settled state.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {string} nextAction
- * @returns {ReturnType<typeof buildCapsule>}
- */
-function buildNodeCapsule(contract, node, state, runDir, nextAction) {
-  const usage = state.usage ?? emptyUsage();
-  const sourceRuntime = sourceWorkerRuntime(state);
-  const handoff = state.routing?.currentOverride;
-  const result = /** @type {Record<string, unknown> | null | undefined} */ (state.result);
-  const workspace = attemptWorkspace(state) ?? contract.cwd;
-  const budgetRemaining = contract.usagePolicy === false
-    ? null
-    : roundBudgetTokens(contract.usagePolicy.maxInputTokens - campaignUsage(campaignUsagePath(contract), contract.usagePolicy).budgetInputTokens);
-  return buildCapsule({
-    runId: basename(runDir),
-    nodeId: node.id,
-    attemptId: `${node.id}.${state.attempt}`,
-    objective: node.taskPacket.objective,
-    decisions: node.taskPacket.decisions,
-    nonGoals: node.taskPacket.nonGoals,
-    changedFiles: state.scope?.changedPaths ?? (Array.isArray(result?.changedFiles) ? result.changedFiles.map(String) : []),
-    worktreeIdentity: captureWorktreeIdentity(workspace),
-    verifications: (state.verification?.commands ?? []).map((command) => ({ argv: command.argv.join(" "), pass: command.passed === true })),
-    artifacts: Array.isArray(result?.artifacts)
-      ? /** @type {unknown[]} */ (result.artifacts).map((artifact) => {
-        const record = /** @type {Record<string, unknown>} */ (artifact);
-        return {
-          handle: String(record.handle ?? record.path ?? ""),
-          sha256: typeof record.sha256 === "string" ? record.sha256 : "",
-          bytes: typeof record.bytes === "number" ? record.bytes : null,
-          preview: typeof record.preview === "string" ? record.preview : typeof record.summary === "string" ? record.summary : null,
-        };
-      })
-      : [],
-    blockers: state.error?.message ? [state.error.message] : [],
-    nextAction,
-    usage: {
-      inputTokens: usage.inputTokens ?? null,
-      outputTokens: usage.outputTokens ?? null,
-      cacheReadInputTokens: usage.cacheReadInputTokens ?? null,
-    },
-    costUsd: typeof state.costUsd === "number" ? state.costUsd : null,
-    budgetRemaining,
-    continuationHint: isManualHandoff(state) && sourceRuntime && handoff
-      ? "handoff from " + sourceRuntime + " to " + handoff.runtime + ": " + handoff.reason
-      : null,
-  });
-}
-
-/**
- * Persist the capsule at a settled worker boundary so any harness can pick up
- * the node without the prior transcript.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {LeaseHandle|null} lease
- * @param {string} nextAction
- */
-function persistNodeCapsule(contract, node, state, runDir, lease, nextAction) {
-  const capsule = buildNodeCapsule(contract, node, state, runDir, nextAction);
-  writeJsonAtomic(join(runDir, "capsules", `${node.id}.${state.attempt}.json`), capsule);
-  return capsule;
-}
-
-/**
- * Load the newest persisted capsule at or below the current attempt.
- *
- * @param {string} runDir
- * @param {string} nodeId
- * @param {number} attempt
- * @returns {ReturnType<typeof buildCapsule>|null}
- */
-function loadLatestCapsule(runDir, nodeId, attempt) {
-  for (let candidate = attempt; candidate >= 0; candidate -= 1) {
-    try {
-      return /** @type {ReturnType<typeof buildCapsule>} */ (parseCapsule(readFileSync(join(runDir, "capsules", `${nodeId}.${candidate}.json`), "utf8")));
-    } catch {}
-  }
-  return null;
-}
-
-/**
- * Compose a bounded fresh-session prompt from a portable capsule and the
- * closed task packet.
- *
- * @param {ReturnType<typeof buildCapsule>} capsule
- * @param {string|unknown} taskPacket
- * @returns {string}
- */
-export function composeCapsulePrompt(capsule, taskPacket) {
-  const packet = typeof taskPacket === "string"
-    ? taskPacket
-    : JSON.stringify(taskPacket, null, 2) ?? "";
-  const handoff = [
-    `Continue node ${capsule.nodeId} in a fresh provider session on a new harness. The portable continuation capsule below is authoritative; it carries everything from the previous attempt.`,
-    `Portable continuation capsule (digest ${capsule.digest}):`,
-    boundedUtf8(JSON.stringify(capsule, null, 2), DEFAULT_CAPSULE_BYTES),
-    "Current closed task packet:",
-    boundedUtf8(packet, 24 * 1024),
-  ].join("\n\n");
-  return boundedUtf8(handoff, 60 * 1024);
-}
-
-/**
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @returns {string}
- */
-function capsuleHandoffPrompt(contract, node, state, runDir) {
-  const capsule = loadLatestCapsule(runDir, node.id, state.attempt)
-    ?? buildNodeCapsule(contract, node, state, runDir, "continue from the last settled checkpoint");
-  return composeCapsulePrompt(capsule, node.prompt);
-}
-
-/**
  * @param {ScopeComparison} scope
  * @param {import("./verification.mjs").WorkspaceScopeBoundary} boundary
  * @returns {BoundedScope}
@@ -3224,7 +2456,6 @@ function checkWorkerScope(contract, runDir, job, lease, options = {}) {
  * A result-only continuation is not implementation work. Its baseline is
  * captured immediately before that single turn, so every workspace change is
  * outside its authority (the run-owned result file is ignored by snapshots).
- * The same no-authority rule covers the one-turn rotation handoff.
  *
  * @param {ValidatedContract} contract
  * @param {string} runDir
@@ -3502,13 +2733,8 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       continue;
     }
     // The provider close evidence was already read by recordInvocationUsage
-    // above; charge the declared ceiling when the provider omitted terminal
-    // usage, then run the scope gate before any settlement so a scope failure
+    // above; run the scope gate before any settlement so a scope failure
     // still persists the provider receipts and usage.
-    envelope = {
-      ...envelope,
-      usage: usageWithBudgetFallback(envelope.usage, envelope.error?.message, contract.usagePolicy) ?? envelope.usage,
-    };
     // Whether this is a completed attempt is decided before the scope gate:
     // only a completed attempt may defer its scope verdict to after controller
     // verification (TECH-SPEC lean, rule 1). Completed is exactly what the
@@ -3521,7 +2747,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     let adoptedWorkerResult = null;
     /** @type {Error|undefined} */
     let workerResultError;
-    if (job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization) {
+    if (job.phase === "worker" && !job.resultMaterialization) {
       try {
         materializeAttemptResult(runDir, state, job.node);
         adoptedWorkerResult = readWorkerResultFile(runDir, job.node.id);
@@ -3532,14 +2758,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         workerResultError = /** @type {Error} */ (error);
       }
     }
-    const completedAttempt = job.phase === "worker" && !job.rotationHandoff && !job.resultMaterialization
+    const completedAttempt = job.phase === "worker" && !job.resultMaterialization
       && adoptedWorkerResult?.status === "done";
     if (job.phase === "worker") {
       const scopeOk = job.resultMaterialization
         ? checkResultMaterializationScope(contract, runDir, job, lease)
-        : job.rotationHandoff
-          ? checkResultMaterializationScope(contract, runDir, job, lease, "rotation handoff")
-          : checkWorkerScope(contract, runDir, job, lease, { deferViolation: completedAttempt });
+        : checkWorkerScope(contract, runDir, job, lease, { deferViolation: completedAttempt });
       if (!scopeOk) {
         settleInvocation(runDir, job.invocation, {
           status: "failed",
@@ -3552,24 +2776,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         continue;
       }
     }
-    // A controller kill (wall-clock, budget, or cancellation) can land before
-    // the provider reported usage; charge the remaining derived cap and flag
-    // the estimate so the ledger never records zero for work that ran.
-    let usageEstimated = false;
-    if ((job.budgetStop || job.signal) && !hasMeasuredUsage(envelope.usage)) {
-      const estimate = conservativeUsageEstimate(contract, state);
-      if (estimate) {
-        envelope = { ...envelope, usage: estimate };
-        usageEstimated = true;
-      }
-    }
     state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === job.invocation.id
       ? {
         ...invocation,
         continuationId: envelope.continuationId ?? invocation.continuationId ?? null,
         usage: envelope.usage,
         costUsd: envelope.costUsd,
-        ...(usageEstimated ? { usageEstimated: true } : {}),
       }
       : invocation);
     settleInvocation(runDir, job.invocation, {
@@ -3582,19 +2794,19 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       error: envelope.error ?? null,
       nextState: operationNextState(state),
     });
-    await recordCampaignUsage(campaignPath, contract.usagePolicy, state.invocations.find((invocation) => invocation.id === job.invocation.id));
+    appendUsageRecord(runDir, state.invocations.find((invocation) => invocation.id === job.invocation.id));
     state.usage = invocationUsage(state);
     state.costUsd = invocationCost(state);
     // A closed worker whose canonical result file is valid and whose scope
     // passed is completed work, no matter what the provider envelope or the
     // exit code said. The durable file was read above, before the scope gate,
     // so the gate knows whether this attempt may defer its verdict; the file
-    // is adopted before the rotation-handoff, budget-continuation, exhaustion
-    // and failure branches and enters the normal verification/gate flow with
+    // is adopted before the exhaustion and failure branches and enters the
+    // normal verification/gate flow with
     // that result. A present-but-invalid file still fails exactly as the done
     // path fails it today.
     if (workerResultError) {
-      if (!job.rotationReason && envelope.status === "done") {
+      if (envelope.status === "done") {
         await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(workerResultError), states, campaignPath);
         continue;
       }
@@ -3612,47 +2824,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         nextState: operationNextState(state),
       });
     }
-    if (!adoptedWorkerResult && job.budgetStop === "node" && state.budgetDecision && state.budgetState) {
-      settleDerivedBudgetStop(contract, job.node, state, runDir, lease);
-      continue;
-    }
-    // A rotation-terminated worker settles its scope above and hands over to
-    // the one-turn rotation handoff; a worker that finished anyway keeps the
-    // normal completion path, so rotation never discards accepted work.
-    if (job.phase === "worker" && job.rotationHandoff) {
-      finishRotationHandoff(contract, job.node, state, runDir, job, lease, envelope);
-      continue;
-    }
-    // A worker the controller rotated did not deliver an accepted canonical
-    // result: the envelope's status cannot prove completion (a killed turn
-    // with any final message normalizes to done), so the one-turn handoff
-    // starts unless the durable result was adopted above.
-    if (!adoptedWorkerResult && job.phase === "worker" && job.rotationReason) {
-      if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease, states, campaignPath)) continue;
-      startRotationHandoff(contract, runDir, running, job, state, lease, envelope);
-      continue;
-    }
-    if (!adoptedWorkerResult && hasCostBudget(contract, job.node) && envelope.costUsd === null) {
-      transition(runDir, state, "failed", {
-        phase: job.phase,
-        result: state.result,
-        usage: state.usage,
-        error: { code: "cost_unavailable", message: "provider did not return cost for a monetary budget" },
-      }, lease);
-      continue;
-    }
     if (!adoptedWorkerResult && envelope.status === "exhausted") {
-      // A native rollout-budget stop on a budgeted node is a budget event
-      // (ADR-0022), never an implicit provider switch: settle it through the
-      // derived budget policy exactly like the live stop path.
-      if (state.budgetDecision && state.budgetState && rolloutBudgetExhausted(envelope.error?.message)) {
-        const cacheReadWeight = cacheReadWeightOf(contract);
-        const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-        if (applyDerivedBudgetStop(job.node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) {
-          settleDerivedBudgetStop(contract, job.node, state, runDir, lease);
-        }
-        continue;
-      }
       handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease, states, campaignPath);
       continue;
     }
@@ -3663,7 +2835,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // is surfaced, never silently settled. A stream that never reached its
     // terminal envelope is a protocol defect instead and takes the bounded
     // re-ask below.
-    if (!job.budgetStop && job.phase === "judge" && envelope.status === "failed" && envelope.error?.code !== "incomplete_stream") {
+    if (job.phase === "judge" && envelope.status === "failed" && envelope.error?.code !== "incomplete_stream") {
       // A judge that lost its socket is not an unavailable judge. It buys the
       // same bounded network waits a worker does, on the runtime it already
       // warmed, and spends none of the one re-dispatch counted below.
@@ -3693,7 +2865,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // phase killed on its wall clock. One bounded re-ask, then the review mode
     // decides — advisory completes, blocking enters attention with the work
     // preserved so a retry in place can re-judge it.
-    if (job.phase === "judge" && job.budgetStop !== "node" && job.budgetStop !== "campaign") {
+    if (job.phase === "judge") {
       const evidence = judgeVerdictEvidence(envelope);
       if (!evidence.ok) {
         const network = networkTransition(contract, job.node, state, "judge", envelope, job.exitCode);
@@ -3716,8 +2888,6 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           phase: "worker",
           error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
         }, lease);
-      } else if (boundedDispatchRefusedByBudget(contract, job.node, state, runDir, lease, states, campaignPath)) {
-        continue;
       } else {
         startResultMaterialization(
           contract,
@@ -3738,14 +2908,12 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       // runtime it already warmed before it spends a failover hop on it. When
       // the waits and the edges are both spent, the failure is reported here.
       const role = /** @type {"worker"|"judge"} */ (job.phase);
-      const network = job.budgetStop ? null : networkTransition(contract, job.node, state, role, envelope, job.exitCode);
+      const network = networkTransition(contract, job.node, state, role, envelope, job.exitCode);
       if (network && handleProviderExhaustion(contract, runDir, job.node, state, role, envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
-      transition(runDir, state, job.budgetStop ? "exhausted" : envelope.status, {
+      transition(runDir, state, envelope.status, {
         phase: job.phase,
         result: state.result,
-        error: job.budgetStop
-          ? budgetStopError(job.budgetStop, job.state)
-          : envelope.error,
+        error: envelope.error,
         usage: state.usage,
       }, lease);
       continue;
@@ -3784,7 +2952,6 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         continue;
       }
       if (job.resultMaterialization && canReuseResultEvidence(state, job.node)) {
-        consumeManualHandoff(state);
         if (job.node.gate.enabled) await applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running, states, campaignPath);
         else await settleDone(contract, job.node, state, runDir, lease, states, campaignPath, { phase: "complete", result: workerResult, error: null });
         continue;
@@ -3795,36 +2962,6 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         continue;
       }
       if (job.scopeViolation) recordScopeFinding(runDir, state, lease);
-      persistNodeCapsule(
-        contract,
-        job.node,
-        state,
-        runDir,
-        lease,
-        job.node.gate.enabled && judgeRequired(job.node) ? "await judge verdict" : "worker result accepted; node complete",
-      );
-      consumeManualHandoff(state);
-      if (job.node.gate.enabled && judgeRequired(job.node) && monetaryBudgetReached(contract, job.node, state, states)) {
-        transition(runDir, state, "blocked", {
-          phase: "budget",
-          error: { code: "cost_budget_exceeded", message: "monetary budget reached before scheduling the judge" },
-        }, lease);
-        continue;
-      }
-      if (job.node.gate.enabled && judgeRequired(job.node)) {
-        const policy = contract.usagePolicy;
-        if (policy !== false && campaignUsage(campaignPath, policy).budgetInputTokens >= policy.maxInputTokens) {
-          appendTransitionEvent(runDir, state, state.status, state.status, {
-            budgetAction: {
-              type: "judge_reserve_override",
-              campaignBudgetInputTokens: campaignUsage(campaignPath, policy).budgetInputTokens,
-              judgeReserveInputTokens: policy.judgeReserveInputTokens,
-              reason: "worker completed; consume the judge reserve before ending the run",
-            },
-          }, lease);
-          recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-        }
-      }
       if (job.node.gate.enabled) await startJudge(contract, job.node, state, runDir, running, workerResult, lease, states, campaignPath);
       else await settleDone(contract, job.node, state, runDir, lease, states, campaignPath, { phase: "complete", result: workerResult });
       continue;
@@ -3855,17 +2992,6 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
  */
 function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lease, states, campaignPath, precomputed) {
   const error = envelope.error ?? { code: "provider_exhausted", message: "provider exhausted" };
-  // A native rollout-budget stop on a budgeted node settles through the
-  // derived budget policy (extension, predeclared continuation, or
-  // budget_attention), never through a provider failover edge (ADR-0022).
-  if (!precomputed && state.budgetDecision && state.budgetState && rolloutBudgetExhausted(error.message)) {
-    const cacheReadWeight = cacheReadWeightOf(contract);
-    const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-    if (applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) {
-      settleDerivedBudgetStop(contract, node, state, runDir, lease);
-    }
-    return true;
-  }
   if (NON_FAILOVER_CODES.has(error.code)) {
     transition(runDir, state, "exhausted", { phase: role, result: state.result, usage: state.usage, error }, lease);
     return true;
@@ -3995,20 +3121,6 @@ function recordInvocationUsage(job, options = {}) {
     : invocation);
   if (options.accumulate !== false) state.usage = addUsage(state.usage, envelope.usage);
   return envelope;
-}
-
-/**
- * @param {"node"|"campaign"|"wallclock"} scope
- * @param {NodeSnapshot} state
- * @returns {{code: string, message: string}}
- */
-function budgetStopError(scope, state) {
-  const observed = state.usage?.inputTokens ?? 0;
-  return scope === "wallclock"
-    ? { code: "wall_clock_timeout", message: "worker exceeded its wall-clock deadline" }
-    : scope === "node"
-    ? { code: "token_budget_exceeded", message: `worker exceeded its per-node input-token cap (observed ${observed})` }
-    : { code: "budget_exceeded", message: `run input-token budget exhausted (spent ${observed})` };
 }
 
 /** A failed judge envelope gets one bounded re-dispatch, then judge_unavailable. */
@@ -4166,19 +3278,17 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
     code: "revision_cap",
     label: "gate",
     phase: "judge",
-    capsule: "address gate findings on a fresh worker attempt",
   });
 }
 
-/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", capsule?: string|null, message?: string}} options */
+/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", message?: string}} options */
 function applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, options) {
-  const { code, label, phase = "worker", capsule = null, message = verdict.summary } = options;
+  const { code, label, phase = "worker", message = verdict.summary } = options;
   state.gate = verdict;
   if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
     resetPhaseRouting(state);
     state.revisions += 1;
     state.attempt += 1;
-    if (capsule !== null) persistNodeCapsule(contract, node, state, runDir, lease, capsule);
     process.stdout.write(`[${label}] ${node.id} retry · ${verdict.summary}\n`);
     if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
     else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
@@ -4406,276 +3516,12 @@ function blockDependents(contract, runDir, states, lease) {
   }
 }
 
-const USAGE_LEDGER_SCHEMA_VERSION = 1;
-const USAGE_LEDGER_NAME = "usage-ledger.json";
-const USAGE_LOCK_NAME = "usage-ledger.lock";
-
-/** @param {ValidatedContract} contract @returns {string} */
-function campaignUsagePath(contract) {
-  return join(contract.cwd, ".runs", "campaigns", contract.campaignId);
-}
-
-/** @param {ValidatedContract["usagePolicy"]} policy @returns {CampaignUsage} */
-function emptyCampaignTotals(policy) {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadInputTokens: 0,
-    conservativeInputTokens: 0,
-    budgetInputTokens: 0,
-    workerBudgetInputTokens: 0,
-    judgeBudgetInputTokens: 0,
-    remainingWorkerAllowance: policy === false ? null : Math.max(0, policy.maxInputTokens - policy.judgeReserveInputTokens),
-    judgeReserveInputTokens: policy === false ? null : policy.judgeReserveInputTokens,
-    maxInputTokens: policy === false ? null : policy.maxInputTokens,
-    phases: {},
-  };
-}
-
-/** @param {string} campaignPath @param {ValidatedContract["usagePolicy"]} policy */
-function ensureCampaignUsageLedger(campaignPath, policy) {
-  if (policy === false) return;
-  const path = join(campaignPath, USAGE_LEDGER_NAME);
-  /** @type {UsageLedger|undefined} */
-  let ledger;
-  try { ledger = /** @type {UsageLedger} */ (readJson(path)); } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-  if (!ledger) {
-    writeJsonAtomic(path, {
-      schemaVersion: USAGE_LEDGER_SCHEMA_VERSION,
-      epochs: { [policy.epoch]: { policy, invocations: {} } },
-    });
-    return;
-  }
-  const epoch = ledger.epochs?.[policy.epoch];
-  if (epoch && stableJson(epoch.policy) !== stableJson(policy)) {
-    throw new Error(`usage policy epoch ${policy.epoch} has different limits; choose a new explicit epoch`);
-  }
-  if (!epoch) {
-    writeJsonAtomic(path, {
-      ...ledger,
-      schemaVersion: USAGE_LEDGER_SCHEMA_VERSION,
-      epochs: { ...(ledger.epochs ?? {}), [policy.epoch]: { policy, invocations: {} } },
-    });
-  }
-}
-
-/**
- * @param {string} campaignPath
- * @param {ValidatedContract["usagePolicy"]} policy
- * @returns {ReturnType<typeof emptyCampaignTotals>}
- */
-function campaignUsage(campaignPath, policy) {
-  const totals = emptyCampaignTotals(policy);
-  if (policy === false) return totals;
-  /** @type {UsageLedger|undefined} */
-  let ledger;
-  try { ledger = /** @type {UsageLedger} */ (readJson(join(campaignPath, USAGE_LEDGER_NAME))); } catch (error) {
-    if (errorCode(error) === "ENOENT") return totals;
-    throw error;
-  }
-  const epoch = /** @type {UsageLedger} */ (ledger).epochs?.[policy.epoch];
-  if (!epoch) return totals;
-  if (stableJson(epoch.policy) !== stableJson(policy)) {
-    throw new Error(`usage policy epoch ${policy.epoch} has different limits; choose a new explicit epoch`);
-  }
-  for (const invocation of Object.values(epoch.invocations ?? {})) {
-    const usage = invocation.usage ?? {};
-    const inputTokens = typeof usage.inputTokens === "number" ? usage.inputTokens : 0;
-    const outputTokens = typeof usage.outputTokens === "number" ? usage.outputTokens : 0;
-    const cacheReadInputTokens = typeof usage.cacheReadInputTokens === "number" ? usage.cacheReadInputTokens : 0;
-    const conservativeInputTokens = inputTokens + cacheReadInputTokens;
-    const budgetInputTokens = inputTokens + cacheReadInputTokens * policy.cacheReadWeight;
-    totals.inputTokens += inputTokens;
-    totals.outputTokens += outputTokens;
-    totals.cacheReadInputTokens += cacheReadInputTokens;
-    totals.conservativeInputTokens += conservativeInputTokens;
-    totals.budgetInputTokens = roundBudgetTokens(totals.budgetInputTokens + budgetInputTokens);
-    if (invocation.role === "worker") totals.workerBudgetInputTokens = roundBudgetTokens(totals.workerBudgetInputTokens + budgetInputTokens);
-    if (invocation.role === "judge") totals.judgeBudgetInputTokens = roundBudgetTokens(totals.judgeBudgetInputTokens + budgetInputTokens);
-    const key = `${invocation.role}:${invocation.planPhase}`;
-    const phase = totals.phases[key] ?? { budgetInputTokens: 0, conservativeInputTokens: 0, invocations: 0 };
-    phase.budgetInputTokens = roundBudgetTokens(phase.budgetInputTokens + budgetInputTokens);
-    phase.conservativeInputTokens += conservativeInputTokens;
-    phase.invocations += 1;
-    totals.phases[key] = phase;
-  }
-  totals.remainingWorkerAllowance = Math.max(0, policy.maxInputTokens - policy.judgeReserveInputTokens - totals.budgetInputTokens);
-  return totals;
-}
-
-/** @param {number} value */
-function roundBudgetTokens(value) {
-  return Math.round(value * 1_000_000) / 1_000_000;
-}
-
-/**
- * @param {string} campaignPath
- * @param {ValidatedContract["usagePolicy"]} policy
- * @param {Invocation|undefined} invocation
- * @returns {Promise<void>}
- */
-async function recordCampaignUsage(campaignPath, policy, invocation) {
-  if (policy === false || !invocation || !hasMeasuredUsage(invocation.usage)) return;
-  ensureCampaignUsageLedger(campaignPath, policy);
-  const lockPath = join(campaignPath, USAGE_LOCK_NAME);
-  let locked = false;
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    try {
-      mkdirSync(lockPath);
-      locked = true;
-      break;
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > 300_000) rmSync(lockPath, { recursive: true, force: true });
-      } catch {}
-      await delay(5);
-    }
-  }
-  if (!locked) throw new Error("usage ledger lock was not released");
-  try {
-    const path = join(campaignPath, USAGE_LEDGER_NAME);
-    const ledger = /** @type {UsageLedger} */ (readJson(path));
-    const epoch = ledger.epochs?.[policy.epoch] ?? { policy, invocations: {} };
-    if (stableJson(epoch.policy) !== stableJson(policy)) {
-      throw new Error(`usage policy epoch ${policy.epoch} has different limits; choose a new explicit epoch`);
-    }
-    if (epoch.invocations?.[invocation.id]) return;
-    writeJsonAtomic(path, {
-      ...ledger,
-      schemaVersion: USAGE_LEDGER_SCHEMA_VERSION,
-      epochs: {
-        ...(ledger.epochs ?? {}),
-        [policy.epoch]: {
-          policy,
-          invocations: {
-            ...(epoch.invocations ?? {}),
-            [invocation.id]: {
-              runId: invocation.runId,
-              campaignId: invocation.campaignId,
-              role: invocation.role,
-              planPhase: invocation.planPhase,
-              usage: invocation.usage,
-              costUsd: invocation.costUsd ?? null,
-            },
-          },
-        },
-      },
-    });
-  } finally {
-    rmSync(lockPath, { recursive: true, force: true });
-  }
-}
+const USAGE_LOG_NAME = "usage.jsonl";
 
 /** @param {Usage|undefined} usage @returns {boolean} */
 function hasMeasuredUsage(usage) {
   return Boolean(usage && [usage.inputTokens, usage.outputTokens, usage.cacheReadInputTokens]
     .some((value) => typeof value === "number" && Number.isFinite(value)));
-}
-
-/**
- * @param {string|null|undefined} message
- * @returns {boolean}
- */
-function rolloutBudgetExhausted(message) {
-  return /shared rollout token budget exhausted/iu.test(String(message ?? ""));
-}
-
-/**
- * Conservative usage estimate for an invocation killed before the provider
- * reported any usage: charge the node's remaining derived cap as uncached
- * input so the ledger never records zero for work that ran and the budget
- * keeps acting live after the kill.
- *
- * @param {ValidatedContract} contract
- * @param {NodeSnapshot} state
- * @returns {Usage|null}
- */
-function conservativeUsageEstimate(contract, state) {
-  const cap = state.budgetState?.currentCapTokens;
-  if (typeof cap !== "number" || !Number.isFinite(cap)) return null;
-  const cacheReadWeight = cacheReadWeightOf(contract);
-  const spent = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-  const remaining = Math.max(0, cap - spent);
-  return { inputTokens: Math.round(remaining), outputTokens: null, cacheReadInputTokens: null };
-}
-
-/**
- * Charge the conservative estimate on the matching invocation record when the
- * provider reported no usage, and flag it so the ledger can distinguish an
- * estimate from a measured value.
- *
- * @param {ValidatedContract} contract
- * @param {NodeSnapshot} state
- * @param {string} invocationId
- * @returns {boolean} true when an estimate was applied
- */
-function applyUsageEstimate(contract, state, invocationId) {
-  const invocation = (state.invocations ?? []).find((item) => item.id === invocationId);
-  if (!invocation || hasMeasuredUsage(invocation.usage)) return false;
-  const estimate = conservativeUsageEstimate(contract, state);
-  if (!estimate) return false;
-  state.invocations = (state.invocations ?? []).map((item) => item.id === invocationId
-    ? { ...item, usage: estimate, usageEstimated: true }
-    : item);
-  return true;
-}
-
-/**
- * Codex can omit terminal usage when its native rollout budget stops a turn.
- * Charge the declared ceiling so missing telemetry cannot create a free retry.
- *
- * @param {Usage|undefined} usage
- * @param {string|null|undefined} message
- * @param {ValidatedContract["usagePolicy"]} policy
- * @returns {Usage|undefined}
- */
-function usageWithBudgetFallback(usage, message, policy) {
-  if (hasMeasuredUsage(usage) || policy === false || !rolloutBudgetExhausted(message)) return usage;
-  return { inputTokens: policy.maxInvocationTokens, outputTokens: null, cacheReadInputTokens: null };
-}
-
-/** @param {string} campaignPath @param {ValidatedContract["usagePolicy"]} policy @param {Map<string, NodeSnapshot>} states @returns {Promise<void>} */
-async function synchronizeCampaignUsage(campaignPath, policy, states) {
-  if (policy === false) return;
-  for (const state of states.values()) {
-    for (const invocation of state.invocations ?? []) await recordCampaignUsage(campaignPath, policy, invocation);
-  }
-}
-
-/**
- * Recovery can discover usage after the initial campaign synchronization. Attach
- * it to the authoritative invocation first, then record that invocation in the
- * epoch ledger. The invocation id makes repeated resumes idempotent.
- *
- * @param {string} campaignPath
- * @param {ValidatedContract["usagePolicy"]} policy
- * @param {string} runDir
- * @param {NodeSnapshot} state
- * @param {RecoveryOutcome|null|undefined} recovery
- * @param {LeaseHandle} lease
- * @returns {Promise<void>}
- */
-async function persistRecoveryUsage(campaignPath, policy, runDir, state, recovery, lease) {
-  if (!recovery?.invocationId) return;
-  const current = state.invocations?.find((invocation) => invocation.id === recovery.invocationId);
-  if (!current) return;
-  const recoveredUsage = usageWithBudgetFallback(recovery.usage, recovery.reason, policy);
-  const usage = hasMeasuredUsage(current.usage) ? current.usage : recoveredUsage;
-  const costUsd = typeof current.costUsd === "number" ? current.costUsd : recovery.costUsd;
-  const changed = stableJson(current.usage) !== stableJson(usage)
-    || current.costUsd !== (costUsd ?? null);
-  if (changed) {
-    state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === current.id
-      ? { ...invocation, usage, costUsd: costUsd ?? null }
-      : invocation);
-    state.usage = invocationUsage(state);
-    writeNode(runDir, state, lease);
-  }
-  const updated = state.invocations?.find((invocation) => invocation.id === current.id);
-  await recordCampaignUsage(campaignPath, policy, updated);
 }
 
 /** @param {NodeSnapshot} state @returns {Usage} */
@@ -4694,600 +3540,106 @@ function invocationCost(state) {
   return costs.length ? costs.reduce((total, cost) => total + cost, 0) : undefined;
 }
 
-/** @param {Usage|undefined|null} usage @returns {number} */
-function conservativeInput(usage) {
-  return (usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0);
-}
-
-/** @param {ValidatedContract} contract @returns {number} */
-function cacheReadWeightOf(contract) {
-  return contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
-}
-
-/** @param {ValidatedNode} node */
-function budgetIdentity(node) {
-  return {
-    packetHash: node.packetHash,
-    scopeHash: canonicalBudgetHash({ writeFiles: node.taskPacket.writeFiles ?? [], writeRoots: node.taskPacket.writeRoots ?? [] }),
-    verificationHash: canonicalBudgetHash(node.taskPacket.verification),
-  };
+/**
+ * Invocation ids already present in the run's usage.jsonl. The append path
+ * uses this to stay idempotent across resume and replay.
+ *
+ * @param {string} runDir
+ * @returns {Set<string>}
+ */
+function usageRecordIds(runDir) {
+  const ids = new Set();
+  const path = join(runDir, USAGE_LOG_NAME);
+  if (!existsSync(path)) return ids;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      const value = record && typeof record === "object" && !Array.isArray(record)
+        ? /** @type {Record<string, unknown>} */ (record)
+        : null;
+      if (value && typeof value.invocationId === "string") ids.add(value.invocationId);
+    } catch {
+      // A truncated tail line is repaired by appendJsonl on the next write.
+    }
+  }
+  return ids;
 }
 
 /**
- * Persist the pure policy result before the first provider dispatch.
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
+ * Append one usage.jsonl record for a worker or judge invocation. Usage is a
+ * reporting record only: no control path reads this file to gate work.
+ *
  * @param {string} runDir
- * @param {LeaseHandle} lease
+ * @param {Invocation|undefined|null} invocation
  */
-function ensureBudgetDecision(contract, node, state, states, campaignPath, runDir, lease) {
-  if (!node.budgetProfile) return true;
-  if (state.budgetDecision && state.budgetState) {
-    try {
-      assertBudgetContinuationIdentity(node, state);
-      return state.budgetDecision.status === "allocated" && state.budgetState.status !== "attention";
-    } catch (error) {
-      state.budgetState.status = "attention";
-      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_attention", message: excerpt(errorMessage(error)) } }, lease);
-      return false;
-    }
-  }
-  const weight = cacheReadWeightOf(contract);
-  const ledger = campaignUsage(campaignPath, contract.usagePolicy);
-  const campaignSpend = contract.usagePolicy === false
-    ? [...states.values()].reduce((total, item) => total + weightedInput(item.usage, weight), 0)
-    : ledger.budgetInputTokens;
-  const phaseSpend = contract.usagePolicy === false
-    ? contract.nodes.reduce((total, candidate) => candidate.phase === node.phase
-      ? total + weightedInput(states.get(candidate.id)?.usage, weight)
-      : total, 0)
-    : ledger.phases[`worker:${node.phase}`]?.budgetInputTokens ?? 0;
-  const campaignLimit = contract.usagePolicy === false ? contract.maxInputTokens : contract.usagePolicy.maxInputTokens;
-  const phaseLimit = contract.usagePolicy === false ? contract.maxInputTokens : contract.usagePolicy.maxPhaseInputTokens;
-  const judgeReserve = contract.usagePolicy === false
-    ? 0
-    : Math.max(0, contract.usagePolicy.judgeReserveInputTokens - ledger.judgeBudgetInputTokens);
-  const pendingReserveTokens = contract.nodes.reduce((total, candidate) => {
-    if (candidate.id === node.id || !candidate.budgetProfile) return total;
-    const candidateState = states.get(candidate.id);
-    return candidateState && !TERMINAL.has(candidateState.status)
-      ? total + candidate.budgetProfile.minimumSegmentTokens
-      : total;
-  }, 0);
-  const identity = budgetIdentity(node);
-  const runtime = routeRuntimeForState(contract, node, state, "worker");
-  const decision = deriveBudgetDecision(node.budgetProfile, {
-    ...identity,
-    runtimeId: runtime.id,
-    packetBytes: Buffer.byteLength(stableJson(node.taskPacket), "utf8"),
-    phaseRemainingTokens: Math.max(0, Math.floor(phaseLimit - phaseSpend)),
-    campaignRemainingTokens: Math.max(0, Math.floor(campaignLimit - campaignSpend)),
-    judgeReserveTokens: Math.max(0, Math.floor(judgeReserve)),
-    pendingReserveTokens,
-    explicitHardCeilingTokens: node.maxInputTokens ?? null,
+function appendUsageRecord(runDir, invocation) {
+  if (!invocation?.id || usageRecordIds(runDir).has(invocation.id)) return;
+  const usage = /** @type {Usage} */ (invocation.usage ?? { inputTokens: null, outputTokens: null, cacheReadInputTokens: null });
+  appendJsonl(join(runDir, USAGE_LOG_NAME), {
+    invocationId: invocation.id,
+    runId: invocation.runId ?? basename(runDir),
+    nodeId: invocation.nodeId ?? null,
+    attempt: invocation.attempt ?? null,
+    role: invocation.role ?? null,
+    runtimeId: invocation.runtimeId ?? null,
+    model: invocation.model ?? null,
+    inputTokens: typeof usage.inputTokens === "number" ? usage.inputTokens : null,
+    cacheReadInputTokens: typeof usage.cacheReadInputTokens === "number" ? usage.cacheReadInputTokens : null,
+    outputTokens: typeof usage.outputTokens === "number" ? usage.outputTokens : null,
+    costUsd: typeof invocation.costUsd === "number" ? invocation.costUsd : null,
+    costProvenance: typeof invocation.costUsd === "number" ? "provider" : "unknown",
+    startedAt: invocation.startedAt ?? null,
+    finishedAt: invocation.closedAt ?? null,
   });
-  state.budgetDecision = decision;
-  state.budgetState = initialBudgetState(decision);
-  writeNode(runDir, state, lease);
-  appendTransitionEvent(runDir, state, state.status, state.status, { budgetDecision: decision }, lease);
-  recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-  if (decision.status === "rejected") {
-    transition(runDir, state, "blocked", {
-      phase: "budget",
-      error: { code: "budget_attention", message: decision.rejectReason ?? "budget decision rejected" },
-    }, lease);
-    return false;
-  }
-  return true;
-}
-
-/** @param {ValidatedNode} node @param {NodeSnapshot} state */
-function assertBudgetContinuationIdentity(node, state) {
-  const decision = state.budgetDecision;
-  if (!decision) throw new Error("budget decision is missing");
-  const identity = budgetIdentity(node);
-  for (const key of /** @type {("packetHash"|"scopeHash"|"verificationHash")[]} */ (["packetHash", "scopeHash", "verificationHash"])) {
-    if (decision[key] !== identity[key]) throw new Error(`budget continuation ${key} does not match the frozen contract`);
-    if (state.budgetState?.pendingSegment?.[key] !== undefined && state.budgetState.pendingSegment[key] !== identity[key]) {
-      throw new Error(`pending budget continuation ${key} does not match the frozen contract`);
-    }
-  }
 }
 
 /**
- * @param {string} runDir
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- */
-function activateBudgetContinuation(runDir, node, state, lease, contract, states, campaignPath) {
-  const budget = state.budgetState;
-  const pending = budget?.pendingSegment;
-  if (!budget || !pending) return;
-  assertBudgetContinuationIdentity(node, state);
-  if (budget.activatedSegments.includes(pending.segment)) {
-    budget.pendingSegment = null;
-    budget.status = "active";
-    writeNode(runDir, state, lease);
-    return;
-  }
-  budget.currentCapTokens += pending.allocationTokens;
-  budget.continuationRemainingTokens -= pending.allocationTokens;
-  budget.segment = pending.segment;
-  budget.activatedSegments = [...budget.activatedSegments, pending.segment];
-  budget.pendingSegment = null;
-  budget.status = "active";
-  writeNode(runDir, state, lease);
-  appendTransitionEvent(runDir, state, state.status, state.status, {
-    budgetAction: { type: "continuation_activated", segment: budget.segment, allocationTokens: pending.allocationTokens, id: pending.id },
-  }, lease);
-  recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-}
-
-/**
- * @param {ValidatedContract} contract
- * @param {string} runDir
- * @param {Map<string, NodeSnapshot>} states
- * @param {LeaseHandle} lease
- * @param {string} campaignPath
- */
-function enforceLedgerBudget(contract, runDir, states, lease, campaignPath) {
-  const campaign = campaignUsage(campaignPath, contract.usagePolicy);
-  const policy = contract.usagePolicy;
-  if (policy !== false && campaign.budgetInputTokens >= policy.maxInputTokens) {
-    for (const state of states.values()) {
-      if (state.status === "pending") transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `campaign weighted input tokens (${campaign.budgetInputTokens}) reached the ${policy.maxInputTokens} hard maximum` } }, lease);
-    }
-  }
-  if (policy !== false && campaign.budgetInputTokens >= policy.maxInputTokens - policy.judgeReserveInputTokens) {
-    for (const state of states.values()) {
-      if (state.status !== "pending" || state.phase === "judge") continue;
-      transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `worker allowance exhausted at ${policy.maxInputTokens - policy.judgeReserveInputTokens}; ${policy.judgeReserveInputTokens} input tokens remain reserved for judges` } }, lease);
-    }
-  }
-  const cacheReadWeight = policy === false ? 1 : (policy.cacheReadWeight ?? 1);
-  for (const node of contract.nodes) {
-    const state = states.get(node.id);
-    const nodeSpent = state ? weightedInput(state.usage, cacheReadWeight) : 0;
-    if (state?.status !== "pending" || state.budgetState?.pendingSegment) continue;
-    // Only a pending node actually awaiting its gate judge (phase "judge"
-    // with a persisted done worker result) draws on the campaign judge
-    // reserve instead of the worker-derived per-node cap. A pending gated
-    // node that owes worker work (a revision re-dispatch) stays capped.
-    const workerResult = /** @type {{status?: string}|null|undefined} */ (state.result);
-    if (state.phase === "judge" && workerResult?.status === "done" && node.gate.enabled) continue;
-    const cap = state.budgetState?.currentCapTokens ?? node.maxInputTokens;
-    if (cap !== undefined && nodeSpent >= cap) {
-      transition(runDir, state, "blocked", {
-        phase: "budget",
-        error: state.budgetDecision
-          ? { code: "budget_attention", message: `node weighted input tokens (${nodeSpent}) reached the derived ${cap} budget without a pending continuation` }
-          : { code: "budget_exceeded", message: `node weighted input tokens (${nodeSpent}) reached the ${cap} budget` },
-      }, lease);
-    }
-  }
-}
-
-/**
- * Block pending work before scheduling when either monetary budget is spent.
- * @param {ValidatedContract} contract
- * @param {string} runDir
- * @param {Map<string, NodeSnapshot>} states
- * @param {LeaseHandle} lease
- * @param {string} campaignPath
- */
-function enforceCostBudget(contract, runDir, states, lease, campaignPath) {
-  const spent = campaignCostSpent(contract, states, campaignPath);
-  if (contract.maxCostUsd !== undefined && spent >= contract.maxCostUsd) {
-    for (const state of states.values()) {
-      if (state.status === "pending") transition(runDir, state, "blocked", {
-        phase: "budget",
-        error: { code: "cost_budget_exceeded", message: `total cost (${formatCost(spent)}) reached the ${formatCost(contract.maxCostUsd)} budget` },
-      }, lease);
-    }
-  }
-  for (const node of contract.nodes) {
-    if (node.maxCostUsd === undefined) continue;
-    const state = states.get(node.id);
-    if (state?.status !== "pending" || (state.costUsd ?? 0) < node.maxCostUsd) continue;
-    transition(runDir, state, "blocked", {
-      phase: "budget",
-      error: { code: "cost_budget_exceeded", message: `node cost (${formatCost(state.costUsd)}) reached the ${formatCost(node.maxCostUsd)} budget` },
-    }, lease);
-  }
-}
-
-/** @param {ValidatedContract} contract @param {ValidatedNode} node */
-function hasCostBudget(contract, node) {
-  return contract.maxCostUsd !== undefined || node.maxCostUsd !== undefined;
-}
-
-/** @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {Map<string, NodeSnapshot>} states */
-function monetaryBudgetReached(contract, node, state, states) {
-  if (node.maxCostUsd !== undefined && (state.costUsd ?? 0) >= node.maxCostUsd) return true;
-  if (contract.maxCostUsd === undefined) return false;
-  const spent = campaignCostSpent(contract, states, campaignUsagePath(contract));
-  return spent >= contract.maxCostUsd;
-}
-
-/**
- * Return the smallest positive remaining monetary allowance for one invocation.
- * The usage ledger covers completed invocations across runs in the campaign;
- * current-state costs not yet ledgered are merged by invocation ID.
+ * Idempotently write every persisted invocation of the run into usage.jsonl.
+ * Resume calls this after adopting previously recorded node state.
  *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {Map<string, NodeSnapshot>} [states]
- * @returns {number|null}
- */
-function remainingMonetaryAllowance(contract, node, state, states = new Map([[state.id, state]])) {
-  const allowances = [];
-  if (node.maxCostUsd !== undefined) {
-    const remaining = roundCostAllowance(node.maxCostUsd - (state.costUsd ?? 0));
-    if (remaining > 0) allowances.push(remaining);
-  }
-  if (contract.maxCostUsd !== undefined) {
-    const remaining = roundCostAllowance(contract.maxCostUsd - campaignCostSpent(contract, states, campaignUsagePath(contract)));
-    if (remaining > 0) allowances.push(remaining);
-  }
-  return allowances.length ? Math.min(...allowances) : null;
-}
-
-/** @param {number} value @returns {number} */
-function roundCostAllowance(value) {
-  return Math.round(value * 1_000_000) / 1_000_000;
-}
-
-/**
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- * @returns {number}
- */
-function campaignCostSpent(contract, states, campaignPath) {
-  const seen = new Set();
-  let spent = 0;
-  if (contract.usagePolicy !== false) {
-    try {
-      const ledger = /** @type {UsageLedger} */ (readJson(join(campaignPath, USAGE_LEDGER_NAME)));
-      const epoch = ledger.epochs?.[contract.usagePolicy.epoch];
-      for (const [id, invocation] of Object.entries(epoch?.invocations ?? {})) {
-        if (typeof invocation.costUsd !== "number" || !Number.isFinite(invocation.costUsd)) continue;
-        spent += invocation.costUsd;
-        seen.add(id);
-      }
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
-    }
-  }
-  /** @param {Invocation} invocation */
-  const addInvocation = (invocation) => {
-    if (seen.has(invocation.id) || invocation.status === "active") return;
-    if (typeof invocation.costUsd !== "number" || !Number.isFinite(invocation.costUsd)) return;
-    spent += invocation.costUsd;
-    seen.add(invocation.id);
-  };
-  for (const state of states.values()) for (const invocation of state.invocations ?? []) addInvocation(invocation);
-
-  // A false usage policy has no token ledger, but monetary campaign ceilings
-  // still span completed invocations from earlier runs in the same campaign.
-  const runsDir = join(contract.cwd, ".runs");
-  try {
-    for (const name of readdirSync(runsDir)) {
-      const otherRunDir = join(runsDir, name);
-      if (name === "campaigns" || !existsSync(join(otherRunDir, "run.json"))) continue;
-      let metadata;
-      try {
-        metadata = validateRunMetadata(readJson(join(otherRunDir, "run.json")), { requireSourceIdentity: true });
-      } catch {
-        continue;
-      }
-      if (metadata.sourceIdentity.campaignId !== contract.campaignId) continue;
-      const nodeDir = join(otherRunDir, "nodes");
-      let otherContract;
-      try {
-        const otherContractPath = join(otherRunDir, "contract.json");
-        otherContract = validateContract(readJson(otherContractPath), otherContractPath);
-      } catch {
-        continue;
-      }
-      for (const node of otherContract.nodes) {
-        let snapshot;
-        try {
-          snapshot = validateNodeSnapshot(readJson(join(nodeDir, `${node.id}.json`)), node);
-        } catch {
-          continue;
-        }
-        for (const invocation of snapshot.invocations ?? []) addInvocation(invocation);
-      }
-    }
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-  return spent;
-}
-/**
- * Settle a node whose derived budget stop is not covered by an extension:
- * plan the predeclared continuation when progress authorized it, otherwise
- * surface attention. Shared by the budget-termination close path and the
- * bounded one-turn dispatch gate so every stop follows the identical durable
- * policy.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {LeaseHandle} lease
- * @returns {boolean} true when the node was settled into pending or attention
- */
-function settleDerivedBudgetStop(contract, node, state, runDir, lease) {
-  if (!state.budgetDecision || !state.budgetState) return false;
-  if (state.budgetState.pendingSegment) {
-    try {
-      assertBudgetContinuationIdentity(node, state);
-      persistNodeCapsule(contract, node, state, runDir, lease, `continue predeclared budget segment ${state.budgetState.pendingSegment.segment}`);
-      transition(runDir, state, "pending", {
-        phase: "worker",
-        error: null,
-        blockedBy: [],
-        usage: state.usage,
-      }, lease);
-    } catch (error) {
-      state.budgetState.status = "attention";
-      transition(runDir, state, "blocked", {
-        phase: "budget",
-        error: { code: "budget_attention", message: excerpt(errorMessage(error)) },
-        usage: state.usage,
-      }, lease);
-    }
-    return true;
-  }
-  state.budgetState.status = "attention";
-  transition(runDir, state, "blocked", {
-    phase: "budget",
-    error: { code: "budget_attention", message: "derived node budget ended without an authorized progress-backed continuation" },
-    usage: state.usage,
-  }, lease);
-  return true;
-}
-
-/**
- * Apply the derived per-node budget stop for one observation: grant the
- * authorized progress-backed extension when the progress signature changed
- * since the last grant, and when the spend still exceeds the extended cap,
- * plan the predeclared continuation or surface attention. Mirrors the live
- * enforcement so the settled boundary and the live boundary make the same
- * decision.
- *
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {LeaseHandle} lease
- * @param {number} cumulativeSeen weighted tokens already spent
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- * @returns {boolean} true when the spend is not covered and the node must stop
- */
-function applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath) {
-  const budget = state.budgetState;
-  if (!state.budgetDecision || !budget) return false;
-  const progressSignature = state.progress?.heartbeatCount ? state.progress.progressSignature ?? null : null;
-  const progressEligible = Boolean(progressSignature && progressSignature !== budget.lastGrantedProgressSignature);
-  const extension = grantBudgetExtension(state.budgetDecision, budget, progressSignature);
-  const { grantedTokens, ...nextBudget } = extension;
-  let currentBudget = budget;
-  if (grantedTokens > 0) {
-    currentBudget = nextBudget;
-    state.budgetState = nextBudget;
-    writeNode(runDir, state, lease);
-    appendTransitionEvent(runDir, state, state.status, state.status, {
-      budgetAction: { type: "extension", grantedTokens, currentCapTokens: nextBudget.currentCapTokens, progressSignature },
-    }, lease);
-    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-    process.stdout.write(`[node] ${node.id} derived budget extended by ${grantedTokens} · cap ${nextBudget.currentCapTokens}\n`);
-    if (cumulativeSeen <= nextBudget.currentCapTokens) return false;
-  }
-  const pending = progressEligible && cumulativeSeen < state.budgetDecision.hardCapTokens
-    ? planBudgetContinuation(state.budgetDecision, currentBudget)
-    : null;
-  if (pending) {
-    currentBudget.pendingSegment = pending;
-    currentBudget.lastGrantedProgressSignature = progressSignature;
-    currentBudget.status = "continuing";
-    state.budgetState = currentBudget;
-    writeNode(runDir, state, lease);
-    appendTransitionEvent(runDir, state, state.status, state.status, {
-      budgetAction: { type: "continuation_planned", segment: pending.segment, allocationTokens: pending.allocationTokens, id: pending.id },
-    }, lease);
-    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-  } else {
-    currentBudget.status = "attention";
-    state.budgetState = currentBudget;
-    writeNode(runDir, state, lease);
-    appendTransitionEvent(runDir, state, state.status, state.status, {
-      budgetAction: { type: "attention", observedTokens: cumulativeSeen, currentCapTokens: currentBudget.currentCapTokens },
-    }, lease);
-    recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-  }
-  return true;
-}
-
-/**
- * A bounded one-turn invocation (rotation handoff or result materialization)
- * is never terminated once it runs; the budget decides whether it starts. At
- * the dispatch point the node's settled spend is evaluated against its
- * current derived cap: when the spend is over the cap and no extension covers
- * it, the bounded call is not dispatched and the node settles through the
- * budget continuation/attention path.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {LeaseHandle} lease
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- * @returns {boolean} true when the dispatch was refused and the node settled
- */
-function boundedDispatchRefusedByBudget(contract, node, state, runDir, lease, states, campaignPath) {
-  // A derived per-node budget (budgetProfile) applies with or without a
-  // campaign usage policy; only a missing decision or cap means there is
-  // nothing to refuse against.
-  if (!state.budgetDecision || !state.budgetState?.currentCapTokens) return false;
-  const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
-  const cumulativeSeen = roundBudgetTokens(weightedInput(state.usage, cacheReadWeight));
-  if (cumulativeSeen <= state.budgetState.currentCapTokens) return false;
-  if (!applyDerivedBudgetStop(node, state, runDir, lease, cumulativeSeen, contract, states, campaignPath)) return false;
-  settleDerivedBudgetStop(contract, node, state, runDir, lease);
-  return true;
-}
-
-/**
- * Live token-budget enforcement. Persisted `state.usage` lags behind reality
- * until an invocation closes, so active jobs are metered by scanning their
- * still-growing transcripts (bounded tail) every tick. Two ceilings:
- *
- * - per-node `maxInputTokens`: terminate that worker the moment its observed
- *   input tokens pass the cap (finalize labels the node exhausted);
- * - contract `maxInputTokens`: persisted spend plus every active job's
- *   observed spend — once reached, ALL active workers are terminated and
- *   pending nodes are blocked. A budget that cannot stop a running worker is
- *   not a budget.
- *
- * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {Map<string, NodeSnapshot>} states
- * @param {Map<string, Job>} running
- * @param {LeaseHandle} lease
- * @param {string} campaignPath
  */
-function enforceTokenBudget(contract, runDir, states, running, lease, campaignPath) {
-  const cacheReadWeight = contract.usagePolicy === false ? 1 : (contract.usagePolicy?.cacheReadWeight ?? 1);
-  const workerCap = campaignWorkerCap(contract);
-  const observed = new Map();
-  let liveSpent = 0;
-  let liveWorkerSpent = 0;
-  for (const [nodeId, job] of running) {
-    if (job.closed) continue;
-    // A bounded one-turn rotation handoff or result materialization settles
-    // before any budget stop is applied: the budget decides whether it starts
-    // (evaluated at the dispatch point), never whether it finishes.
-    if (job.rotationHandoff || job.resultMaterialization) continue;
-    const seen = observeLiveInputTokens(job, cacheReadWeight);
-    observed.set(nodeId, seen);
-    liveSpent += seen;
-    if (job.phase === "worker") liveWorkerSpent += seen;
-    const persistedNode = weightedInput(job.state.usage, cacheReadWeight);
-    const cumulativeSeen = roundBudgetTokens(persistedNode + seen);
-    const budget = job.state.budgetState;
-    const cap = budget?.currentCapTokens ?? job.node.maxInputTokens;
-    if (job.phase === "worker" && cap !== undefined && cumulativeSeen > cap && !job.budgetStop) {
-      if (job.state.budgetDecision && budget) {
-        const stopped = applyDerivedBudgetStop(job.node, job.state, runDir, lease, cumulativeSeen, contract, states, campaignPath);
-        if (stopped) {
-          job.budgetStop = "node";
-          void terminateProcess(job).catch(() => {});
-          process.stdout.write(`[node] ${nodeId} derived input budget reached (${cumulativeSeen} > ${cap}) · terminating\n`);
-        }
-      } else {
-        job.budgetStop = "node";
-        void terminateProcess(job).catch(() => {});
-        process.stdout.write(`[node] ${nodeId} input-token cap reached (${cumulativeSeen} > ${cap}) · terminating\n`);
-      }
-    }
-  }
-  // Persisted usage is the normalized ledger shape (inputTokens excludes
-  // cache reads); weight the cached portion exactly like the live meter so
-  // the two sides are comparable.
-  const persisted = [...states.values()].reduce((total, state) => {
-    const usage = state.usage ?? emptyUsage();
-    return total + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
-  }, 0);
-  const spent = Math.round((persisted + liveSpent) * 1000) / 1000;
-  const persistedWorker = [...states.values()].reduce((total, state) => total + (state.invocations ?? [])
-    .filter((invocation) => invocation.role === "worker")
-    .reduce((subtotal, invocation) => subtotal + weightedInput(invocation.usage, cacheReadWeight), 0), 0);
-  const workerSpent = Math.round((persistedWorker + liveWorkerSpent) * 1000) / 1000;
-  if (workerSpent >= workerCap) {
-    for (const job of running.values()) {
-      if (job.phase !== "worker" || job.budgetStop || job.closed || job.rotationHandoff || job.resultMaterialization) continue;
-      job.budgetStop = "campaign";
-      void terminateProcess(job).catch(() => {});
-    }
-  }
-  if (spent < contract.maxInputTokens) return;
-  let judgeRunning = false;
-  for (const job of running.values()) {
-    if (job.phase === "judge" && !job.closed) {
-      judgeRunning = true;
-      if (!job.judgeBudgetOverride) {
-        job.judgeBudgetOverride = true;
-        appendTransitionEvent(runDir, job.state, job.state.status, job.state.status, {
-          budgetAction: {
-            type: "judge_reserve_override",
-            campaignBudgetInputTokens: spent,
-            judgeReserveInputTokens: contract.usagePolicy === false ? null : contract.usagePolicy.judgeReserveInputTokens,
-            reason: "an active judge is protected from the run worker cap",
-          },
-        }, lease);
-        recordRunLiveness({ path: campaignPath }, runDir, contract, states);
-      }
-      continue;
-    }
-    if (!job.budgetStop && !job.closed && !job.rotationHandoff && !job.resultMaterialization) {
-      job.budgetStop = "campaign";
-      void terminateProcess(job).catch(() => {});
-    }
-  }
+function synchronizeRunUsage(runDir, states) {
+  const seen = usageRecordIds(runDir);
   for (const state of states.values()) {
-    if (state.status === "pending" && !judgeRunning) transition(runDir, state, "blocked", { phase: "budget", error: { code: "budget_exceeded", message: `total input tokens (${spent}) reached the ${contract.maxInputTokens} budget` } }, lease);
+    for (const invocation of state.invocations ?? []) {
+      if (seen.has(invocation.id)) continue;
+      appendUsageRecord(runDir, invocation);
+      seen.add(invocation.id);
+    }
   }
-  return spent;
 }
 
 /**
- * Keep the run's explicit judge reserve available while workers are live. A
- * gated run has one judge slot at a time, so reserving the smaller of the
- * campaign judge reserve and the run cap is sufficient; an active judge is
- * handled separately and may consume that reserve after the worker cap.
+ * Recovery can discover usage after the run synchronized its records. Attach
+ * it to the authoritative invocation first, then write the updated usage
+ * record. The invocation id makes repeated resumes idempotent.
  *
- * @param {ValidatedContract} contract
- * @returns {number}
+ * @param {string} runDir
+ * @param {NodeSnapshot} state
+ * @param {RecoveryOutcome|null|undefined} recovery
+ * @param {LeaseHandle} lease
+ * @returns {Promise<void>}
  */
-function campaignWorkerCap(contract) {
-  if (contract.usagePolicy === false
-    || contract.nodes.some((node) => node.budgetProfile)
-    || !contract.nodes.some((node) => node.gate.enabled)) return contract.maxInputTokens;
-  const reserve = Math.min(contract.maxInputTokens, contract.usagePolicy.judgeReserveInputTokens);
-  return Math.max(0, contract.maxInputTokens - reserve);
-}
-
-/**
- * Meter one active invocation from its transcript tail. A monotonic
- * high-water mark guards against providers whose counters reset or partial
- * reads that split a line.
- *
- * @param {Job} job
- * @param {number} [cacheReadWeight] cached-to-uncached rate ratio
- * @returns {number}
- */
-function observeLiveInputTokens(job, cacheReadWeight = 1) {
-  try {
-    const seen = liveInputTokens(job.runtime.driver, readBoundedTail(job.paths.stdout), cacheReadWeight);
-    job.liveInputTokens = Math.max(job.liveInputTokens ?? 0, seen);
-  } catch {
-    // An unreadable transcript meters as zero this tick; wall-clock and stall
-    // detection remain the backstop.
+async function persistRecoveryUsage(runDir, state, recovery, lease) {
+  if (!recovery?.invocationId) return;
+  const current = state.invocations?.find((invocation) => invocation.id === recovery.invocationId);
+  if (!current) return;
+  const usage = hasMeasuredUsage(current.usage) ? current.usage : recovery.usage;
+  const costUsd = typeof current.costUsd === "number" ? current.costUsd : recovery.costUsd;
+  const changed = stableJson(current.usage) !== stableJson(usage)
+    || current.costUsd !== (costUsd ?? null);
+  if (changed) {
+    state.invocations = (state.invocations ?? []).map((invocation) => invocation.id === current.id
+      ? { ...invocation, usage, costUsd: costUsd ?? null }
+      : invocation);
+    state.usage = invocationUsage(state);
+    writeNode(runDir, state, lease);
   }
-  return job.liveInputTokens ?? 0;
+  const updated = state.invocations?.find((invocation) => invocation.id === current.id);
+  if (updated) appendUsageRecord(runDir, updated);
 }
 
 /**
@@ -5465,7 +3817,6 @@ function renderFinalStatus(runDir, contract, states) {
   const nodes = /** @type {NodeSnapshot[]} */ (contract.nodes.map((node) => states.get(node.id)).filter((node) => node !== undefined));
   const runMetadata = /** @type {{identityWarnings?: string[]}} */ (readJson(join(runDir, "run.json")) ?? {});
   const identityWarnings = runMetadata.identityWarnings ?? [];
-  const campaign = campaignUsage(campaignUsagePath(contract), contract.usagePolicy);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
@@ -5479,7 +3830,7 @@ function renderFinalStatus(runDir, contract, states) {
     "",
     contract.goal,
     "",
-    `${nodes.length} nodes · ${summary} · campaign ${compactTokens(campaign.budgetInputTokens)} weighted input · workers ${campaign.remainingWorkerAllowance === null ? "unlimited" : compactTokens(campaign.remainingWorkerAllowance)} · judge reserve ${campaign.judgeReserveInputTokens === null ? "-" : compactTokens(campaign.judgeReserveInputTokens)}`,
+    `${nodes.length} nodes · ${summary}`,
     "",
     "```",
     row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]),
@@ -5519,7 +3870,6 @@ function fitStatus(value, width) {
  */
 function renderFinalReport(runDir, contract, states) {
   const nodes = /** @type {NodeSnapshot[]} */ (contract.nodes.map((node) => states.get(node.id)).filter((node) => node !== undefined));
-  const campaign = campaignUsage(campaignUsagePath(contract), contract.usagePolicy);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
@@ -5531,7 +3881,7 @@ function renderFinalReport(runDir, contract, states) {
   const lines = [
     `# run ${basename(runDir)}`,
     "",
-    `${nodes.length} nodes · ${summary} · campaign ${compactTokens(campaign.budgetInputTokens)} weighted input · workers ${campaign.remainingWorkerAllowance === null ? "unlimited" : compactTokens(campaign.remainingWorkerAllowance)} · judge reserve ${campaign.judgeReserveInputTokens === null ? "-" : compactTokens(campaign.judgeReserveInputTokens)}`,
+    `${nodes.length} nodes · ${summary}`,
     "",
     "```",
     row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE", "COST", "NOTE"]),
@@ -5742,22 +4092,6 @@ function isResultMaterializationInvocation(invocation) {
   if (!invocation?.promptPath) return false;
   try {
     return readFileSync(invocation.promptPath, "utf8").startsWith(RESULT_MATERIALIZATION_PROMPT_HEADER);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Same durable derivation for the one-turn rotation handoff: its prompt
- * header identifies the turn on every recovery path.
- *
- * @param {Invocation|null|undefined} invocation
- * @returns {boolean}
- */
-function isRotationHandoffInvocation(invocation) {
-  if (!invocation?.promptPath) return false;
-  try {
-    return readFileSync(invocation.promptPath, "utf8").startsWith(ROTATION_HANDOFF_PROMPT_HEADER);
   } catch {
     return false;
   }
@@ -5976,11 +4310,6 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
     }
     return restartRecovery(invocation, terminal, `invocation ${invocation.id} has no reliable close time`);
   }
-  /** @type {WorkspaceSnapshot|null} */
-  let baseline = null;
-  if (invocation.phase === "worker" && invocation.snapshotPath) {
-    try { baseline = /** @type {WorkspaceSnapshot} */ (readJson(invocation.snapshotPath)); } catch {}
-  }
   if (invocation && invocationAlive(invocation)) {
     if (Date.now() > deadline) {
       await terminateInvocation(invocation);
@@ -5996,35 +4325,6 @@ async function recoverOrphan(runDir, contract, node, state, lease) {
         await terminateInvocation(invocation);
         if (invocation.phase === "judge") return adoptOrRejudgeJudge(state, contract, node, invocation, result);
         return /** @type {RecoveryOutcome} */ ({ kind: "adopted", ...result, phase: invocation.phase, invocationId: invocation.id });
-      }
-      try {
-        const progressStalled = await checkRecoveredProgress({ contract, node, state, invocation, baseline, workspace: attemptWorkspace(state) ?? invocation.workspace ?? contract.cwd });
-        if (state.progress) writeNode(runDir, state, lease);
-        if (progressStalled) {
-          await terminateInvocation(invocation);
-          const finalResult = invocationResult(invocation, runtime);
-          return {
-            kind: "stalled",
-            phase: "worker",
-            invocationId: invocation.id,
-            usage: finalResult?.usage ?? invocation.usage,
-            costUsd: finalResult?.costUsd ?? invocation.costUsd,
-            error: { code: "progress_stalled", message: `allowed workspace scope made no progress for ${state.progress?.dryHeartbeatCount ?? 0} heartbeats` },
-            reason: "resumed worker made no progress",
-          };
-        }
-      } catch (error) {
-        await terminateInvocation(invocation);
-        const result = invocationResult(invocation, runtime);
-        return {
-          kind: "stalled",
-          phase: invocation.phase === "judge" ? "judge" : "worker",
-          invocationId: invocation.id,
-          usage: result?.usage ?? invocation.usage,
-          costUsd: result?.costUsd ?? invocation.costUsd,
-          error: { code: /** @type {string} */ (errorCode(error) ?? "progress_snapshot_invalid"), message: errorMessage(error) },
-          reason: "resumed worker progress check failed",
-        };
       }
       await delay(Math.min(contract.pollIntervalMs, 250));
     }
@@ -6348,42 +4648,6 @@ function isDescendantHead(cwd, recorded, head) {
 }
 
 /**
- * The run's cumulative weighted input spend, metered the way the live budget
- * enforcement meters it.
- *
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @returns {number}
- */
-function runWeightedInputTokens(contract, states) {
-  const weight = cacheReadWeightOf(contract);
-  return roundBudgetTokens([...states.values()].reduce(
-    (total, state) => total + weightedInput(state.usage, weight),
-    0,
-  ));
-}
-
-/**
- * Apply an explicit budget extension to the in-memory contract, or report that
- * the run budget is exhausted. Returns the recorded extension, or null when
- * resume must stop with attention.
- *
- * @param {ValidatedContract} contract
- * @param {Map<string, NodeSnapshot>} states
- * @param {number|undefined} requested
- * @returns {import("./contract.mjs").RunMetadata["budgetExtension"]|null}
- */
-function extendRunBudget(contract, states, requested) {
-  const spent = runWeightedInputTokens(contract, states);
-  if (spent < contract.maxInputTokens) return undefined;
-  if (requested === undefined || requested <= contract.maxInputTokens) return null;
-  const extension = { previous: contract.maxInputTokens, maxInputTokens: requested, at: new Date().toISOString() };
-  contract.maxInputTokens = requested;
-  process.stdout.write(`[run] ${contract.id} budget extended · ${extension.previous} → ${extension.maxInputTokens} weighted input tokens\n`);
-  return extension;
-}
-
-/**
  * @param {unknown} value
  * @returns {string}
  */
@@ -6630,10 +4894,6 @@ export async function preflightContract(contractPath, options = {}) {
   const absoluteContractPath = resolve(contractPath);
   const contract = validateContract(JSON.parse(readFileSync(absoluteContractPath, "utf8")), absoluteContractPath);
   const runtimes = reachableRuntimes(contract);
-  const budgeted = contract.maxCostUsd !== undefined || contract.nodes.some((node) => node.maxCostUsd !== undefined);
-  if (budgeted) {
-    for (const entry of runtimes.values()) entry.requiredCapabilitySets.push({ cost: true });
-  }
   const staticChecks = await Promise.all([...runtimes.values()].map(({ runtime, requiredCapabilitySets }) =>
     probeRuntime(runtime, { cwd: contract.cwd, requiredCapabilitySets }),
   ));
@@ -6890,15 +5150,6 @@ function assertEnvironmentReady(contract, runDir, sourceIdentity) {
   appendJsonl(join(runDir, "events.jsonl"), { type: "run.env-preflight-failed", ...evidence });
   const blocking = blockingChecks(report).map((check) => `${check.name}: ${check.detail}`).join(" · ");
   throw Object.assign(new Error(`env_preflight_failed: ${blocking} · the run stays resumable: fix the environment and resume ${runDir}`), { code: "env_preflight_failed" });
-}
-
-/** @param {ValidatedContract} contract */
-function assertCostCapability(contract) {
-  if (contract.maxCostUsd === undefined && !contract.nodes.some((node) => node.maxCostUsd !== undefined)) return;
-  const missing = [...reachableRuntimes(contract).values()]
-    .filter(({ runtime }) => runtime.capabilities.cost !== true)
-    .map(({ runtime }) => `${runtime.id} (${runtime.driver}/${runtime.model})`);
-  if (missing.length) throw new Error(`monetary budget requires cost capability on every reachable runtime; missing: ${missing.join(", ")}`);
 }
 
 /**
@@ -7396,12 +5647,12 @@ function bootstrapNonceForProcess() {
     : randomUUID();
 }
 
-export { buildCapsule, detectStalls, runProcessAlive, startProcess };
+export { detectStalls, runProcessAlive, startProcess };
 
 /** @type {Record<string, import("node:util").ParseArgsOptionsConfig>} */
 const COMMAND_OPTIONS = {
   run: { detach: { type: "boolean" } },
-  resume: { detach: { type: "boolean" }, node: { type: "string" }, reconcile: { type: "string" }, "max-input-tokens": { type: "string" } },
+  resume: { detach: { type: "boolean" }, node: { type: "string" }, reconcile: { type: "string" } },
   supervise: { detach: { type: "boolean" }, interval: { type: "string" } },
   cancel: {},
   preflight: { static: { type: "boolean" }, json: { type: "boolean" } },
@@ -7409,7 +5660,6 @@ const COMMAND_OPTIONS = {
   status: { json: { type: "boolean" } },
   report: { json: { type: "boolean" } },
   findings: {},
-  handoff: { node: { type: "string" }, runtime: { type: "string" }, reason: { type: "string" } },
   doctor: { cwd: { type: "string" }, json: { type: "boolean" }, discover: { type: "boolean" } },
   metrics: METRICS_OPTIONS,
 };
@@ -7446,19 +5696,12 @@ function parseCli(argv, quiet = false) {
  * lease is taken.
  *
  * @param {Record<string, unknown>} values
- * @returns {{node?: string, reconcile?: string, maxInputTokens?: number}}
+ * @returns {{node?: string, reconcile?: string}}
  */
 function resumeOptionsOf(values) {
   const node = typeof values.node === "string" && values.node ? values.node : undefined;
   const reconcile = typeof values.reconcile === "string" && values.reconcile ? values.reconcile : undefined;
-  let maxInputTokens;
-  if (typeof values["max-input-tokens"] === "string" && values["max-input-tokens"]) {
-    maxInputTokens = Number(values["max-input-tokens"]);
-    if (!Number.isInteger(maxInputTokens) || maxInputTokens <= 0) {
-      throw new Error("--max-input-tokens must be a positive integer number of weighted input tokens");
-    }
-  }
-  return { node, reconcile, maxInputTokens };
+  return { node, reconcile };
 }
 
 /**
@@ -7509,7 +5752,6 @@ async function main(argv) {
       const extraArgs = [
         ...(resumeOptions.node ? ["--node", resumeOptions.node] : []),
         ...(resumeOptions.reconcile ? ["--reconcile", resumeOptions.reconcile] : []),
-        ...(resumeOptions.maxInputTokens !== undefined ? ["--max-input-tokens", String(resumeOptions.maxInputTokens)] : []),
       ];
       const child = detachSelf("resume", target, extraArgs);
       const pid = child.pid;
@@ -7596,11 +5838,6 @@ async function main(argv) {
   }
   if (command === "metrics") { process.stdout.write(renderCampaignMetrics(target, values)); return; }
   if (command === "findings") { process.stdout.write(renderFindings(resolve(target))); return; }
-  if (command === "handoff") {
-    const ok = await handoffCommand(target, values);
-    if (!ok) process.exitCode = 1;
-    return;
-  }
   if (command === "validate") { validateContractFile(resolve(target)); return; }
   usage();
 }
@@ -7615,129 +5852,11 @@ function positiveInterval(value) {
   return interval;
 }
 
-/**
- * @param {string} runDir
- * @param {NodeSnapshot} state
- * @returns {boolean}
- */
-function hasSettledCheckpoint(runDir, state) {
-  // A reconciled unknown effect is terminal attention, never a settled and
-  // safe checkpoint. It must not become handoff-able through a stale capsule.
-  if (isUnknownEffectTerminal(state)) return false;
-  const lastInvocation = state.invocations?.at(-1);
-  if (lastInvocation) {
-    const settlement = readOperationSettlement(runDir, lastInvocation.id);
-    if (settlement) {
-      const status = String(settlement.status);
-      // Any existing settlement must be resolved: an unresolved ("closed",
-      // "unknown_effect") or reconciled operation is not demonstrably settled,
-      // and a stale capsule must not make the checkpoint handoff-able.
-      if (status === "reconciled" || status === "unknown_effect" || !RESOLVED_OPERATION_STATUSES.has(status)) return false;
-      return true;
-    }
-  }
-  if (loadLatestCapsule(runDir, state.id, state.attempt) !== null) return true;
-  if (state.result !== null && state.status !== "running") return true;
-  return false;
-}
-
-/**
- * Manual cross-harness handoff: persist the node portable continuation capsule
- * from its settled checkpoint and route the next worker attempt to the requested
- * runtime. Returns false when no safe checkpoint exists.
- *
- * @param {string} target
- * @param {{node?: unknown, nodeId?: unknown, runtime?: unknown, runtimeId?: unknown, reason?: unknown}} values
- * @returns {Promise<boolean>}
- */
-export async function handoffRun(target, values = {}) {
-  const runDir = resolve(target);
-  assertRunMutable(runDir);
-  const contractPath = join(runDir, "contract.json");
-  if (!existsSync(contractPath)) throw new Error(`not a run directory: ${runDir}`);
-  const nodeId = typeof values.node === "string" ? values.node : typeof values.nodeId === "string" ? values.nodeId : "";
-  const runtimeId = typeof values.runtime === "string" ? values.runtime : typeof values.runtimeId === "string" ? values.runtimeId : "";
-  if (!nodeId) throw new TypeError("--node <id> is required");
-  if (!runtimeId) throw new TypeError("--runtime <id> is required");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
-  const planNode = contract.nodes.find((candidate) => candidate.id === nodeId);
-  if (!planNode) throw new Error(`unknown node: ${nodeId}`);
-  if (!contract.runtimes[runtimeId]) throw new Error(`unknown runtime: ${runtimeId}`);
-  const lease = acquireControllerLease(runDir, {
-    contractVersion: INTENT_FACTORY_VERSION,
-    processStartToken: processStartToken(process.pid),
-  });
-  lease.startHeartbeat();
-  try {
-    const state = readRunNodes(runDir, contract).find((node) => node.id === nodeId);
-    if (!state) throw new Error(`missing persisted snapshot for node ${nodeId}`);
-    if (state.status === "running") {
-      process.stderr.write(`[handoff] refused: node ${nodeId} is currently running; cancel or resume first\n`);
-      return false;
-    }
-    if (!hasSettledCheckpoint(runDir, state)) {
-      process.stderr.write(isUnknownEffectTerminal(state)
-        ? `[handoff] refused: node ${nodeId} is reconciled; a reconciled checkpoint is not safe for handoff\n`
-        : `[handoff] refused: node ${nodeId} has no settled checkpoint to continue from\n`);
-      return false;
-    }
-    const reason = boundedUtf8(typeof values.reason === "string" && values.reason.trim()
-      ? values.reason.trim()
-      : `manual handoff of node ${nodeId} to runtime ${runtimeId}`, 2 * 1024);
-    const sourceRuntime = sourceWorkerRuntime(state);
-    const at = new Date().toISOString();
-    const routing = {
-      history: [...(state.routing?.history ?? []), {
-        at,
-        role: "worker",
-        runtime: sourceRuntime ?? runtimeId,
-        nextRuntime: runtimeId,
-        status: state.status,
-      }].slice(-64),
-      currentOverride: { at, role: "worker", runtime: runtimeId, reason },
-    };
-    // The capsule must be durable before the pending routing override becomes
-    // schedulable: a crash at any write boundary leaves either the old safe
-    // state or a complete handoff, never a pending node without its capsule.
-    const pendingState = /** @type {NodeSnapshot} */ ({ ...state, routing, status: "pending", phase: "waiting", error: null, blockedBy: [], updatedAt: at });
-    const capsule = persistNodeCapsule(contract, planNode, pendingState, runDir, lease, reason);
-    const previousStatus = state.status;
-    transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [], routing }, lease);
-    appendTransitionEvent(runDir, state, previousStatus, "pending", {
-      role: "worker",
-      ...(sourceRuntime ? { currentRuntime: sourceRuntime } : {}),
-      override: { sourceRuntime, destinationRuntime: runtimeId, reason, capsuleDigest: capsule.digest },
-    }, lease);
-    return true;
-  } finally {
-    lease.release();
-  }
-}
-
-/**
- * @param {string} target
- * @param {{node?: unknown, runtime?: unknown, reason?: unknown}} values
- * @returns {Promise<boolean>}
- */
-async function handoffCommand(target, values) {
-  const ok = await handoffRun(target, values);
-  if (!ok) return false;
-  const runDir = resolve(target);
-  const nodeId = /** @type {string} */ (values.node);
-  const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
-  const state = readRunNodes(runDir, contract).find((node) => node.id === nodeId);
-  const capsule = state ? loadLatestCapsule(runDir, nodeId, state.attempt) : null;
-  process.stdout.write(`[handoff] node ${nodeId} → ${String(values.runtime)}\n[handoff] capsule ${join(runDir, "capsules", `${nodeId}.${state?.attempt ?? 0}.json`)}\n[handoff] digest ${capsule?.digest ?? "-"}\n`);
-  return true;
-}
-
 function usage() {
   process.stderr.write(
     "usage: runner.mjs <run|validate|preflight> <contract.json> [--detach] | " +
     "<resume|supervise|cancel> <run-dir> [--detach] [--interval <sec>] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
-    "handoff <run-dir> --node <id> --runtime <runtime-id> [--reason <text>] | " +
     "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract <prune|validate> ... | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|attach|note|resolve|close|show|list> ...\n",

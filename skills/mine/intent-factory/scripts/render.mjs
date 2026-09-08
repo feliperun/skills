@@ -27,7 +27,7 @@ const MARK = {
  */
 export function renderStatus(runDir) {
   const { contract, nodes, identityWarnings } = loadRun(runDir);
-  const campaign = readCampaignUsage(runDir, contract);
+  const usage = readRunUsage(runDir);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
@@ -36,7 +36,7 @@ export function renderStatus(runDir) {
   const widths = [3, 24, 9, 28, 7, 64];
   /** @type {(cells: unknown[]) => string} */
   const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
-  const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · campaign ${compactTokens(campaign.budgetInputTokens)} weighted input · workers ${campaign.remainingWorkerAllowance === null ? "unlimited" : compactTokens(campaign.remainingWorkerAllowance)} · judge reserve ${campaign.judgeReserveInputTokens === null ? "-" : compactTokens(campaign.judgeReserveInputTokens)}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
+  const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
   for (const node of nodes) {
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
@@ -68,7 +68,7 @@ export function renderStatus(runDir) {
  */
 export function renderStatusJson(runDir) {
   const { contract, nodes, identityWarnings } = loadRun(runDir);
-  const campaign = readCampaignUsage(runDir, contract);
+  const usage = readRunUsage(runDir);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const payload = {
@@ -77,11 +77,12 @@ export function renderStatusJson(runDir) {
     contractId: contract.id,
     campaignId: contract.campaignId,
     goal: contract.goal,
-    usagePolicy: contract.usagePolicy,
-    campaignUsage: campaign.budgetInputTokens,
-    campaignRawInput: campaign.conservativeInputTokens,
-    remainingWorkerAllowance: campaign.remainingWorkerAllowance,
-    judgeReserveInputTokens: campaign.judgeReserveInputTokens,
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadInputTokens: usage.cacheReadInputTokens,
+      costUsd: usage.costUsd,
+    },
     leaseHealthy: leaseHealthy(readLease(runDir)),
     identityWarnings,
     summary: [...counts].map(([status, count]) => `${count} ${status}`).join(" · "),
@@ -108,7 +109,7 @@ export function renderStatusJson(runDir) {
  */
 export function renderReport(runDir) {
   const { contract, nodes } = loadRun(runDir);
-  const campaign = readCampaignUsage(runDir, contract);
+  const usage = readRunUsage(runDir);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
@@ -119,7 +120,7 @@ export function renderReport(runDir) {
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, costUsd: null };
   const costs = nodes.map(costProjection);
   const aggregateCost = aggregateCostProjection(costs);
-  const lines = [`# run ${basename(runDir)}`, "", `${nodes.length} nodes · ${summary} · campaign ${compactTokens(campaign.budgetInputTokens)} weighted input · workers ${campaign.remainingWorkerAllowance === null ? "unlimited" : compactTokens(campaign.remainingWorkerAllowance)} · judge reserve ${campaign.judgeReserveInputTokens === null ? "-" : compactTokens(campaign.judgeReserveInputTokens)}`, "", "```", row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE", "COST", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
+  const lines = [`# run ${basename(runDir)}`, "", `${nodes.length} nodes · ${summary} · in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`, "", "```", row(["", "NODE", "STATE", "TRY", "REV", "RUNTIME", "IN", "OUT", "CACHE", "COST", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
   for (const [index, node] of nodes.entries()) {
     const usage = node.usage ?? { inputTokens: null, outputTokens: null, cacheReadInputTokens: null };
     for (const key of /** @type {("inputTokens"|"outputTokens"|"cacheReadInputTokens")[]} */ (Object.keys(totals).filter((key) => key !== "costUsd"))) totals[key] = (totals[key] ?? 0) + (usage[key] ?? 0);
@@ -144,7 +145,6 @@ export function renderReport(runDir) {
  */
 export function renderReportJson(runDir) {
   const { contract, nodes } = loadRun(runDir);
-  const campaign = readCampaignUsage(runDir, contract);
   const counts = new Map();
   for (const node of nodes) counts.set(node.status, (counts.get(node.status) ?? 0) + 1);
   /** @type {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null, costStatus: string}} */
@@ -177,11 +177,6 @@ export function renderReportJson(runDir) {
     run: basename(runDir),
     contractId: contract.id,
     campaignId: contract.campaignId,
-    usagePolicy: contract.usagePolicy,
-    campaignUsage: campaign.budgetInputTokens,
-    campaignRawInput: campaign.conservativeInputTokens,
-    remainingWorkerAllowance: campaign.remainingWorkerAllowance,
-    judgeReserveInputTokens: campaign.judgeReserveInputTokens,
     summary: [...counts].map(([status, count]) => `${count} ${status}`).join(" · "),
     totals,
     nodes: listed,
@@ -233,35 +228,29 @@ function readNodes(runDir, contract) {
   });
 }
 
-/** @param {string} runDir @param {ValidatedContract} contract */
-function readCampaignUsage(runDir, contract) {
-  const policy = contract.usagePolicy;
-  const empty = {
-    conservativeInputTokens: 0,
-    budgetInputTokens: 0,
-    remainingWorkerAllowance: policy === false ? null : policy.maxInputTokens - policy.judgeReserveInputTokens,
-    judgeReserveInputTokens: policy === false ? null : policy.judgeReserveInputTokens,
-  };
-  if (policy === false) return empty;
-  const path = join(runDir, "..", "campaigns", contract.campaignId, "usage-ledger.json");
-  if (!existsSync(path)) return empty;
-  const ledger = JSON.parse(readFileSync(path, "utf8"));
-  const epoch = ledger.epochs?.[policy.epoch];
-  if (!epoch) return empty;
-  let total = 0;
-  let budget = 0;
-  for (const invocation of Object.values(epoch.invocations ?? {})) {
-    const usage = invocation.usage ?? {};
-    const conservative = (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0);
-    total += conservative;
-    budget = Math.round((budget + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) * policy.cacheReadWeight) * 1_000_000) / 1_000_000;
+/**
+ * Tokens by kind and cost across the run's usage.jsonl records. Missing or
+ * unparsable lines are skipped; a missing file yields zero totals.
+ *
+ * @param {string} runDir
+ * @returns {{inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null}}
+ */
+function readRunUsage(runDir) {
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, costUsd: /** @type {number|null} */ (null) };
+  const path = join(runDir, "usage.jsonl");
+  if (!existsSync(path)) return totals;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const value = /** @type {Record<string, unknown>} */ (record);
+    if (typeof value.inputTokens === "number") totals.inputTokens += value.inputTokens;
+    if (typeof value.outputTokens === "number") totals.outputTokens += value.outputTokens;
+    if (typeof value.cacheReadInputTokens === "number") totals.cacheReadInputTokens += value.cacheReadInputTokens;
+    if (typeof value.costUsd === "number") totals.costUsd = (totals.costUsd ?? 0) + value.costUsd;
   }
-  return {
-    conservativeInputTokens: total,
-    budgetInputTokens: budget,
-    remainingWorkerAllowance: Math.max(0, policy.maxInputTokens - policy.judgeReserveInputTokens - budget),
-    judgeReserveInputTokens: policy.judgeReserveInputTokens,
-  };
+  return totals;
 }
 
 /** @param {NodeSnapshot} node @returns {string} */

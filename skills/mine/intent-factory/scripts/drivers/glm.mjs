@@ -65,7 +65,6 @@ export const glmDriver = {
     ];
     if (options.toolPolicy) args.push("--settings", JSON.stringify(hookSettings(options.toolPolicy)));
     if (runtime.reasoning) args.push("--effort", runtime.reasoning);
-    if (options.maxCostUsd !== undefined) args.push("--max-budget-usd", String(options.maxCostUsd));
     if (options.schema) args.push("--json-schema", JSON.stringify(options.schema));
     // Claude Code reads `[1m]` as the 1M-context tier of the model in front of
     // it; the Z.ai endpoint itself does not know the suffix.

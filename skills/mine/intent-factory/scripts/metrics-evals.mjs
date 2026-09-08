@@ -9,10 +9,7 @@
  *   `preflight --json`, which sends one trivial prompt through every routed
  *   runtime from an empty repository under exactly the flags a run uses and
  *   reports the resulting `usage.inputTokens` per check (TECH-SPEC 0.2 and
- *   rule 14). That is a measurement of the harness, not a recorded guess, so a
- *   preflight payload always outranks the `budgetDecision.inputs` a dispatch
- *   recorded; the recorded value is used only for a runtime no preflight
- *   payload measured.
+ *   rule 14). That is a measurement of the harness, not a recorded guess.
  * - the control-session cost of the notification outbox, which the pull-only
  *   contract keeps at whatever the `requiresUser` records alone cost.
  * - the liveness series behind heartbeat staleness and ambient coverage.
@@ -28,9 +25,7 @@ const LIVENESS_TYPE = "liveness";
 /**
  * Mean measured preamble tokens per runtime. A live `preflight --json` check
  * is the measurement: its `usage.inputTokens` is what the harness costs before
- * the packet, per runtime, under the run's own flags. Dispatch events supply
- * the runtimes preflight never measured, through the
- * `budgetDecision.inputs.preambleTokens` the allocation recorded.
+ * the packet, per runtime, under the run's own flags.
  *
  * @param {unknown[]} events
  * @param {unknown[]} [preflight] recorded `preflight --json` payloads
@@ -38,12 +33,8 @@ const LIVENESS_TYPE = "liveness";
  */
 export function preambleTokensByRuntime(events, preflight = []) {
   const measured = preflightPreambleTallies(preflight);
-  const recorded = recordedPreambleTallies(events);
   /** @type {Map<string, {total: number, samples: number}>} */
   const runtimes = new Map(measured);
-  for (const [runtimeId, tally] of recorded) {
-    if (!runtimes.has(runtimeId)) runtimes.set(runtimeId, tally);
-  }
   /** @type {Record<string, number>} */
   const value = {};
   let count = 0;
@@ -80,31 +71,6 @@ function preflightPreambleTallies(payloads) {
       tally.samples += 1;
       runtimes.set(check.id, tally);
     }
-  }
-  return runtimes;
-}
-
-/**
- * Preamble tallies from the `budgetDecision.inputs` of dispatch events, which
- * carry the runtime and the preamble the allocation was derived from.
- *
- * @param {unknown[]} events
- * @returns {Map<string, {total: number, samples: number}>}
- */
-function recordedPreambleTallies(events) {
-  /** @type {Map<string, {total: number, samples: number}>} */
-  const runtimes = new Map();
-  for (const raw of events) {
-    const event = jsonObjectOf(raw);
-    const decision = event === null ? null : jsonObjectOf(event.budgetDecision);
-    const inputs = decision === null ? null : jsonObjectOf(decision.inputs);
-    if (inputs === null || typeof inputs.runtimeId !== "string") continue;
-    const tokens = inputs.preambleTokens;
-    if (typeof tokens !== "number" || !Number.isFinite(tokens)) continue;
-    const tally = runtimes.get(inputs.runtimeId) ?? { total: 0, samples: 0 };
-    tally.total += tokens;
-    tally.samples += 1;
-    runtimes.set(inputs.runtimeId, tally);
   }
   return runtimes;
 }
@@ -225,20 +191,7 @@ export function countNonterminalFacts(facts) {
   return count < 2 ? 0 : count;
 }
 
-/**
- * @param {unknown[]} outbox
- * @returns {number}
- */
-export function countAttentionOutbox(outbox) {
-  let count = 0;
-  for (const raw of outbox) {
-    const record = jsonObjectOf(raw);
-    if (record === null || record.type !== "run.attention") continue;
-    const data = jsonObjectOf(record.data);
-    if (data !== null && data.code === "budget_attention") count += 1;
-  }
-  return count;
-}
+
 
 /**
  * @param {number[]} values

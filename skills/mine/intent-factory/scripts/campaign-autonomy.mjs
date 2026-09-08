@@ -53,12 +53,11 @@ const MAX_EVIDENCE_BYTES = 8 * 1024;
 const DEFAULT_INTERVAL_MS = 1_000;
 const TERMINAL_CAMPAIGN_STATES = new Set(["attention", "completed"]);
 const WATCHDOG_NODE_TERMINAL = new Set(["done", "failed", "blocked", "exhausted", "canceled", "cancelled"]);
-const USAGE_LEDGER_NAME = "usage-ledger.json";
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {{argv: string[]}} AllowedVerification */
 /** @typedef {{allowedRuntimes: string[], routes: {from: string, to: string}[]}} RuntimeFailover */
-/** @typedef {{repairRoots: string[], allowedVerification: AllowedVerification[], retryLimit: number, repairLimit: number, runtimeFailover: RuntimeFailover, maxInputTokens: number, maxCostUsd: number|null, irreversibleActionsForbidden: true}} CampaignAuthority */
+/** @typedef {{repairRoots: string[], allowedVerification: AllowedVerification[], retryLimit: number, repairLimit: number, runtimeFailover: RuntimeFailover, irreversibleActionsForbidden: true}} CampaignAuthority */
 /** @typedef {{schemaVersion: 1, planVersion: string, campaignId: string, goal: string, initialRunContract: string, controller: {snapshotVersion: string, snapshotPath: string, contentHash: string}, authority: CampaignAuthority}} CampaignPlan */
 /** @typedef {{id: string, kind: "initial"|"repair", contractPath: string, status: "planned"|"running"|"done"|"attention"}} CampaignRun */
 /** @typedef {{id: string, kind: string, status: "pending"|"dispatched"|"failed", runId?: string, error?: string}} CampaignAction */
@@ -92,7 +91,7 @@ export function validateCampaignPlan(value) {
   const rawAuthority = objectValue(plan.authority, "campaign plan.authority");
   requireExact(rawAuthority, [
     "repairRoots", "allowedVerification", "retryLimit", "repairLimit", "runtimeFailover",
-    "maxInputTokens", "maxCostUsd", "irreversibleActionsForbidden",
+    "irreversibleActionsForbidden",
   ], "campaign plan.authority");
   const repairRoots = stringArray(rawAuthority.repairRoots, "campaign plan.authority.repairRoots", true);
   for (const [index, root] of repairRoots.entries()) requireRelative(root, `campaign plan.authority.repairRoots[${index}]`);
@@ -116,8 +115,6 @@ export function validateCampaignPlan(value) {
     if (from === to) throw new TypeError("campaign plan failover route cannot self-loop");
     routes.push({ from, to });
   }
-  const maxInputTokens = positiveInteger(rawAuthority.maxInputTokens, "campaign plan.authority.maxInputTokens");
-  const maxCostUsd = rawAuthority.maxCostUsd === null ? null : nonNegativeNumber(rawAuthority.maxCostUsd, "campaign plan.authority.maxCostUsd");
   if (rawAuthority.irreversibleActionsForbidden !== true) {
     throw new TypeError("campaign plan.authority.irreversibleActionsForbidden must be true");
   }
@@ -138,8 +135,6 @@ export function validateCampaignPlan(value) {
       retryLimit,
       repairLimit,
       runtimeFailover: { allowedRuntimes, routes },
-      maxInputTokens,
-      maxCostUsd,
       irreversibleActionsForbidden: true,
     },
   });
@@ -311,7 +306,6 @@ export function classifyTransition(input) {
     }
     return { action: "attention", reason: "provider_exhausted_without_declared_failover", failoverTo: null, remainingEdges: 0 };
   }
-  if (isBudget(code, status)) return { action: "attention", reason: "budget_exhausted", failoverTo: null };
   if (isForbiddenAuthority(code, status)) return { action: "attention", reason: "forbidden_authority_or_irreversible_action", failoverTo: null };
   if (isInvalid(code, status)) return { action: "attention", reason: "invalid_state", failoverTo: null };
   if (isRepairable(code, status, run)) {
@@ -402,13 +396,6 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
         ? /** @type {JsonObject} */ (observed.contract)
         : null;
       const observedNodes = Array.isArray(observedContract?.nodes) ? /** @type {JsonObject[]} */ (observedContract.nodes) : [];
-      const sourceNode = observedNodes.length
-        ? observedNodes.find((candidate) => candidate.id === node.id)
-        : null;
-      if (!sourceNode?.budgetProfile) {
-        setAttention(campaignPath, state, "budget_provenance_missing", `${record.id}:${String(node.id)} has no budgetProfile for a bounded repair`);
-        break;
-      }
       const created = createRepairContract(campaignPath, plan, state, record, /** @type {JsonObject} */ (node), observed);
       const repairRecord = state.runs.find((candidate) => candidate.id === created.repairId) ?? {
         id: created.repairId,
@@ -557,13 +544,6 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
   const workerRuntime = allowed.includes(failedRuntime)
     ? failedRuntime
     : allowed[0];
-  const usagePolicy = boundedUsagePolicy(source.usagePolicy, plan.authority.maxInputTokens);
-  const sourceNode = source.nodes.find((candidate) => candidate.id === failedNode.id);
-  if (!sourceNode?.budgetProfile) throw new Error("budget_provenance_missing: source node has no budgetProfile for a bounded repair");
-  const repairInputTokens = Math.min(plan.authority.maxInputTokens, sourceNode?.maxInputTokens ?? plan.authority.maxInputTokens);
-  const repairCostUsd = plan.authority.maxCostUsd === null
-    ? sourceNode?.maxCostUsd ?? source.maxCostUsd
-    : Math.min(plan.authority.maxCostUsd, sourceNode?.maxCostUsd ?? source.maxCostUsd ?? plan.authority.maxCostUsd);
   const repairId = `${plan.campaignId}-repair-${stableId(repairKey).slice(0, 20)}`;
   const evidence = boundedJson(evidenceFor(failedRun, failedNode, observed), MAX_EVIDENCE_BYTES);
   const taskPacket = {
@@ -589,13 +569,10 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
     campaignId: plan.campaignId,
     goal: `${source.goal} · bounded repair ${String(failedNode.id)}`,
     cwd: source.cwd,
-    usagePolicy,
     maxParallel: 1,
     pollIntervalMs: source.pollIntervalMs,
     stallTimeoutSec: source.stallTimeoutSec,
     timeoutSec: source.timeoutSec,
-    maxInputTokens: repairInputTokens,
-    maxCostUsd: repairCostUsd,
     runtimeDefaults: { worker: workerRuntime, judge: workerRuntime },
     runtimes,
     nodes: [{
@@ -610,10 +587,6 @@ export function createRepairContract(campaignPath, plan, state, failedRun, faile
         { id: "verification-passes", text: "Only the preauthorized verification passes", proof: { kind: "command", ref: repairProof } },
       ],
       gate: { enabled: false },
-      maxInputTokens: repairInputTokens,
-      budgetProfile: sourceNode.budgetProfile,
-      progressPolicy: sourceNode.progressPolicy,
-      maxCostUsd: repairCostUsd,
     }],
     sourceIdentity: { kind: "contract", id: repairId, campaignId: plan.campaignId },
   });
@@ -982,7 +955,6 @@ export async function checkRunLiveness(campaignPath, runDir, { now = Date.now(),
     key: eventKey,
   }), eventKey);
   try {
-    const ledger = readLedgerTotals(campaignPath);
     const active = watchdogActiveNode(snapshots);
     const done = snapshots.filter((node) => String(node.status) === "done").length;
     const activePhase = typeof active.phase === "string" && Boolean(active.phase) ? String(active.phase) : "worker";
@@ -999,8 +971,6 @@ export async function checkRunLiveness(campaignPath, runDir, { now = Date.now(),
       checkpointsTotal: snapshots.length,
       runtime: watchdogRuntimeId(active),
       state: "blocked",
-      weightedUsed: ledger.weightedUsed,
-      weightedCap: ledger.weightedCap,
       lastProgressAt: lastObservedIso,
       attention: `stale liveness: no progress for ${minutes} min`,
     };
@@ -1064,44 +1034,6 @@ function watchdogRuntimeId(node) {
   const runtime = plainObject(node.runtime);
   if (runtime !== null && typeof runtime.id === "string" && Boolean(runtime.id)) return runtime.id;
   return null;
-}
-
-/**
- * Weighted usage from the campaign usage ledger when present; both sides fall
- * back to zero so the watchdog never fabricates budget numbers.
- *
- * @param {string} campaignPath
- * @returns {{weightedUsed: number, weightedCap: number}}
- */
-function readLedgerTotals(campaignPath) {
-  try {
-    const ledger = plainObject(readJson(join(campaignPath, USAGE_LEDGER_NAME)));
-    const epochs = ledger === null ? null : plainObject(ledger.epochs);
-    if (epochs === null) return { weightedUsed: 0, weightedCap: 0 };
-    let weightedUsed = 0;
-    let weightedCap = 0;
-    for (const rawEpoch of Object.values(epochs)) {
-      const epoch = plainObject(rawEpoch);
-      if (epoch === null) continue;
-      const policy = plainObject(epoch.policy);
-      const cacheReadWeight = policy !== null && typeof policy.cacheReadWeight === "number" ? policy.cacheReadWeight : 1;
-      const cap = policy !== null && typeof policy.maxInputTokens === "number" ? policy.maxInputTokens : 0;
-      if (cap > weightedCap) weightedCap = cap;
-      const invocations = plainObject(epoch.invocations);
-      if (invocations === null) continue;
-      for (const rawInvocation of Object.values(invocations)) {
-        const invocation = plainObject(rawInvocation);
-        const usage = invocation === null ? null : plainObject(invocation.usage);
-        if (usage === null) continue;
-        const inputTokens = typeof usage.inputTokens === "number" && Number.isFinite(usage.inputTokens) ? usage.inputTokens : 0;
-        const cacheReadInputTokens = typeof usage.cacheReadInputTokens === "number" && Number.isFinite(usage.cacheReadInputTokens) ? usage.cacheReadInputTokens : 0;
-        weightedUsed += inputTokens + cacheReadInputTokens * cacheReadWeight;
-      }
-    }
-    return { weightedUsed: Math.round(weightedUsed), weightedCap: Math.round(weightedCap) };
-  } catch {
-    return { weightedUsed: 0, weightedCap: 0 };
-  }
 }
 
 /**
@@ -1244,8 +1176,6 @@ function copyTaskPacketFiles(source, durable, sourcePath, contractPath) {
 /** @param {unknown} source @param {JsonObject} defaults */
 function normalizeAuthority(source, defaults) {
   const authority = source && typeof source === "object" ? /** @type {JsonObject} */ (source) : {};
-  const usagePolicy = defaults.usagePolicy;
-  const defaultInput = usagePolicy === false ? 1_000_000 : Number(/** @type {JsonObject} */ (usagePolicy).maxInputTokens);
   return {
     repairRoots: stringArray(authority.repairRoots ?? ["skills/mine/intent-factory"], "authority.repairRoots", true),
     allowedVerification: validateAllowedVerification(authority.allowedVerification ?? [{ argv: ["node", "--test", "skills/mine/intent-factory/test/campaign-autonomy.test.mjs"] }]),
@@ -1255,8 +1185,6 @@ function normalizeAuthority(source, defaults) {
       allowedRuntimes: stringArray(/** @type {JsonObject} */ (authority.runtimeFailover ?? {}).allowedRuntimes ?? ["luna", "sol"], "authority.runtimeFailover.allowedRuntimes", true),
       routes: Array.isArray(/** @type {JsonObject} */ (authority.runtimeFailover ?? {}).routes) ? /** @type {unknown[]} */ (/** @type {JsonObject} */ (authority.runtimeFailover ?? {}).routes) : [],
     },
-    maxInputTokens: positiveInteger(authority.maxInputTokens ?? defaultInput, "authority.maxInputTokens"),
-    maxCostUsd: authority.maxCostUsd === undefined ? null : nonNegativeNumber(authority.maxCostUsd, "authority.maxCostUsd"),
     irreversibleActionsForbidden: true,
   };
 }
@@ -1326,15 +1254,11 @@ function isTimeoutOrStall(status, code) { return status === "stalled" || ["timeo
 /** @param {string} status @param {string} code @returns {boolean} */
 function isProviderExhaustion(status, code) { return ["provider_exhausted", "rate_limit", "quota_exhausted", "usage_limit"].some((item) => code.includes(item)) || (status === "exhausted" && code.includes("provider")); }
 /** @param {string} code @param {string} status @returns {boolean} */
-function isBudget(code, status) { return ["budget", "cost_budget", "token_budget", "budget_exceeded"].some((item) => code.includes(item)) || status === "budget"; }
-/** @param {string} code @param {string} status @returns {boolean} */
 function isForbiddenAuthority(code, status) { return ["authority", "scope", "expansion", "unauthorized", "destructive", "irreversible", "permission"].some((item) => code.includes(item)) || status === "canceled"; }
 /** @param {string} code @param {string} status @returns {boolean} */
 function isInvalid(code, status) { return ["invalid", "malformed", "corrupt"].some((item) => code.includes(item)) || status === "invalid"; }
 /** @param {string} code @param {string} status @param {JsonObject} run @returns {boolean} */
-function isRepairable(code, status, run) { const failedNode = run.failedNode && typeof run.failedNode === "object" ? /** @type {JsonObject} */ (run.failedNode) : {}; const result = failedNode.result && typeof failedNode.result === "object" ? /** @type {JsonObject} */ (failedNode.result) : {}; return code.includes("verification") || code.includes("gate") || code.includes("blocked_context") || code.includes("context_missing") || result.status === "blocked_context" || (status === "blocked" && !isBudget(code, status)); }
-/** @param {unknown} policy @param {number} maxInputTokens */
-function boundedUsagePolicy(policy, maxInputTokens) { if (policy === false) return { epoch: "campaign-repair", maxInputTokens, judgeReserveInputTokens: 0, maxPhaseInputTokens: maxInputTokens, maxInvocationTokens: maxInputTokens, cacheReadWeight: 0 }; const value = /** @type {JsonObject} */ (policy); const maximum = Math.min(maxInputTokens, Number(value.maxInputTokens)); return { epoch: String(value.epoch), maxInputTokens: maximum, judgeReserveInputTokens: Math.min(Number(value.judgeReserveInputTokens), maximum), maxPhaseInputTokens: Math.min(Number(value.maxPhaseInputTokens), maximum), maxInvocationTokens: Math.min(Number(value.maxInvocationTokens), maximum), cacheReadWeight: Number(value.cacheReadWeight) }; }
+function isRepairable(code, status, run) { const failedNode = run.failedNode && typeof run.failedNode === "object" ? /** @type {JsonObject} */ (run.failedNode) : {}; const result = failedNode.result && typeof failedNode.result === "object" ? /** @type {JsonObject} */ (failedNode.result) : {}; return code.includes("verification") || code.includes("gate") || code.includes("blocked_context") || code.includes("context_missing") || result.status === "blocked_context" || status === "blocked"; }
 /** @param {unknown} error @returns {string} */
 function errorMessage(error) { return error instanceof Error ? error.message : String(error); }
 /** @param {number} milliseconds @returns {Promise<void>} */

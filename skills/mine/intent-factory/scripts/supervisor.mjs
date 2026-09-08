@@ -1,11 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { providerCommand, normalizeProviderResult } from "./drivers/index.mjs";
 import { SessionMetricsParser } from "./drivers/exec-jsonl.mjs";
 import { readLease, leaseHealthy, writeJsonAtomic } from "./store.mjs";
-import { captureWorkspaceSnapshot, compareWorkspaceSnapshot } from "./verification.mjs";
 
 const DEFAULT_GRACE_MS = 2_000;
 const GATE_SCRIPT = String.raw`
@@ -138,7 +136,7 @@ const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
 /** @typedef {import("node:child_process").ChildProcess} ChildProcess */
 /** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
 /** @typedef {import("./contract.mjs").NodeSnapshot} NodeSnapshot */
-/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, budgetStop?: "node"|"campaign"|"wallclock", judgeBudgetOverride?: boolean, liveInputTokens?: number, rotationReason?: string, rotationHandoff?: boolean, rotationHandoffPath?: string, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
+/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
 
 /**
  * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, workspace?: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
@@ -239,10 +237,6 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
   try {
     if (typeof onInvocation !== "function") throw new Error("durable invocation persistence callback is required");
     onInvocation(invocation, job);
-    if (phase === "worker" && node.progressPolicy) {
-      initializeProgress(job);
-      job.onProgress?.(state);
-    }
     signalGate(job.gateReleasePath);
     if (command.promptTransport === "stdin") {
       child.stdin.on("error", () => {});
@@ -404,155 +398,6 @@ export async function terminateInvocation(invocation, options = {}) {
 }
 
 /**
- * @param {Job} job
- */
-function initializeProgress(job) {
-  const policy = job.node.progressPolicy;
-  if (!policy) return;
-  const existing = job.state.progress;
-  const revision = job.state.revisions ?? 0;
-  const keep = existing && (existing.revision === undefined || existing.revision === revision);
-  const baselineSignature = job.scopeBaseline
-    ? workspaceProgressSignature(/** @type {import("./verification.mjs").WorkspaceSnapshot} */ (job.scopeBaseline), job.state.scope?.boundary)
-    : null;
-  if (keep) {
-    job.state.progress = {
-      ...existing,
-      revision,
-      nextCheckAt: existing.nextCheckAt ?? new Date(Date.parse(job.startedAt) + policy.graceSec * 1_000).toISOString(),
-      progressSignature: existing.progressSignature ?? baselineSignature,
-    };
-    return;
-  }
-  const startedAt = Date.parse(job.startedAt);
-  job.state.progress = {
-    revision,
-    heartbeatCount: 0,
-    dryHeartbeatCount: 0,
-    progressSignature: baselineSignature,
-    lastHeartbeatAt: null,
-    lastProgressAt: job.startedAt,
-    nextCheckAt: new Date(startedAt + policy.graceSec * 1_000).toISOString(),
-  };
-}
-
-/**
- * @param {import("./verification.mjs").WorkspaceSnapshot} snapshot
- * @param {import("./verification.mjs").WorkspaceScopeBoundary|undefined} boundary
- * @returns {string}
- */
-function workspaceProgressSignature(snapshot, boundary) {
-  if (!boundary || !Array.isArray(boundary.files) || !Array.isArray(boundary.roots)) {
-    throw Object.assign(new Error("persisted worker scope boundary is missing"), { code: "scope_boundary_missing" });
-  }
-  const entries = snapshot.entries.filter((entry) => boundary.files.includes(entry.path) || boundary.roots.some((root) => entry.path === root || entry.path.startsWith(`${root}/`)));
-  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
-}
-
-/**
- * @param {Job} job
- * @param {ValidatedContract} contract
- * @param {bigint} nowTicks
- * @returns {Promise<boolean>}
- */
-async function checkProgress(job, contract, nowTicks) {
-  const policy = job.node.progressPolicy;
-  if (job.phase !== "worker" || !policy || !job.state.progress) return false;
-  const progress = job.state.progress;
-  const nextCheck = Date.parse(progress.nextCheckAt ?? "");
-  if (Number.isFinite(nextCheck) && Date.now() < nextCheck) return false;
-  const baseline = /** @type {import("./verification.mjs").WorkspaceSnapshot|undefined} */ (job.scopeBaseline);
-  if (!baseline) return false;
-  const boundary = job.state.scope?.boundary;
-  const comparison = compareWorkspaceSnapshot(baseline, job.cwd, {
-    files: job.node.taskPacket.writeFiles,
-    roots: job.node.taskPacket.writeRoots,
-    boundary,
-  });
-  const signature = workspaceProgressSignature(comparison.after, boundary);
-  const changed = progress.progressSignature !== null && progress.progressSignature !== undefined
-    ? signature !== progress.progressSignature
-    : true;
-  const now = new Date().toISOString();
-  progress.heartbeatCount += 1;
-  progress.lastHeartbeatAt = now;
-  progress.nextCheckAt = new Date(Date.now() + policy.intervalSec * 1_000).toISOString();
-  if (changed) {
-    progress.progressSignature = signature;
-    progress.dryHeartbeatCount = 0;
-    progress.lastProgressAt = now;
-  } else {
-    progress.dryHeartbeatCount += 1;
-  }
-  job.onProgress?.(job.state);
-  return progress.dryHeartbeatCount >= policy.maxDryHeartbeats;
-}
-
-/**
- * Apply the same durable heartbeat policy while a resumed controller adopts a
- * still-live worker invocation. The persisted progress deadline and dry count
- * are authoritative; provider output is intentionally not considered here.
- *
- * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, invocation: Invocation, baseline?: import("./verification.mjs").WorkspaceSnapshot|null, workspace?: string}} args
- * @returns {Promise<boolean>}
- */
-export async function checkRecoveredProgress({ contract, node, state, invocation, baseline, workspace = state.worktree?.path ?? contract.cwd }) {
-  const policy = node.progressPolicy;
-  if (invocation.phase !== "worker" || !policy) return false;
-  const revision = state.revisions ?? 0;
-  const existing = state.progress;
-  const baselineSignature = baseline
-    ? workspaceProgressSignature(baseline, state.scope?.boundary)
-    : null;
-  const keep = existing && (existing.revision === undefined || existing.revision === revision);
-  if (!keep) {
-    const startedAt = Date.parse(invocation.startedAt);
-    state.progress = {
-      revision,
-      heartbeatCount: 0,
-      dryHeartbeatCount: 0,
-      progressSignature: baselineSignature,
-      lastHeartbeatAt: null,
-      lastProgressAt: invocation.startedAt,
-      nextCheckAt: new Date((Number.isFinite(startedAt) ? startedAt : Date.now()) + policy.graceSec * 1_000).toISOString(),
-    };
-  } else {
-    state.progress = {
-      ...existing,
-      revision,
-      nextCheckAt: existing.nextCheckAt ?? new Date(Date.parse(invocation.startedAt) + policy.graceSec * 1_000).toISOString(),
-      progressSignature: existing.progressSignature ?? baselineSignature,
-    };
-  }
-  const progress = state.progress;
-  const nextCheck = Date.parse(progress.nextCheckAt ?? "");
-  if (Number.isFinite(nextCheck) && Date.now() < nextCheck) return false;
-  if (!baseline) return false;
-  const boundary = state.scope?.boundary;
-  const comparison = compareWorkspaceSnapshot(baseline, workspace, {
-    files: node.taskPacket.writeFiles,
-    roots: node.taskPacket.writeRoots,
-    boundary,
-  });
-  const signature = workspaceProgressSignature(comparison.after, boundary);
-  const changed = progress.progressSignature !== null && progress.progressSignature !== undefined
-    ? signature !== progress.progressSignature
-    : true;
-  const now = new Date().toISOString();
-  progress.heartbeatCount += 1;
-  progress.lastHeartbeatAt = now;
-  progress.nextCheckAt = new Date(Date.now() + policy.intervalSec * 1_000).toISOString();
-  if (changed) {
-    progress.progressSignature = signature;
-    progress.dryHeartbeatCount = 0;
-    progress.lastProgressAt = now;
-  } else {
-    progress.dryHeartbeatCount += 1;
-  }
-  return progress.dryHeartbeatCount >= policy.maxDryHeartbeats;
-}
-
-/**
  * @param {ValidatedContract} contract
  * @param {Map<string, Job>} running
  * @param {(job: Job, outcome: "exhausted"|"stalled", error: {code: string, message: string}) => Promise<void>} onTimeout
@@ -568,27 +413,6 @@ export async function detectStalls(contract, running, onTimeout, onProgress) {
       await onTimeout(job, "exhausted", {
         code: "wall_clock_timeout",
         message: `${job.phase} ran longer than ${budgetSec}s`,
-      });
-      continue;
-    }
-    try {
-      const progressStalled = await checkProgress(job, contract, now);
-      if (job.state.progress) await onProgress?.(job);
-      if (progressStalled) {
-        await terminateProcess(job);
-        running.delete(nodeId);
-        await onTimeout(job, "stalled", {
-          code: "progress_stalled",
-          message: `allowed workspace scope made no progress for ${job.state.progress?.dryHeartbeatCount ?? 0} heartbeats`,
-        });
-        continue;
-      }
-    } catch (error) {
-      running.delete(nodeId);
-      await terminateProcess(job);
-      await onTimeout(job, "stalled", {
-        code: errorCode(error) ?? "progress_snapshot_invalid",
-        message: error instanceof Error ? error.message : String(error),
       });
       continue;
     }

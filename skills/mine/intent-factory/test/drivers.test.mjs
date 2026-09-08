@@ -129,50 +129,41 @@ test("stdin adapters keep prompts out of argv and argv adapters enforce byte lim
   );
 });
 
-test("Codex continuation uses exec resume with the session id, prompt, and native rollout budget", () => {
-  const command = providerCommand({ driver: "codex", model: "m", sandbox: "read-only" }, "continue this", { continuationId: "thread-1", maxInvocationTokens: 1000 });
+test("Codex continuation uses exec resume with the session id and prompt", () => {
+  const command = providerCommand({ driver: "codex", model: "m", sandbox: "read-only" }, "continue this", { continuationId: "thread-1" });
   assert.equal(command.promptTransport, "argv");
   assert.equal(command.input, null);
   assert.deepEqual(command.args.slice(0, 3), ["exec", "resume", "--json"]);
   assert.equal(command.args.includes("--sandbox"), false, "resume inherits the sandbox from its original session");
-  assert.ok(command.args.includes("features.rollout_budget={enabled=true,limit_tokens=1000,reminder_at_remaining_tokens=[],sampling_token_weight=1.0,prefill_token_weight=1.0}"));
   assert.deepEqual(command.args.slice(-2), ["thread-1", "continue this"]);
   assert.equal(command.args.at(-1), "continue this");
 });
 
-test("Claude continuation resumes the explicit session and enforces only its cost budget", () => {
+test("Claude continuation resumes the explicit session", () => {
   const command = providerCommand({ driver: "claude", model: "m" }, "continue this", {
     continuationId: "session-1",
-    maxInvocationTokens: 1000,
-    maxCostUsd: 2.5,
   });
   assert.equal(command.promptTransport, "stdin");
   assert.equal(command.input, "continue this");
   assert.equal(command.args.includes("continue this"), false);
   assert.deepEqual(command.args.slice(0, 4), ["-p", "--resume", "session-1", "--model"]);
   assert.equal(command.args.includes("--continue"), false);
-  assert.deepEqual(command.args.slice(command.args.indexOf("--max-budget-usd"), command.args.indexOf("--max-budget-usd") + 2), ["--max-budget-usd", "2.5"]);
-  assert.equal(command.args.includes("1000"), false);
+  assert.equal(command.args.includes("--max-budget-usd"), false);
 });
 
 test("agy continuation uses the explicit conversation and preserves equals-form argv transport", () => {
   const command = providerCommand({ driver: "agy", model: "m" }, "continue this", {
     continuationId: "conversation-1",
-    maxInvocationTokens: 1000,
-    maxCostUsd: 2.5,
   });
   assert.equal(command.promptTransport, "argv");
   assert.ok(command.args.includes("--conversation=conversation-1"));
   assert.ok(command.args.includes("--print=continue this"));
   assert.equal(command.args.some((arg) => arg === "--conversation" || arg === "--continue"), false);
-  assert.equal(command.args.includes("1000"), false);
-  assert.equal(command.args.includes("2.5"), false);
 });
 
 test("generic exec-jsonl emits the documented normalized request", () => {
   const command = providerCommand({ driver: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "hello", {
     schema: { type: "object" },
-    maxInvocationTokens: 1000,
   });
   assert.ok(command.input, "stdin transport provides input");
   const request = JSON.parse(command.input);
@@ -470,16 +461,13 @@ test("builds glm commands pinned to the Z.ai endpoint", () => {
 
     const continued = providerCommand({ driver: "glm", model: "glm-5.3" }, "next task", {
       continuationId: "glm-session-1",
-      maxInvocationTokens: 1000,
-      maxCostUsd: 3,
     });
     assert.equal(continued.promptTransport, "stdin");
     assert.equal(continued.input, "next task");
     assert.equal(continued.args.includes("next task"), false);
     assert.deepEqual(continued.args.slice(0, 4), ["-p", "--resume", "glm-session-1", "--model"]);
     assert.equal(continued.args.includes("--continue"), false);
-    assert.deepEqual(continued.args.slice(continued.args.indexOf("--max-budget-usd"), continued.args.indexOf("--max-budget-usd") + 2), ["--max-budget-usd", "3"]);
-    assert.equal(continued.args.includes("1000"), false);
+    assert.equal(continued.args.includes("--max-budget-usd"), false);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

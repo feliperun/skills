@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { loadTaskPacket, renderWorkerPrompt } from "./task-packet.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { normalizeManagedSignalBlock } from "./signal-block.mjs";
-import { validateBudgetDecision, validateBudgetProfile, validateBudgetState } from "./budget.mjs";
 import { validateDefinitionOfDone } from "./definition-of-done.mjs";
 import { validateFinalVerification, validateVerificationSnapshot } from "./final-verification.mjs";
 import { MAX_SCOPE_FINDING_PATHS } from "./scope-findings.mjs";
@@ -26,14 +25,14 @@ export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index
 
 const CONTRACT_FIELDS = new Set([
   "schemaVersion", "contractVersion", "id", "campaignId", "goal", "cwd", "sourceIdentity",
-  "maxParallel", "pollIntervalMs", "stallTimeoutSec", "timeoutSec", "maxInputTokens", "maxCostUsd", "usagePolicy",
+  "maxParallel", "pollIntervalMs", "stallTimeoutSec", "timeoutSec",
   "runtimeDefaults", "runtimes", "nodes", "warnings", "finalVerification",
 ]);
 const DEFAULTS_FIELDS = new Set(["worker", "judge"]);
 const NODE_FIELDS = new Set([
   "id", "type", "phase", "runtime", "dependsOn", "taskPacket", "taskPacketFile", "prompt", "promptFile",
-  "definitionOfDone", "gate", "timeoutSec", "maxInputTokens", "maxCostUsd", "progressPolicy",
-  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy", "budgetProfile",
+  "definitionOfDone", "gate", "timeoutSec",
+  "requiredCapabilities", "packetHash", "sourceIdentity", "replayPolicy",
 ]);
 const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
@@ -46,7 +45,7 @@ const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
 const GATE_VERDICTS = new Set(["pass", "fail", "invalid_judge_output"]);
 const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "glm", "exec-jsonl", "replay"]);
 const NODE_STATUSES = new Set(["pending", "running", "done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
-const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependency", "budget", "canceled"]);
+const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependency", "canceled"]);
 const SNAPSHOT_RUNTIME_FIELDS = new Set(["id", ...RUNTIME_FIELDS, "capabilities"]);
 const CAPABILITY_FIELDS = new Set([
   "structuredOutput", "promptTransport", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget",
@@ -56,8 +55,6 @@ const GATE_RESULT_FIELDS = new Set(["verdict", "maxSeverity", "summary", "findin
 const FINDING_FIELDS = new Set(["severity", "description", "evidence"]);
 const ERROR_FIELDS = new Set(["code", "message", "exhaustedUntil"]);
 const USAGE_FIELDS = new Set(["inputTokens", "outputTokens", "cacheReadInputTokens"]);
-const MAX_PROGRESS_SEC = 86_400;
-const MAX_DRY_HEARTBEATS = 1_000;
 const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {Record<string, unknown>} JsonObject */
@@ -74,14 +71,12 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{enabled: boolean, review?: ("none"|"advisory"|"blocking"), runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
-/** @typedef {{graceSec: number, intervalSec: number, maxDryHeartbeats: number}} ProgressPolicy */
-/** @typedef {{epoch: string, maxInputTokens: number, judgeReserveInputTokens: number, maxPhaseInputTokens: number, maxInvocationTokens: number, cacheReadWeight: number}} UsagePolicy */
-/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, maxInputTokens?: number, maxCostUsd?: number, progressPolicy?: ProgressPolicy, budgetProfile?: ReturnType<typeof validateBudgetProfile>, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
+/** @typedef {{id: string, type: string, phase: string, runtime?: string, dependsOn: string[], taskPacket: TaskPacket, taskPacketFile?: string, prompt: string, definitionOfDone: import("./definition-of-done.mjs").DefinitionOfDoneItem[], gate: ValidatedGate, timeoutSec?: number, requiredCapabilities: CapabilityRequirements, packetHash: string, sourceIdentity: SourceIdentity, replayPolicy: "safe"|"reconcile"|"never"}} ValidatedNode */
 
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker?: string, judge?: string}, nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, maxInputTokens: number, usagePolicy: UsagePolicy|false, maxCostUsd?: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, campaignId: string, goal: string, cwd: string, sourceIdentity: SourceIdentity, runtimes: Record<string, ValidatedRuntime>, runtimeDefaults: {worker?: string, judge?: string}, nodes: ValidatedNode[], maxParallel: number, pollIntervalMs: number, stallTimeoutSec: number, timeoutSec: number, finalVerification?: VerificationCommand[], warnings: string[]}} ValidatedContract */
 
 /** @typedef {"pending"|"running"|"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} NodeStatus */
-/** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"budget"|"canceled"} NodePhase */
+/** @typedef {"waiting"|"worker"|"judge"|"complete"|"dependency"|"canceled"} NodePhase */
 /** @typedef {{severity: "minor"|"major"|"critical", description: string, evidence: string}} Finding */
 /** @typedef {{verdict: "pass"|"fail"|"invalid_judge_output", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: Finding[]}} GateResult */
 /** @typedef {{code: string, message: string, exhaustedUntil?: string|null}} SnapshotError */
@@ -103,19 +98,13 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null, assignments?: RuntimeAssignments, availability?: Record<string, RuntimeAvailability>}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
 /** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null}} WorktreeState */
-/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, budgetDecision?: ReturnType<typeof validateBudgetDecision>|null, budgetState?: ReturnType<typeof validateBudgetState>|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
-/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, budgetExtension?: {previous: number, maxInputTokens: number, at: string}, identityWarnings?: string[]}} RunMetadata */
-/** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number, budgetDecision?: unknown, budgetAction?: unknown}} EventRecord */
+/** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
+/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, identityWarnings?: string[]}} RunMetadata */
+/** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number}} EventRecord */
 
 /**
  * Validate and canonicalize the versioned contract. Runtime JSON remains
  * authoritative; JSDoc types document the validated shape only.
- *
- * `maxInputTokens` is mandatory on authored and persisted contracts alike:
- * schema 2 removed the legacy default, so a persisted contract without an
- * explicit budget is an error instead of a fallback. The `persisted` flag
- * only keeps node-level `budgetProfile` provenance optional for runs
- * written before that field existed.
  *
  * @param {JsonObject} raw
  * @param {string} contractPath
@@ -130,10 +119,6 @@ export function validateContract(raw, contractPath, options = {}) {
   requireId(raw.id, "contract.id");
   requireId(raw.campaignId, "contract.campaignId");
   requireString(raw.goal, "contract.goal");
-  if (!Object.hasOwn(raw, "usagePolicy")) throw new TypeError("contract.usagePolicy is required and must be an object or false");
-  const usagePolicy = raw.usagePolicy === false
-    ? false
-    : validateUsagePolicy(raw.usagePolicy, "contract.usagePolicy");
 
   const contractDir = dirname(resolve(contractPath));
   const cwd = resolve(contractDir, typeof raw.cwd === "string" ? raw.cwd : ".");
@@ -218,26 +203,6 @@ export function validateContract(raw, contractPath, options = {}) {
     const timeoutSec = node.timeoutSec === undefined
       ? undefined
       : positiveNumber(node.timeoutSec, `nodes[${index}].timeoutSec`);
-    const maxInputTokens = node.maxInputTokens === undefined
-      ? undefined
-      : positiveInteger(node.maxInputTokens, `nodes[${index}].maxInputTokens`);
-    const budgetProfile = node.budgetProfile === undefined
-      ? undefined
-      : validateBudgetProfile(node.budgetProfile, `nodes[${index}].budgetProfile`);
-    // Authoring requires provenance; a persisted contract written before
-    // budget profiles existed stays readable as incident evidence.
-    if (!persisted && maxInputTokens !== undefined && budgetProfile === undefined) {
-      throw new TypeError(`nodes[${index}].maxInputTokens requires budgetProfile provenance`);
-    }
-    const maxCostUsd = node.maxCostUsd === undefined
-      ? undefined
-      : positiveNumber(node.maxCostUsd, `nodes[${index}].maxCostUsd`);
-    const progressPolicy = node.progressPolicy === undefined
-      ? taskPacket.mode === "autonomous" ? { graceSec: 300, intervalSec: 120, maxDryHeartbeats: 3 } : undefined
-      : validateProgressPolicy(node.progressPolicy, `nodes[${index}].progressPolicy`);
-    if (budgetProfile !== undefined && progressPolicy === undefined) {
-      throw new TypeError(`nodes[${index}].budgetProfile requires progressPolicy for observed-progress extensions and continuations`);
-    }
     const replayPolicy = validateReplayPolicy(node.replayPolicy, `nodes[${index}]`);
     return /** @type {ValidatedNode} */ ({
       ...node,
@@ -250,10 +215,6 @@ export function validateContract(raw, contractPath, options = {}) {
       prompt,
       gate,
       timeoutSec,
-      maxInputTokens,
-      budgetProfile,
-      maxCostUsd,
-      progressPolicy,
       replayPolicy,
     });
   });
@@ -296,15 +257,7 @@ export function validateContract(raw, contractPath, options = {}) {
     pollIntervalMs: positiveInteger(raw.pollIntervalMs ?? 1_000, "contract.pollIntervalMs"),
     stallTimeoutSec: positiveNumber(raw.stallTimeoutSec ?? 300, "contract.stallTimeoutSec"),
     timeoutSec: positiveNumber(raw.timeoutSec ?? 2_400, "contract.timeoutSec"),
-    // Mandatory on every contract, persisted or not: a contract without a
-    // hard token budget is exactly how the 2026-08 usage incident happened
-    // (workers burned 1.2M+ input tokens unbounded).
-    maxInputTokens: positiveInteger(raw.maxInputTokens, "contract.maxInputTokens"),
-    usagePolicy,
     finalVerification: validateFinalVerification(raw.finalVerification, "contract.finalVerification"),
-    maxCostUsd: raw.maxCostUsd === undefined
-      ? undefined
-      : positiveNumber(raw.maxCostUsd, "contract.maxCostUsd"),
     warnings,
   });
 }
@@ -352,7 +305,7 @@ export function validateRunMetadata(value, options = {}) {
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "pid", "processStartToken", "startedAt", "sourceIdentity",
     "holderId", "leaseGeneration", "leaseAcquiredAt", "leaseRenewedAt", "leaseExpiresAt",
-    "budgetExtension", "identityWarnings", "integrationRef",
+    "identityWarnings", "integrationRef",
   ]), "run metadata");
   validateMetadata(value, "run metadata");
   requireInteger(value.pid, "run metadata.pid");
@@ -360,19 +313,6 @@ export function validateRunMetadata(value, options = {}) {
   requireString(value.startedAt, "run metadata.startedAt");
   if (value.integrationRef !== undefined) requireString(value.integrationRef, "run metadata.integrationRef");
   validateSourceIdentity(value.sourceIdentity, "run metadata.sourceIdentity", { kind: "run" });
-  // An exhausted run budget is extended only explicitly, and the extension is
-  // recorded on the run it raises the ceiling for (retry.mjs, rule 4).
-  if (value.budgetExtension !== undefined) {
-    const extension = /** @type {Record<string, unknown>} */ (value.budgetExtension);
-    assertObject(extension, "run metadata.budgetExtension");
-    rejectUnknown(extension, new Set(["previous", "maxInputTokens", "at"]), "run metadata.budgetExtension");
-    positiveInteger(extension.previous, "run metadata.budgetExtension.previous");
-    positiveInteger(extension.maxInputTokens, "run metadata.budgetExtension.maxInputTokens");
-    if (/** @type {number} */ (extension.maxInputTokens) <= /** @type {number} */ (extension.previous)) {
-      throw new TypeError("run metadata.budgetExtension.maxInputTokens must exceed previous");
-    }
-    requireTimestamp(extension.at, "run metadata.budgetExtension.at");
-  }
   if (value.identityWarnings !== undefined) {
     if (!Array.isArray(value.identityWarnings) || value.identityWarnings.length > 8) {
       throw new TypeError("run metadata.identityWarnings must be an array of at most 8 strings");
@@ -399,7 +339,7 @@ export function validateNodeSnapshot(value, expectedNode = null) {
     "schemaVersion", "contractVersion", "id", "type", "sourceIdentity", "packetHash", "status", "phase",
     "attempt", "revisions", "judgeFailures", "runtime", "blockedBy", "startedAt", "updatedAt", "result", "gate", "error", "usage",
     "costUsd", "routing", "progress", "worktree", "invocations", "executionOverrides", "verification", "scope",
-    "scopeFindings", "budgetDecision", "budgetState", "review", "previousAttempt", "integratedHead",
+    "scopeFindings", "review", "previousAttempt", "integratedHead",
   ]), "node snapshot");
   validateMetadata(value, "node snapshot");
   requireId(value.id, "node snapshot.id");
@@ -438,9 +378,6 @@ export function validateNodeSnapshot(value, expectedNode = null) {
   if (value.costUsd !== undefined) nonNegativeNumber(value.costUsd, "node snapshot.costUsd");
   if (value.routing !== undefined && value.routing !== null) validateRoutingState(value.routing, "node snapshot.routing");
   if (value.progress !== undefined && value.progress !== null) validateProgressState(value.progress, "node snapshot.progress");
-  if (value.budgetDecision !== undefined && value.budgetDecision !== null) validateBudgetDecision(value.budgetDecision, "node snapshot.budgetDecision");
-  if (value.budgetState !== undefined && value.budgetState !== null) validateBudgetState(value.budgetState, "node snapshot.budgetState");
-  if ((value.budgetDecision === null) !== (value.budgetState === null)) throw new TypeError("node snapshot budgetDecision and budgetState must both be null or present");
   if (value.worktree !== undefined && value.worktree !== null) validateWorktreeState(value.worktree, "node snapshot.worktree");
   if (value.invocations !== undefined) validateInvocations(value.invocations, "node snapshot.invocations");
   if (value.executionOverrides !== undefined) validateExecutionOverrides(value.executionOverrides, "node snapshot.executionOverrides");
@@ -468,7 +405,7 @@ export function validateEvent(value) {
   assertObject(value, "event");
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "at", "node", "from", "to", "type", "phase", "attempt", "runtime",
-    "role", "status", "currentRuntime", "errorCode", "error", "verdict", "summary", "revisions", "sourceIdentity", "packetHash", "override", "recovery", "invocationId", "unexpectedPaths", "unexpectedPathCount", "budgetDecision", "budgetAction",
+    "role", "status", "currentRuntime", "errorCode", "error", "verdict", "summary", "revisions", "sourceIdentity", "packetHash", "override", "recovery", "invocationId", "unexpectedPaths", "unexpectedPathCount",
   ]), "event");
   validateMetadata(value, "event");
   requireString(value.at, "event.at");
@@ -492,11 +429,6 @@ export function validateEvent(value) {
     }
   }
   if (value.unexpectedPathCount !== undefined) nonNegativeInteger(value.unexpectedPathCount, "event.unexpectedPathCount");
-  if (value.budgetDecision !== undefined) validateBudgetDecision(value.budgetDecision, "event.budgetDecision");
-  if (value.budgetAction !== undefined) {
-    assertObject(value.budgetAction, "event.budgetAction");
-    if (Buffer.byteLength(JSON.stringify(value.budgetAction), "utf8") > 4 * 1024) throw new TypeError("event.budgetAction exceeds 4096 bytes");
-  }
   return /** @type {EventRecord} */ (value);
 }
 
@@ -605,23 +537,6 @@ function validateGate(gate, runtimes, index, nodeId) {
   };
 }
 
-/**
- * @param {unknown} value
- * @param {string} label
- * @returns {ProgressPolicy}
- */
-function validateProgressPolicy(value, label) {
-  assertObject(value, label);
-  rejectUnknown(value, new Set(["graceSec", "intervalSec", "maxDryHeartbeats"]), label);
-  if (!Object.hasOwn(value, "graceSec") || !Object.hasOwn(value, "intervalSec") || !Object.hasOwn(value, "maxDryHeartbeats")) {
-    throw new TypeError(`${label} requires graceSec, intervalSec, and maxDryHeartbeats`);
-  }
-  const graceSec = boundedNonNegativeNumber(value.graceSec, `${label}.graceSec`, MAX_PROGRESS_SEC);
-  const intervalSec = boundedPositiveNumber(value.intervalSec, `${label}.intervalSec`, MAX_PROGRESS_SEC);
-  const maxDryHeartbeats = nonNegativeInteger(value.maxDryHeartbeats, `${label}.maxDryHeartbeats`);
-  if (maxDryHeartbeats > MAX_DRY_HEARTBEATS) throw new TypeError(`${label}.maxDryHeartbeats exceeds ${MAX_DRY_HEARTBEATS}`);
-  return { graceSec, intervalSec, maxDryHeartbeats };
-}
 
 /**
  * @param {unknown} value
@@ -636,25 +551,6 @@ function validateReplayPolicy(value, label) {
   return /** @type {"safe"|"reconcile"|"never"} */ (value);
 }
 
-/**
- * @param {unknown} value
- * @param {string} label
- * @returns {UsagePolicy}
- */
-function validateUsagePolicy(value, label) {
-  assertObject(value, label);
-  rejectUnknown(value, new Set(["epoch", "maxInputTokens", "judgeReserveInputTokens", "maxPhaseInputTokens", "maxInvocationTokens", "cacheReadWeight"]), label);
-  boundedString(value.epoch, `${label}.epoch`, 128);
-  const maxInputTokens = positiveInteger(value.maxInputTokens, `${label}.maxInputTokens`);
-  const judgeReserveInputTokens = nonNegativeInteger(value.judgeReserveInputTokens, `${label}.judgeReserveInputTokens`);
-  if (judgeReserveInputTokens > maxInputTokens) {
-    throw new TypeError(`${label}.judgeReserveInputTokens cannot exceed maxInputTokens`);
-  }
-  const maxPhaseInputTokens = positiveInteger(value.maxPhaseInputTokens, `${label}.maxPhaseInputTokens`);
-  const maxInvocationTokens = positiveInteger(value.maxInvocationTokens, `${label}.maxInvocationTokens`);
-  const cacheReadWeight = boundedNonNegativeNumber(value.cacheReadWeight, `${label}.cacheReadWeight`, 1);
-  return { epoch: /** @type {string} */ (value.epoch), maxInputTokens, judgeReserveInputTokens, maxPhaseInputTokens, maxInvocationTokens, cacheReadWeight };
-}
 
 /**
  * @param {JsonObject} value

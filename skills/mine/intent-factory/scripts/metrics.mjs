@@ -1,10 +1,10 @@
 /**
  * Metrics projector (TECH-SPEC section 8.4). One pure function over the four
- * recorded sources of a campaign — the run `events.jsonl`, `usage-ledger.json`,
- * the notification outbox and the campaign journal — returning every release-1
- * indicator in one object, so effectiveness (`firstPassGateRate`,
- * `ambientCoverage`) and efficiency (`weightedPerClosedCheckpoint`,
- * `takesPerClosedCheckpoint`) are always reported together and never one
+ * recorded sources of a campaign — the run `events.jsonl`, the per-run
+ * `usage.jsonl`, the notification outbox and the campaign journal — returning
+ * every release-1 indicator in one object, so effectiveness
+ * (`firstPassGateRate`, `ambientCoverage`) and efficiency
+ * (`takesPerClosedCheckpoint`) are always reported together and never one
  * without the other.
  *
  * `projectMetrics` takes already-parsed records and never a filesystem path,
@@ -26,11 +26,11 @@
  * router stays one line per subcommand, while `metrics-report.mjs` decides how
  * the projection is printed.
  *
- * The budget and liveness subset is not reimplemented here — it comes from
- * `deriveGovernanceMetrics` (`heartbeat.mjs`), the single source of those six
- * indicators; this module only wraps its values with their record counts. The
- * preamble, session and liveness measurements come from `metrics-evals.mjs`,
- * which owns what each of those indicators is measured from.
+ * The liveness subset comes from `deriveGovernanceMetrics` (`heartbeat.mjs`),
+ * the single source of the silent-stall indicator; this module only wraps its
+ * value with the supporting record count. The preamble, session, liveness and
+ * usage measurements come from `metrics-evals.mjs` and the recorded usage
+ * records, which own what each of those indicators is measured from.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -39,7 +39,6 @@ import { campaignDir, readCampaign, readJournal } from "./campaign.mjs";
 import { CAMPAIGN_STATE_FILE } from "./campaign-autonomy.mjs";
 import { deriveGovernanceMetrics } from "./heartbeat.mjs";
 import {
-  countAttentionOutbox,
   coverageOf,
   countNonterminalFacts,
   jsonObjectOf,
@@ -57,7 +56,7 @@ import { readNotificationOutbox } from "./outbox.mjs";
 
 /** Heartbeat age, in seconds, below which a reader is considered covered (Addendum 01 section 8). */
 export const HEARTBEAT_FRESH_SEC = 60;
-/** Bytes-to-tokens estimate used when the caller supplies none, in the shape budget profiles use. */
+/** Bytes-to-tokens estimate used when the caller supplies none. */
 export const DEFAULT_TOKENIZER_ESTIMATE = { bytes: 4, tokens: 1 };
 
 const CLOSED_STATUSES = new Set(["done", "no-op"]);
@@ -75,7 +74,7 @@ const UNKNOWN_LANE = "unknown";
  * @typedef {{
  *   events?: unknown[],
  *   takeRunIds?: string[]|null,
- *   usageLedger?: unknown,
+ *   usageRecords?: unknown[],
  *   outbox?: unknown[],
  *   journal?: unknown[],
  *   preflight?: unknown[],
@@ -88,7 +87,6 @@ const UNKNOWN_LANE = "unknown";
 
 /**
  * @typedef {{
- *   weightedPerClosedCheckpoint: Indicator,
  *   wallClockPerClosedCheckpoint: Indicator,
  *   takesPerClosedCheckpoint: Indicator,
  *   firstPassGateRate: GroupedIndicator,
@@ -100,14 +98,11 @@ const UNKNOWN_LANE = "unknown";
  *   sessionWakeCount: Indicator,
  *   heartbeatStalenessP95: Indicator,
  *   ambientCoverage: Indicator,
- *   budgetDecisionAge: Indicator,
- *   budgetHeadroomAtDispatch: Indicator,
- *   budgetExtensionRate: Indicator,
- *   continuationRate: Indicator,
- *   budgetAttentionLatencyP95: Indicator,
  *   silentStallRate: Indicator,
  *   workerPreambleTokens: GroupedIndicator,
  *   notifyLatencyP95: Indicator,
+ *   usageTokensByKind: GroupedIndicator,
+ *   usageCostUsd: Indicator,
  * }} CampaignMetrics
  */
 
@@ -135,7 +130,7 @@ const UNKNOWN_LANE = "unknown";
 export function projectMetrics({
   events = [],
   takeRunIds = null,
-  usageLedger = null,
+  usageRecords = [],
   outbox = [],
   journal = [],
   preflight = [],
@@ -146,7 +141,7 @@ export function projectMetrics({
 } = {}) {
   const byNode = eventsByNode(events);
   const lifecycle = lifecycleOf(byNode);
-  const usage = weightedUsageOf(usageLedger);
+  const usage = usageTotalsOf(usageRecords);
   const span = eventSpanOf(events);
   const gates = firstPassGateRateByLane(byNode);
   const livenessFacts = livenessFactsOf(journal);
@@ -156,10 +151,8 @@ export function projectMetrics({
   const takes = Array.isArray(takeRunIds) ? takeRunIds.length : null;
   // staleSec left undefined keeps heartbeat.mjs's own GOVERNANCE_STALE_SEC.
   const governance = deriveGovernanceMetrics({ events, livenessFacts, outbox, now, staleSec });
-  const decisions = countDecisions(events);
   const preamble = preambleTokensByRuntime(events, preflight);
   return {
-    weightedPerClosedCheckpoint: measured("down", usage.invocations, closed === 0 ? null : usage.weighted / closed),
     wallClockPerClosedCheckpoint: measured("down", span.count, closed === 0 || span.seconds === null ? null : span.seconds / closed),
     takesPerClosedCheckpoint: measured("down", takes ?? 0, takes === null || closed === 0 ? null : takes / closed),
     firstPassGateRate: grouped("up", gates.count, gates.value),
@@ -171,16 +164,13 @@ export function projectMetrics({
     sessionWakeCount: measured("down", session.count, session.wakes),
     heartbeatStalenessP95: measured("down", gaps.length, percentile95(gaps)),
     ambientCoverage: measured("up", gaps.length, coverageOf(gaps, freshSec)),
-    budgetDecisionAge: measured("down", decisions, governance.budgetDecisionAge),
-    budgetHeadroomAtDispatch: measured("informative", decisions, governance.budgetHeadroomAtDispatch),
-    budgetExtensionRate: measured("informative", decisions, governance.budgetExtensionRate),
-    continuationRate: measured("informative", decisions, governance.continuationRate),
-    budgetAttentionLatencyP95: measured("down", countAttentionOutbox(outbox), governance.budgetAttentionLatencyP95),
     // Hard target zero (Addendum 02): a measured zero means every liveness gap
     // was covered, so it survives only while there are facts to measure.
     silentStallRate: measured("down", countNonterminalFacts(livenessFacts), governance.silentStallRate),
     workerPreambleTokens: grouped("down", preamble.count, preamble.value),
     notifyLatencyP95: measured("down", session.latencies.length, percentile95(session.latencies)),
+    usageTokensByKind: grouped("informative", usage.tokenCount, usage.tokensByKind),
+    usageCostUsd: measured("down", usage.costCount, usage.costCount === 0 ? null : usage.costUsd),
   };
 }
 
@@ -337,38 +327,39 @@ function eventSpanOf(events) {
 }
 
 /**
- * Total weighted input tokens of the usage ledger: every invocation of every
- * epoch, weighted by that epoch's own `cacheReadWeight`, exactly as the budget
- * ledger accounts for spend.
+ * Tokens by kind and total cost across the run usage records. A record
+ * contributes exactly what it recorded: uncached input, cache-read input and
+ * output tokens are independent totals, and cost sums only records whose
+ * provider reported a value. Usage is reporting only — no control path reads
+ * these records to gate work.
  *
- * @param {unknown} usageLedger
- * @returns {{weighted: number, invocations: number}}
+ * @param {unknown[]} usageRecords
+ * @returns {{tokensByKind: Record<string, number>, tokenCount: number, costUsd: number|null, costCount: number}}
  */
-function weightedUsageOf(usageLedger) {
-  const ledger = jsonObjectOf(usageLedger);
-  const epochs = ledger === null ? null : jsonObjectOf(ledger.epochs);
-  let weighted = 0;
-  let invocations = 0;
-  if (epochs === null) return { weighted, invocations };
-  for (const rawEpoch of Object.values(epochs)) {
-    const epoch = jsonObjectOf(rawEpoch);
-    if (epoch === null) continue;
-    const records = jsonObjectOf(epoch.invocations);
-    if (records === null) continue;
-    const policy = jsonObjectOf(epoch.policy);
-    const cacheReadWeight = policy === null ? 1 : numberOf(policy.cacheReadWeight, 1);
-    for (const rawInvocation of Object.values(records)) {
-      const invocation = jsonObjectOf(rawInvocation);
-      const usage = invocation === null ? null : jsonObjectOf(invocation.usage);
-      if (usage === null) continue;
-      invocations += 1;
-      weighted += weightedInput({
-        inputTokens: numberOf(usage.inputTokens, 0),
-        cacheReadInputTokens: numberOf(usage.cacheReadInputTokens, 0),
-      }, cacheReadWeight);
+function usageTotalsOf(usageRecords) {
+  const tokensByKind = { inputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0 };
+  let tokenCount = 0;
+  let costUsd = 0;
+  let costCount = 0;
+  for (const raw of usageRecords) {
+    const record = jsonObjectOf(raw);
+    if (record === null) continue;
+    let measured = false;
+    for (const key of /** @type {("inputTokens"|"cacheReadInputTokens"|"outputTokens")[]} */ (["inputTokens", "cacheReadInputTokens", "outputTokens"])) {
+      const value = numberOf(record[key], 0);
+      if (typeof record[key] === "number" && Number.isFinite(record[key])) {
+        tokensByKind[key] += value;
+        measured = true;
+      }
+    }
+    if (measured) tokenCount += 1;
+    const cost = typeof record.costUsd === "number" && Number.isFinite(record.costUsd) ? record.costUsd : null;
+    if (cost !== null) {
+      costUsd += cost;
+      costCount += 1;
     }
   }
-  return { weighted, invocations };
+  return { tokensByKind, tokenCount, costUsd: costCount === 0 ? null : costUsd, costCount };
 }
 
 /**
@@ -410,19 +401,6 @@ function laneOf(event) {
 }
 
 /**
- * @param {unknown[]} events
- * @returns {number}
- */
-function countDecisions(events) {
-  let count = 0;
-  for (const raw of events) {
-    const event = jsonObjectOf(raw);
-    if (event !== null && jsonObjectOf(event.budgetDecision) !== null) count += 1;
-  }
-  return count;
-}
-
-/**
  * @param {unknown} value
  * @param {number} fallback
  * @returns {number}
@@ -431,27 +409,13 @@ function numberOf(value, fallback) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-/**
- * Weighted input for one recorded usage, comparable with the live meter and
- * the campaign cap: cache reads count at the campaign `cacheReadWeight`, not
- * raw. The ledger projection above and the runner's budget accounting agree on
- * what a campaign spent because both weigh an invocation here.
- *
- * @param {{inputTokens?: number|null, cacheReadInputTokens?: number|null}|null|undefined} usage
- * @param {number} cacheReadWeight
- * @returns {number}
- */
-export function weightedInput(usage, cacheReadWeight) {
-  return Math.round(((usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0) * cacheReadWeight) * 1000) / 1000;
-}
-
 /** Flags of `runner.mjs metrics`, declared here so the router only names them. */
 /** @type {import("node:util").ParseArgsOptionsConfig} */
 export const METRICS_OPTIONS = { cwd: { type: "string" }, json: { type: "boolean" } };
 
 const RUNS_DIR_NAME = ".runs";
 const RUN_EVENTS_FILE = "events.jsonl";
-const USAGE_LEDGER_FILE = "usage-ledger.json";
+const USAGE_LOG_FILE = "usage.jsonl";
 /** Recorded origin of a run the controller generated to recover a partial effect. */
 const REPAIR_KIND = "repair";
 
@@ -462,7 +426,7 @@ const REPAIR_KIND = "repair";
  *   takeRunIds: string[],
  *   repairRunIds: string[],
  *   events: unknown[],
- *   usageLedger: unknown,
+ *   usageRecords: unknown[],
  *   outbox: unknown[],
  *   journal: unknown[],
  *   preflight: unknown[],
@@ -500,8 +464,8 @@ export function deriveTakeRuns(linkedRunIds, controlState) {
 
 /**
  * Read the recorded sources of one campaign: the transition events and
- * recorded `preflight --json` payload of every linked run, plus the campaign's
- * usage ledger, notification outbox and journal. A missing artefact reads as
+ * recorded `preflight --json` payload of every linked run, plus the per-run
+ * `usage.jsonl` records, the notification outbox and the journal. A missing artefact reads as
  * empty, which the projector reports as a missing measurement and never as a
  * measured zero — a run whose phase start recorded no `preflight.json` leaves
  * the preamble to whatever its dispatches recorded.
@@ -515,9 +479,12 @@ export function readMetricsSources(campaignPath, { runsDir = join(campaignPath, 
   /** @type {unknown[]} */
   const events = [];
   /** @type {unknown[]} */
+  const usageRecords = [];
+  /** @type {unknown[]} */
   const preflight = [];
   for (const runId of campaign.linkedRunIds) {
     for (const record of readJsonlRecords(join(runsDir, runId, RUN_EVENTS_FILE))) events.push(record);
+    for (const record of readJsonlRecords(join(runsDir, runId, USAGE_LOG_FILE))) usageRecords.push(record);
     const payload = readJsonFile(join(runsDir, runId, PREFLIGHT_FILE));
     if (payload !== null) preflight.push(payload);
   }
@@ -526,7 +493,7 @@ export function readMetricsSources(campaignPath, { runsDir = join(campaignPath, 
     runIds: [...campaign.linkedRunIds],
     ...deriveTakeRuns([...campaign.linkedRunIds], readJsonFile(join(campaignPath, CAMPAIGN_STATE_FILE))),
     events,
-    usageLedger: readJsonFile(join(campaignPath, USAGE_LEDGER_FILE)),
+    usageRecords,
     outbox: readNotificationOutbox(campaignPath),
     journal: readJournal(campaignPath),
     preflight,

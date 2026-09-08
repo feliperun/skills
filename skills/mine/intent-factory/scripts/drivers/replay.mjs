@@ -60,12 +60,6 @@ export const replayDriver = {
     }
     const args = ["--recording", resolve(recording)];
     if (options.continuationId) args.push("--continuation", options.continuationId);
-    if (options.maxInvocationTokens !== undefined && options.maxInvocationTokens !== null) {
-      args.push("--max-invocation-tokens", String(options.maxInvocationTokens));
-    }
-    if (options.maxCostUsd !== undefined && options.maxCostUsd !== null) {
-      args.push("--max-cost-usd", String(options.maxCostUsd));
-    }
     if (options.schema || options.schemaPath) args.push("--schema");
     return {
       executable: this.executable(runtime),
