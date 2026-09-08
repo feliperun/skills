@@ -12,6 +12,7 @@
  */
 
 import { spawn as defaultSpawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMacosNotifier } from "./os-macos.mjs";
@@ -26,7 +27,7 @@ export const DEFAULT_BACKOFF_MS = [5_000, 30_000];
 const SUMMARY_CHARS = 200;
 
 /** @typedef {Record<string, unknown>} JsonObject */
-/** @typedef {{type: "node.terminal"|"run.terminal"|"attention", runId: string, campaignId?: string|null, nodeId?: string|null, status?: string|null, attempt?: number|null, errorCode?: string|null, done?: number|null, total?: number|null, dedupeKey?: string|null, runDir?: string|null, costUsd?: number|null}} NotifyEvent */
+/** @typedef {{type: "node.terminal"|"run.terminal"|"attention", runId: string, campaignId?: string|null, nodeId?: string|null, status?: string|null, attempt?: number|null, errorCode?: string|null, done?: number|null, total?: number|null, dedupeKey?: string|null, runDir?: string|null, costUsd?: number|null, eventId?: string}} NotifyEvent */
 /** @typedef {{ok: boolean, error?: string, noTransport?: boolean}} DeliveryResult */
 
 /**
@@ -216,9 +217,14 @@ export class NotifyQueue {
    */
   async _attempt(entry) {
     entry.attempts += 1;
-    const result = await this.deliver(entry.event);
+    // Consumers deduplicate by eventId (the Ford adapter rejects an event without
+    // one), so every delivery carries a stable id derived from the dedupe key.
+    const eventId = /** @type {string|undefined} */ (entry.event.eventId)
+      ?? createHash("sha256").update(entry.event.dedupeKey ?? JSON.stringify(entry.event)).digest("hex");
+    const result = await this.deliver({ ...entry.event, eventId });
     /** @type {JsonObject} */
     const receipt = {
+      eventId,
       type: entry.event.type,
       runId: entry.event.runId ?? null,
       nodeId: entry.event.nodeId ?? null,

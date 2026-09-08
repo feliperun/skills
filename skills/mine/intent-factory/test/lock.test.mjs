@@ -575,9 +575,16 @@ setInterval(() => {}, 1000);
     onInvocation: () => {},
   });
   try {
+    // The fake provider creates the marker before it finishes writing it, so an
+    // existence check alone races the write under parallel load; wait until the
+    // file parses.
     const deadline = Date.now() + 5_000;
-    while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
-    const observed = JSON.parse(readFileSync(marker, "utf8"));
+    let observed = null;
+    while (observed === null && Date.now() < deadline) {
+      try { observed = JSON.parse(readFileSync(marker, "utf8")); } catch { observed = null; }
+      if (observed === null) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(observed, "the fake provider wrote its marker within five seconds");
     assert.equal(observed.notify, null, "INTENT_FACTORY_NOTIFY_BIN must not reach the worker provider");
     assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
     assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "driver env overlay must still apply");

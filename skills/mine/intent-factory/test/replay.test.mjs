@@ -1092,9 +1092,11 @@ test("sealAttempt seals a worktree that holds the ignored .runs result sidecar",
     mkdirSync(join(workspace, ".runs", "results"), { recursive: true });
     writeFileSync(join(workspace, ".runs", "results", "build.json"), "{}\n");
     writeFileSync(join(workspace, "README.md"), "sealed\n");
+    symlinkSync(fixture.repo, join(workspace, "node_modules"));
   });
   assert.equal(sealed.empty, false, "the attempt carries the README change");
   const files = execFileSync("git", ["-C", worktree.path, "show", "--name-only", "--format=", sealed.sha], { encoding: "utf8" }).trim().split("\n");
   assert.ok(files.includes("README.md"));
   assert.ok(!files.some((file) => file.startsWith(".runs/")), "the ignored sidecar is never committed");
+  assert.ok(!files.includes("node_modules"), "the node_modules link is never committed");
 });

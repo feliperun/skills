@@ -126,7 +126,9 @@ export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
   const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs"]);
   if (dirty) {
     execFileSync("git", ["-C", path, "add", "-A", "--", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".runs"], { stdio: "ignore" });
+    // node_modules is linked into the worktree as a symlink, which `node_modules/`
+    // in .gitignore does not match; never let the link into the attempt commit.
+    execFileSync("git", ["-C", path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".runs", "node_modules"], { stdio: "ignore" });
     execFileSync("git", [
       "-C", path,
       "-c", "user.email=runner@example.test",
