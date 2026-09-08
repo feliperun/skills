@@ -14,17 +14,19 @@ import {
 import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   cancelRun,
+  preflightContract,
+  runContract,
+  resumeRun,
+} from "./runner.mjs";
+import {
   detectStalls,
   invocationAlive,
   invocationResult,
   livenessState,
   monitorInvocation,
-  preflightContract,
-  runContract,
-  resumeRun,
   startProcess,
   terminateInvocation,
-} from "./runner.mjs";
+} from "./node.mjs";
 import { processStartToken } from "./lock.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "./backoff.mjs";

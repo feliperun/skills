@@ -1,4 +1,4 @@
-import { normalizeCodexResult, parseVersion, toml } from "./exec-jsonl.mjs";
+import { normalizeCodexResult, parseVersion, toml } from "./protocol.mjs";
 
 /**
  * Bound the Codex harness preamble: a closed-packet worker or a read-only judge

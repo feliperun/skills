@@ -18,9 +18,9 @@ import {
   liveSessionMetrics,
   liveUsage,
   normalizeExecJsonlResult,
-  parseVersion,
   truncateToolOutput,
 } from "../scripts/drivers/exec-jsonl.mjs";
+import { parseVersion } from "../scripts/drivers/protocol.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
 import { DEFAULT_CLAUDE_TOOLS } from "../scripts/drivers/claude.mjs";
 import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/drivers/codex.mjs";

@@ -1,4 +1,4 @@
-import { normalizeAgyResult, parseVersion } from "./exec-jsonl.mjs";
+import { normalizeAgyResult, parseVersion } from "./protocol.mjs";
 
 /**
  * @type {import("./index.mjs").DriverAdapter}

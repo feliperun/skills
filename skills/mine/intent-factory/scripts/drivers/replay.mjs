@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseVersion } from "./exec-jsonl.mjs";
+import { parseVersion } from "./protocol.mjs";
 
 /** Envelope statuses a recording may carry. */
 export const REPLAY_STATUSES = Object.freeze(new Set([

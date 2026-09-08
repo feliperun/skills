@@ -1,4 +1,4 @@
-import { normalizeClaudeResult, parseVersion } from "./exec-jsonl.mjs";
+import { normalizeClaudeResult, parseVersion } from "./protocol.mjs";
 import { hookSettings } from "../tool-policy-hook.mjs";
 import { claudePreambleArgs } from "./claude.mjs";
 

@@ -16,15 +16,14 @@ import {
   readLock,
 } from "../scripts/lock.mjs";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
+import { resumeRun, runContract } from "../scripts/runner.mjs";
 import {
   detectStalls,
   invocationAlive,
   monitorInvocation,
-  resumeRun,
-  runContract,
   startProcess,
   terminateInvocation,
-} from "../scripts/runner.mjs";
+} from "../scripts/node.mjs";
 import { fixture, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
 // A pid the kernel will not hand out while the test runs: its holder is dead.
