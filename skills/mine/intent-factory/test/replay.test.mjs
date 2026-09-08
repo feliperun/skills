@@ -1112,3 +1112,21 @@ test("preflight --json measures the worker preamble per runtime", async () => {
     "the indicator is the per-runtime measurement preflight reported",
   );
 });
+
+test("sealAttempt seals a worktree that holds the ignored .runs result sidecar", () => {
+  // Every real worker writes its result into the attempt-local `.runs/results`
+  // sidecar, and every execution repository ignores `.runs/`. Naming the
+  // sidecar through an exclude pathspec made `git add` exit 1 with
+  // advice.addIgnoredFile, so no non-empty attempt could ever be sealed.
+  const fixture = integrationFixture("seal-ignored-sidecar");
+  const { sealed, worktree } = sealFixtureAttempt(fixture, "build", 1, (workspace) => {
+    writeFileSync(join(workspace, ".gitignore"), ".runs/\n");
+    mkdirSync(join(workspace, ".runs", "results"), { recursive: true });
+    writeFileSync(join(workspace, ".runs", "results", "build.json"), "{}\n");
+    writeFileSync(join(workspace, "README.md"), "sealed\n");
+  });
+  assert.equal(sealed.empty, false, "the attempt carries the README change");
+  const files = execFileSync("git", ["-C", worktree.path, "show", "--name-only", "--format=", sealed.sha], { encoding: "utf8" }).trim().split("\n");
+  assert.ok(files.includes("README.md"));
+  assert.ok(!files.some((file) => file.startsWith(".runs/")), "the ignored sidecar is never committed");
+});

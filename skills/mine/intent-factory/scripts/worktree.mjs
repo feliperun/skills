@@ -85,9 +85,16 @@ export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt }) 
  * @returns {SealedAttempt}
  */
 export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
+  // The attempt-local `.runs` result sidecar must never enter the attempt
+  // commit. Naming it through an exclude pathspec makes `git add` exit 1 with
+  // advice.addIgnoredFile as soon as the sidecar exists in a repository that
+  // ignores `.runs/` (every real worker writes it), so stage everything and
+  // unstage the sidecar afterwards; that also covers a repository that does
+  // not ignore it.
   const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs"]);
   if (dirty) {
-    execFileSync("git", ["-C", path, "add", "-A", "--", ".", ":(exclude).runs"], { stdio: "ignore" });
+    execFileSync("git", ["-C", path, "add", "-A", "--", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".runs"], { stdio: "ignore" });
     execFileSync("git", [
       "-C", path,
       "-c", "user.email=runner@example.test",
