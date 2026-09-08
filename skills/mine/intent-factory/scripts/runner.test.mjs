@@ -17,7 +17,7 @@ import { invocationAlive, invocationResult, processStartToken, quotaResetSchedul
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts } from "./backoff.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
-import { runRefName } from "./worktree.mjs";
+import { attemptWorktreePath, runRefName } from "./worktree.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
 import { getDriver } from "./drivers/index.mjs";
 import { deriveBudgetDecision } from "./budget.mjs";
@@ -5865,7 +5865,7 @@ test("automatic rotation turns a fat worker session over at 80 observed turns", 
   assert.deepEqual(runs.map((run) => [run.handoffTurn, run.freshTurn]), [[false, false], [true, false], [false, true]]);
   assert.equal(runs[1].resume, true, "the handoff turn resumes the rotated session");
   assert.equal(runs[2].resume, false, "the fresh session does not resume anything");
-  const handoff = readFileSync(join(result.runDir, "rotations", "build.1.1.md"), "utf8");
+  const handoff = readFileSync(join(attemptWorktreePath(result.runDir, "rotation-turns-run", "build", 1), ".runs", "rotations", "build.1.1.md"), "utf8");
   assert.ok(Buffer.byteLength(handoff, "utf8") <= ROTATION_HANDOFF_MAX_BYTES, "the materialized handoff never exceeds 16 KiB");
   assert.match(handoff, /## Handoff/u);
   assert.match(handoff, /- done: fat session work/u);

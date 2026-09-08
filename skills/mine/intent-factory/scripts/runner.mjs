@@ -4340,7 +4340,6 @@ async function applyInvalidWorkerResult(contract, node, state, runDir, running, 
     });
     return;
   }
-  state.gate = verdict;
   const error = { code: "protocol_failure", message: excerpt(message) ?? "worker result did not match the structured result protocol" };
   /** @type {ProviderEnvelope} */
   const envelope = {
@@ -4351,6 +4350,10 @@ async function applyInvalidWorkerResult(contract, node, state, runDir, running, 
     costUsd: null,
     error,
   };
+  // A failover hop is a fresh chance on a different provider, not a rejection
+  // of the work to fix: `state.gate` must not carry this synthetic verdict
+  // into the next dispatch, or the generic retry prompt would frame it as a
+  // quality gate rejection instead of a plain new attempt.
   const routed = handleProviderExhaustion(contract, runDir, node, state, "worker", envelope, state.runtime?.id ?? null, lease, states, campaignPath, { kind: "failover", reason: "protocol_failure" });
   if (routed) {
     process.stdout.write(`[worker-result] ${node.id} protocol failure · failing over\n`);
