@@ -66,6 +66,42 @@ candidate evidence. Recovery handles the conditional ref move, the done-state
 write, worktree removal, and terminal event as separate idempotent effects.
 This includes a candidate whose SHA equals the previous run-ref tip.
 
+## Controller lock and takeover
+
+One controller drives a run at a time, holding `<run-dir>/controller.lock`:
+`{pid, processStartToken, startedAt, hostname}`. Acquisition is an exclusive
+create; there is no TTL and nothing to renew, so a lock stays valid for as
+long as its holder is alive, however long that takes. A contender that finds
+the file held reads it and treats it as stale only when it can prove the
+holder dead — the recorded pid is gone, or its process start token no longer
+matches the live process at that pid (the pid was recycled). Anything short
+of that proof is `controller_active`, and the contender exits without
+touching the run: two controllers must never dispatch the same node.
+
+Takeover is a capture-and-verify sequence, not a delete-and-write: the
+contender renames the lock file aside (one atomic step, so a live successor
+that installed in the gap is never destroyed), re-checks that the captured
+record is still stale, and only then discards it and installs its own record.
+If the captured record turns out to be live after all — a second contender
+raced it and won — the capture is handed straight back under its original
+name and this contender's attempt fails.
+
+Worker, judge and verification children run detached in their own process
+group, so a dead controller's dispatches keep running orphaned unless
+something reaps them. Before `resume` dispatches anything new, its recovery
+pass walks every node that was `running`: past-deadline or otherwise unusable
+invocations are terminated by process group (`SIGTERM`, then `SIGKILL`) —
+the same termination `cancel` uses — and only once that pass completes does
+the scheduler loop start handing out new work. A live invocation still inside
+its deadline is adopted instead of killed: the pass waits for it and reads
+its completed result rather than throwing away work a `resume` merely
+happened to interrupt.
+
+`cancel <run-dir>` takes the same path deliberately: it signals a live
+controller to death first, so by the time it calls the same takeover its own
+lock acquisition is never waiting on an expiry — the lock is already stale
+the instant the pid is gone.
+
 ## Runtime discovery
 
 `doctor --discover [--json]` performs mutation-free driver discovery and

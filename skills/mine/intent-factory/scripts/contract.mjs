@@ -82,7 +82,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{code: string, message: string, exhaustedUntil?: string|null}} SnapshotError */
 /** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} Usage */
 /** @typedef {ValidatedRuntime & {id: string, capabilities: import("./drivers/index.mjs").DriverCapabilities}} RuntimeSnapshot */
-/** @typedef {import("./supervisor.mjs").Invocation} Invocation */
+/** @typedef {import("./runner.mjs").Invocation} Invocation */
 /** @typedef {import("./verification.mjs").VerificationCommandResult} VerificationCommandResult */
 /** @typedef {import("./verification.mjs").VerificationAttempt} VerificationAttempt */
 /** @typedef {{passed: boolean, commands?: VerificationCommandResult[], completed?: boolean, error?: string, attempts?: VerificationAttempt[]}} VerificationState */
@@ -99,7 +99,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
 /** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null}} WorktreeState */
 /** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
-/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, holderId?: string, leaseGeneration?: number, leaseAcquiredAt?: string, leaseRenewedAt?: string, leaseExpiresAt?: string, identityWarnings?: string[]}} RunMetadata */
+/** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, identityWarnings?: string[]}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number}} EventRecord */
 
 /**
@@ -297,14 +297,13 @@ export function hashPacket(packet) {
 
 /**
  * @param {JsonObject} value
- * @param {{requireLease?: boolean, requireSourceIdentity?: boolean}} options
+ * @param {{requireSourceIdentity?: boolean}} options
  * @returns {RunMetadata}
  */
 export function validateRunMetadata(value, options = {}) {
   assertObject(value, "run metadata");
   rejectUnknown(value, new Set([
     "schemaVersion", "contractVersion", "pid", "processStartToken", "startedAt", "sourceIdentity",
-    "holderId", "leaseGeneration", "leaseAcquiredAt", "leaseRenewedAt", "leaseExpiresAt",
     "identityWarnings", "integrationRef",
   ]), "run metadata");
   validateMetadata(value, "run metadata");
@@ -323,7 +322,6 @@ export function validateRunMetadata(value, options = {}) {
       }
     }
   }
-  if (options.requireLease) validateLeaseMetadata(value);
   if (options.requireSourceIdentity) validateCompleteSourceIdentity(/** @type {JsonObject} */ (value.sourceIdentity));
   return /** @type {RunMetadata} */ (value);
 }
@@ -618,17 +616,6 @@ export function captureSourceIdentity(contract, driverVersions = {}, options = {
     packetHashes: Object.fromEntries(contract.nodes.map((node) => [node.id, node.packetHash])),
     driverVersions,
   }, "run source identity", { kind: "run", contractId: contract.id, campaignId: contract.campaignId });
-}
-
-/**
- * @param {JsonObject} value
- */
-function validateLeaseMetadata(value) {
-  requireString(value.holderId, "run metadata.holderId");
-  positiveInteger(value.leaseGeneration, "run metadata.leaseGeneration");
-  for (const key of ["leaseAcquiredAt", "leaseRenewedAt", "leaseExpiresAt"]) {
-    requireTimestamp(value[key], `run metadata.${key}`);
-  }
 }
 
 /**

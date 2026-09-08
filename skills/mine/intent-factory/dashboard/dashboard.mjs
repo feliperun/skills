@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { campaignsDir, discoverCampaigns } from "../scripts/campaign.mjs";
 import { readHeartbeat } from "../scripts/heartbeat.mjs";
-import { leaseHealthy, readLease } from "../scripts/store.mjs";
+import { lockPath, lockStale, readLock } from "../scripts/lock.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OVERVIEW_TAIL_BYTES = 32 * 1024;
@@ -233,7 +233,7 @@ function runDetailCached(runsDir, runId) {
 }
 
 /**
- * Cheap fingerprint of everything runDetail reads: metadata, contract, lease,
+ * Cheap fingerprint of everything runDetail reads: metadata, contract, lock,
  * node snapshots and the events journal.
  *
  * @param {string} runDir
@@ -243,7 +243,7 @@ function runSignature(runDir) {
   return fileSignature([
     join(runDir, "run.json"),
     join(runDir, "contract.json"),
-    join(runDir, "controller-lease.json"),
+    lockPath(runDir),
     join(runDir, "events.jsonl"),
     ...(existsSync(join(runDir, "nodes")) ? readdirSync(join(runDir, "nodes")).filter((name) => name.endsWith(".json")).sort().map((name) => join(runDir, "nodes", name)) : []),
   ]);
@@ -290,7 +290,7 @@ export function campaignSignature(runsDir, campaignId) {
 }
 
 /**
- * Raw run detail: contract plan (tolerant), lease health, node snapshots
+ * Raw run detail: contract plan (tolerant), controller status, node snapshots
  * projected to what the page shows, and the events tail. A run whose files
  * are unreadable is still listed, flagged `corrupt`.
  *
@@ -310,8 +310,11 @@ function runDetail(runsDir, runId) {
   const eventsTail = tailJsonl(join(runDir, "events.jsonl"), EVENTS_TAIL_ENTRIES).reverse();
   const lastEvent = eventsTail[0];
   const terminal = nodes.length > 0 && nodes.every((node) => TERMINAL.has(node.status));
-  let lease = false;
-  try { lease = leaseHealthy(readLease(runDir)); } catch { lease = false; }
+  let controllerActive = false;
+  try {
+    const lock = readLock(runDir);
+    controllerActive = Boolean(lock) && !/** @type {{invalid?: true}} */ (lock).invalid && !lockStale(lock);
+  } catch { controllerActive = false; }
   const totals = nodes.reduce((acc, node) => ({
     inputTokens: acc.inputTokens + (node.usage?.inputTokens ?? 0),
     outputTokens: acc.outputTokens + (node.usage?.outputTokens ?? 0),
@@ -325,7 +328,7 @@ function runDetail(runsDir, runId) {
     campaignId: contract.campaignId ?? null,
     summary: Object.entries(counts).map(([status, count]) => `${count} ${status}`).join(" · "),
     terminal,
-    leaseHealthy: lease,
+    controllerActive,
     usagePolicy: contract.usagePolicy ?? false,
     maxInputTokens: contract.maxInputTokens ?? null,
     totals,

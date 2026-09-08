@@ -54,12 +54,12 @@ its own proof: a verification `command`, a workspace `path`, or `judgment`.
 Proofs gate before any judge runs, so a fully mechanical node costs no judge.
 Contract-level `finalVerification` runs on the phase-terminal node.
 
-**Detach and supervise.** `run --detach <contract.json>`, then
-`supervise --detach <run-dir>`: plain Node processes that outlive this session,
-the supervisor re-spawning `resume --detach` whenever the controller dies
-before the run is terminal. `maxParallel` above one dispatches every ready
-node concurrently, each in its own attempt worktree; integration stays
-serialized. The target repo must ignore `.runs/`.
+**Detach and resume.** `run --detach <contract.json>` forks a controller that
+outlives this session; if it dies before the run is terminal, the next
+`resume --detach <run-dir>` takes over its stale lock and adopts or restarts
+whatever it left running. `maxParallel` above one dispatches every ready node
+concurrently, each in its own attempt worktree; integration stays serialized.
+The target repo must ignore `.runs/`.
 
 **Never wait inside a turn.** No `sleep`/`while` loops, no repeated `status`
 calls, no watched background jobs — every tool call re-sends the whole session
@@ -104,7 +104,7 @@ resolved `vendor`. Details: [contract.md](references/contract.md).
 - Claude `bypassPermissions` only in a repository-scoped, recoverable
   environment; otherwise `acceptEdits`, letting denials become `blocked`.
 - Never overwrite an existing run directory; choose a new run id.
-- One controller lease per run directory; one lease per supervisor.
+- One controller lock per run directory.
 - Treat `STATUS.md` and node JSON as state; logs are diagnostics.
 - Stop and ask before destructive production, data, merge, deployment, or
   credential operations, even if a worker proposes them.

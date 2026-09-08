@@ -13,7 +13,6 @@
  * be tested without a run directory, a lease, or a provider.
  */
 import { nextHop, nextSynthesizedRuntime, synthesizedChain } from "./failover.mjs";
-import { latestTimeoutSec, quotaResetSchedule } from "./supervisor.mjs";
 import { nextSameTierRuntime } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
@@ -204,6 +203,61 @@ export function classifyTransition(envelope, options = {}) {
   const deadlineMs = deadline instanceof Date ? deadline.getTime() : typeof deadline === "number" ? deadline : Date.parse(String(deadline));
   if (Number.isFinite(deadlineMs) && at >= deadlineMs) return { kind: "failover", reason: "network_backoff" };
   return { kind: "reset", at: new Date(at).toISOString(), reason: "network_backoff" };
+}
+
+/**
+ * @param {Record<string, unknown>|undefined} state
+ * @param {number} fallback
+ * @returns {number}
+ */
+export function latestTimeoutSec(state, fallback) {
+  const overrides = /** @type {unknown[]} */ (state?.executionOverrides ?? []);
+  const override = [...overrides].reverse().find((item) =>
+    item && typeof item === "object" &&
+    /** @type {Record<string, unknown>} */ (item).kind === "timeout" &&
+    typeof /** @type {Record<string, unknown>} */ (item).timeoutSec === "number" &&
+    Number.isFinite(/** @type {Record<string, unknown>} */ (item).timeoutSec),
+  );
+  return override ? /** @type {number} */ (/** @type {Record<string, unknown>} */ (override).timeoutSec) : fallback;
+}
+
+/**
+ * Decide what a worker exhaustion envelope buys us: a wait or a failover.
+ *
+ * A provider that announces when its quota resets is telling us the cheapest
+ * possible recovery — keep the runtime the node already warmed and retry at
+ * that instant, spending nothing in between. A reset is only worth waiting on
+ * inside a window bounded at both ends. It must land strictly after now: a
+ * reset already in the past buys no wait at all, and honouring one would park
+ * the phase on a zero-length backoff and re-invoke the same exhausted runtime
+ * immediately, so a provider that keeps echoing a stale instant would hot-loop
+ * on it. It must also land strictly before the node's own deadline; a reset at
+ * or after it would have the node sit out its whole budget and die waiting.
+ * Outside that window — and for an envelope with no announced reset, or an
+ * unparseable one — the caller takes its declared or synthesized failover edge.
+ *
+ * @param {unknown} envelope provider envelope for the exhausted invocation
+ * @param {string|number|Date|null|undefined} deadline node wall-clock deadline
+ * @param {number} [now] epoch ms the reset is judged against
+ * @returns {{kind: "reset", at: string}|{kind: "failover"}}
+ */
+export function quotaResetSchedule(envelope, deadline, now = Date.now()) {
+  const record = /** @type {Record<string, unknown>} */ (envelope ?? {});
+  const error = /** @type {Record<string, unknown>} */ (record.error ?? {});
+  const resetAt = epochMs(record.resetAt ?? error.resetAt);
+  if (resetAt === null || resetAt <= now) return { kind: "failover" };
+  const deadlineMs = epochMs(deadline);
+  if (deadlineMs !== null && resetAt >= deadlineMs) return { kind: "failover" };
+  return { kind: "reset", at: new Date(resetAt).toISOString() };
+}
+
+/** @param {unknown} value @returns {number|null} */
+function epochMs(value) {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /** The node's wall-clock deadline: when its own timeout budget runs out. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @returns {string|null} */

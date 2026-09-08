@@ -17,8 +17,6 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { captureEntry, claimGenerationFence, discardEntry, leaseAdoption, restoreEntry } from "./lease-liveness.mjs";
 
-export const LEASE_FILE = "controller-lease.json";
-export const SUPERVISOR_LEASE_FILE = "supervisor-lease.json";
 export const BOOTSTRAP_FILE = "bootstrap.json";
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 const FILE_LOCK_TTL_MS = 5_000;
@@ -170,22 +168,6 @@ export function fsyncDirectory(path) {
  * @param {string} runDir
  * @returns {string}
  */
-export function leasePath(runDir) {
-  return join(runDir, LEASE_FILE);
-}
-
-/**
- * @param {string} runDir
- * @returns {string}
- */
-export function supervisorLeasePath(runDir) {
-  return join(runDir, SUPERVISOR_LEASE_FILE);
-}
-
-/**
- * @param {string} runDir
- * @returns {string}
- */
 export function bootstrapPath(runDir) {
   return join(runDir, BOOTSTRAP_FILE);
 }
@@ -238,22 +220,6 @@ function isBootstrapAttemptName(name) {
 }
 
 /**
- * @param {string} runDir
- * @returns {ReadLeaseResult}
- */
-export function readLease(runDir) {
-  return readLeaseFile(leasePath(runDir));
-}
-
-/**
- * @param {string} runDir
- * @returns {ReadLeaseResult}
- */
-export function readSupervisorLease(runDir) {
-  return readLeaseFile(supervisorLeasePath(runDir));
-}
-
-/**
  * @param {string} path
  * @returns {ReadLeaseResult}
  */
@@ -288,24 +254,6 @@ export function leaseHealthy(lease, now = Date.now()) {
     !Number.isNaN(Date.parse(/** @type {string} */ (/** @type {Record<string, unknown>} */ (lease).renewedAt))) &&
     Date.parse(/** @type {string} */ (/** @type {Record<string, unknown>} */ (lease).expiresAt)) > now,
   );
-}
-
-/**
- * @param {string} runDir
- * @param {LeaseOptions} options
- * @returns {ReturnType<typeof createLeaseHandle>}
- */
-export function acquireControllerLease(runDir, options = {}) {
-  return acquireLease(runDir, { requireHolderDeath: true, ...options, fileName: LEASE_FILE });
-}
-
-/**
- * @param {string} runDir
- * @param {LeaseOptions} options
- * @returns {ReturnType<typeof createLeaseHandle>}
- */
-export function acquireSupervisorLease(runDir, options = {}) {
-  return acquireLease(runDir, { ...options, fileName: SUPERVISOR_LEASE_FILE });
 }
 
 /**

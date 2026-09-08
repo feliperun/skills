@@ -80,10 +80,10 @@ amount with the remaining campaign budget, and usage is persisted even when an
 invocation dies by kill, timeout, stall, or scope-gate failure; no amount is
 fabricated or promoted by a handoff.
 
-Intent, settlement, and capsule records are written only by the lease-holding
-controller, so the handoff between controllers is serialized: a second
-controller is rejected while a healthy lease is held, and `resume` takes over
-the lease before recovering any operation.
+Intent, settlement, and capsule records are written only by the controller
+holding the run's lock, so the handoff between controllers is serialized: a
+second controller is rejected while a live lock is held, and `resume` takes
+over the lock before recovering any operation.
 
 Drivers use a narrow protocol: one request carries the closed task packet, the
 intent identifier, an optional portable capsule, and an optional explicit
@@ -236,23 +236,20 @@ the public contract must not depend on them.
    repository — copying a whole graph that re-runs finished work is a real
    mistake; generate follow-up contracts by pruning done nodes.
 
-   Arm the built-in supervisor alongside every detached run:
+   If the controller later dies before the run is terminal, resume it:
 
    ```bash
-   node <skill-dir>/scripts/runner.mjs supervise --detach <run-dir> [--interval 30]
+   node <skill-dir>/scripts/runner.mjs resume --detach <run-dir>
    ```
 
-   The supervisor polls the run directory and, whenever the controller process
-   is gone while the run is not terminal, spawns `resume --detach` itself. It
-   exits 0 when every node is terminal. One supervisor per run; a short lease
-   prevents two supervisors from double-resuming.
-
-   `supervise` is a plain Node process with no dependency on the orchestrator
-   or any agent runtime. Schedule it under whatever host scheduler survives
-   this session — launchd, cron, a CI job, or another agent — and it keeps
-   resuming the run until completion. It is idempotent, so a scheduler may
-   re-invoke it freely: a second invocation exits while a healthy supervisor
-   lease is held.
+   `resume --detach` acquires the run's controller lock, taking over the dead
+   controller's stale lock once it can prove the pid is gone or was recycled;
+   it then reaps whatever that controller left running before dispatching
+   anything new. It is idempotent and safe to re-invoke: a live controller's
+   lock is never taken over, so a second invocation while the run is healthy
+   simply refuses and exits. Schedule it under whatever host scheduler
+   survives this session — launchd, cron, a CI job, or another agent — with no
+   dependency on the orchestrator or any agent runtime.
 
    Without `--detach`, the controller is a child of the invoking session and dies with it, stranding any running node as an orphan until a later `resume`. Use `resume --detach <run-dir>` to restart an interrupted run the same way.
 10. Report the run directory and end the turn. Do not read worker logs during normal orchestration.
@@ -292,8 +289,8 @@ the public contract must not depend on them.
 
    To stop a run and terminate every recorded provider and verification
    process, use `cancel <run-dir>`. It signals the controller, waits for
-   confirmation of its death, takes over a stale lease if needed, and marks the
-   run terminal. `cancel` cannot act on a lease held by the same process that
+   confirmation of its death, takes over its now-stale lock, and marks the run
+   terminal. `cancel` cannot act on a lock held by the same process that
    invokes it.
 
 12. When a run finishes (or at any point) and cost or effort matters, aggregate per-node attempts, revisions, runtimes, and tokens:
@@ -497,9 +494,9 @@ liveness rule.
   and stage explicit paths.
 - Use Claude's `bypassPermissions` only in a repository-scoped, recoverable environment with no production write access. Otherwise keep `acceptEdits` and let denied operations become `blocked`.
 - Refuse to overwrite an existing run directory. Choose a new run id instead.
-- One controller lease per run directory and one supervisor lease per
-  supervisor: a second controller or supervisor is rejected while a healthy
-  lease is held, so simultaneous `resume` calls cannot double-run a node.
+- One controller lock per run directory: a second controller is rejected
+  while a live lock is held, so simultaneous `resume` calls cannot double-run
+  a node.
 - Treat `STATUS.md` and node JSON as state; treat logs as diagnostic artifacts.
 - Stop and ask before destructive production, data, merge, deployment, or credential operations even if a worker proposes them.
 

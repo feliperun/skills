@@ -141,10 +141,10 @@ amount is fabricated. Usage is a reporting record only, in `<run-dir>/usage.json
 — one line per worker or judge invocation with its tokens by kind and cost
 provenance — and no control path reads it to gate work.
 
-All intent and settlement writes happen under the controller lease, so a
+All intent and settlement writes happen under the controller lock, so a
 takeover between controllers is serialized: a second controller is rejected
-while a healthy lease is held, and `resume` takes over the lease before
-recovering any operation.
+while a live lock is held, and `resume` takes over the lock before recovering
+any operation.
 
 ## Driver protocol
 
@@ -729,11 +729,12 @@ with it.
 The orchestrator session never waits. No `while`/`sleep` status loops, no
 repeated `status` calls, no watched background processes: every tool call
 re-sends the whole session context, so a polling loop pays the orchestrator's
-full context price on every tick while the controller and supervisor — plain
-Node processes — do the same watching for free. Report the run directory, arm
-the supervisor, and end the turn. Under a harness that re-invokes the session
-continuously (a goal, an autonomous loop, a scheduler), check status at most
-once per invocation and act only on terminal states.
+full context price on every tick while the controller — a plain Node process
+— does the same watching for free. Report the run directory and end the turn;
+if the controller later dies, `resume --detach` takes over the stale lock and
+adopts or restarts whatever it left running. Under a harness that re-invokes
+the session continuously (a goal, an autonomous loop, a scheduler), check
+status at most once per invocation and act only on terminal states.
 
 One contract covers one whole approved plan step as a batched multi-node DAG
 (`dependsOn`), authored in a single turn. Serial single-node contracts keep the
@@ -787,19 +788,26 @@ The stored `contract.json` round-trips through validation on resume: the
 internal disabled-gate shape `{"enabled": false}` stays disabled, so a node
 without a gate is never silently re-gated by a resume.
 
-## Leases
+## Controller lock
 
-The run directory holds `controller-lease.json` (and `supervisor-lease.json`
-for the supervisor). A lease records holder id, pid, process start token, and
-an expiry; the controller renews it on a short TTL while it works. A second
-controller or supervisor is rejected while a healthy lease is held, so
-simultaneous `resume` calls cannot double-run a node. `STATUS.md` treats a
-`running` node as an orphan when the lease is missing, expired, or invalid —
-the process is gone, so the node is not live work. `cancel` takes over a stale
-lease after confirming the previous controller is dead. The lease also
-serializes the handoff: intents, settlements, and node transitions are made
-only by the lease holder, so two controllers cannot double-run or
-double-settle a node.
+The run directory holds `controller.lock`: pid, process start token, when
+the holder started, and its hostname. There is no TTL and nothing to renew —
+a lock stays valid for as long as its holder is alive, however long that
+takes. A second `resume` (or `run`) is rejected while a live lock is held, so
+simultaneous invocations cannot double-run a node. A contender treats the
+lock as stale only once it can prove the holder dead: the recorded pid is
+gone, or its process start token no longer matches (the pid was recycled).
+`STATUS.md` treats a `running` node as an orphan whenever the lock is
+missing, stale, or invalid — the controller is gone, so the node is not live
+work. Before a takeover dispatches anything, `resume`'s recovery pass
+terminates every recorded provider and verification process for each
+formerly-running node (the same list `cancel` uses) and waits for it to
+exit, so a detached invocation the dead controller lost track of is reaped
+before any new work starts. `cancel` takes over a stale lock after
+confirming the previous controller is dead. The lock also serializes the
+handoff: intents, settlements, and node transitions are made only by the
+lock holder, so two controllers cannot double-run or double-settle a node.
+See [operations.md](operations.md) for the takeover sequence in detail.
 
 ## Environment doctor
 
@@ -818,19 +826,20 @@ the check. Exit code 0 means every check passed. `--json` prints
 `cancel <run-dir>` writes `cancel.request.json`, terminates the controller and
 every recorded provider and verification process, and marks the run terminal.
 A live controller receives `SIGTERM`, then `SIGKILL` if it does not die within
-two seconds, and cancellation waits for the lease to expire before taking it
-over. Running verification attempts are recorded as canceled with a `SIGTERM`
-signal, and any node that is not already terminal is transitioned to `canceled`
-instead of being left `running`. Cancel cannot take over a lease held by the
-process that invokes it.
+two seconds; once it is dead its lock is stale by construction, so cancel takes
+it over immediately, with no expiry to wait out. Running verification attempts
+are recorded as canceled with a `SIGTERM` signal, and any node that is not
+already terminal is transitioned to `canceled` instead of being left `running`.
+Cancel cannot take over a lock held by the process that invokes it.
 
 ## JSON status and report
 
 `status --json <run-dir>` and `report --json <run-dir>` emit stable
 `schemaVersion: 1` payloads for streaming monitors: run id, contract and
-campaign ids, lease health, per-node status/phase/runtime/attempt/revisions,
-and — for report — per-node and total token usage. They never render or write
-`STATUS.md`. `events.jsonl` remains the append-only transition stream.
+campaign ids, controller lock state (`active`, `stale`, or `none`), per-node
+status/phase/runtime/attempt/revisions, and — for report — per-node and total
+token usage. They never render or write `STATUS.md`. `events.jsonl` remains
+the append-only transition stream.
 
 ## Campaigns
 

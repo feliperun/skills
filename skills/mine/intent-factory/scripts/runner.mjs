@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   closeSync,
+  fsyncSync,
   openSync,
   readSync,
   statSync,
@@ -14,6 +15,8 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
+  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -60,7 +63,7 @@ import {
   probeRuntime,
   providerCommand,
 } from "./drivers/index.mjs";
-import { extractJson, liveUsage, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
+import { extractJson, liveUsage, SessionMetricsParser, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
 import {
   addRuntimeRequirement,
   failoverTargets,
@@ -72,6 +75,7 @@ import {
   buildRouting,
   classifyTransition,
   isRepairable,
+  latestTimeoutSec,
   networkBackoffAttempts,
   networkTransition,
   nodeDeadlineAt,
@@ -93,32 +97,22 @@ import {
 } from "./contract.mjs";
 import {
   appendJsonl,
-  acquireControllerLease,
-  acquireSupervisorLease,
   bootstrapAckPath,
   bootstrapAttemptPath,
   bootstrapPath,
   cleanupBootstrapAttempts,
-  LeaseLostError,
-  leaseHealthy,
   readJson,
-  readLease,
-  readSupervisorLease,
   writeJsonAtomic,
   writeTextAtomic,
 } from "./store.mjs";
 import {
-  detectStalls,
-  invocationAlive,
-  invocationResult,
-  latestTimeoutSec,
-  monitorInvocation,
+  acquire as acquireLock,
+  LockBusyError,
+  LockLostError,
+  pidAlive,
   processStartToken,
-  runProcessAlive,
-  startProcess,
-  terminateInvocation,
-  terminateProcess,
-} from "./supervisor.mjs";
+  readLock,
+} from "./lock.mjs";
 import {
   captureWorkspaceSnapshot,
   captureWorkspaceScope,
@@ -130,7 +124,7 @@ import {
 import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "./scope-findings.mjs";
 import { finalVerificationCommands } from "./final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "./worker-result.mjs";
-import { readJournal, registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
+import { registerRun, renderHandoff, renderRunHandoff, resolveCampaign } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { contractCli, validateContractFile } from "./contract-cli.mjs";
 import {
@@ -139,17 +133,15 @@ import {
   planResumeRetry,
   renderPreviousAttemptSection,
 } from "./retry.mjs";
-import { LIVENESS_STALE_SEC, campaignIdOf, checkRunLiveness } from "./campaign-autonomy.mjs";
-import { bootstrapFailureMatchesChild, bootstrapMatchesChild, leaseAdoption, sameProcessStartToken, validBootstrapNonce } from "./lease-liveness.mjs";
+import { campaignIdOf } from "./campaign-autonomy.mjs";
+import { bootstrapFailureMatchesChild, bootstrapMatchesChild, sameProcessStartToken, validBootstrapNonce } from "./lease-liveness.mjs";
 import {
   CAMPAIGN_PROGRESS_TYPE,
-  drainNotificationsSafely,
   notifyCampaign,
-  readNotificationOutbox,
   terminalErrorCode,
 } from "./outbox.mjs";
 import { projectEvent } from "./events.mjs";
-import { deriveGovernanceMetrics, LIVENESS_JOURNAL_TYPE, recordLiveness, writeGovernanceMetrics } from "./heartbeat.mjs";
+import { recordLiveness } from "./heartbeat.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./metrics.mjs";
 import {
   attemptWorktreePath,
@@ -174,11 +166,8 @@ import { integrateAttempt, recoverIntegrations } from "./integrate.mjs";
 /** @typedef {import("./contract.mjs").SnapshotError} SnapshotError */
 /** @typedef {import("./contract.mjs").BoundedScope} BoundedScope */
 /** @typedef {import("./verification.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
-/** @typedef {import("./store.mjs").LeaseRecord} LeaseRecord */
-/** @typedef {ReturnType<typeof acquireControllerLease>} LeaseHandle */
-/** @typedef {import("./supervisor.mjs").Job} Job */
-/** @typedef {import("./supervisor.mjs").Invocation} Invocation */
-/** @typedef {import("./supervisor.mjs").InvocationProbe} InvocationProbe */
+/** @typedef {import("./lock.mjs").LockRecord} LockRecord */
+/** @typedef {ReturnType<typeof acquireLock>} LockHandle */
 /** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
 /** @typedef {import("./drivers/index.mjs").ProbeResult} ProbeResult */
 /** @typedef {import("./drivers/index.mjs").ProviderEnvelope} ProviderEnvelope */
@@ -210,6 +199,585 @@ function errorCode(error) {
  */
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+const DEFAULT_GRACE_MS = 2_000;
+const GATE_SCRIPT = String.raw`
+import { existsSync, readFileSync, statSync, openSync, closeSync, readSync, writeSync } from "node:fs";
+import { spawn } from "node:child_process";
+const config = JSON.parse(readFileSync(process.env.INTENT_FACTORY_GATE_CONFIG, "utf8"));
+const releasePath = process.env.INTENT_FACTORY_GATE_RELEASE;
+const parentPid = Number(process.env.INTENT_FACTORY_GATE_PARENT_PID);
+const parentToken = process.env.INTENT_FACTORY_GATE_PARENT_TOKEN || null;
+const maxLogBytes = 512 * 1024;
+function startToken(pid) {
+  if (process.platform !== "linux" || !pid) return null;
+  try {
+    const stat = readFileSync("/proc/" + pid + "/stat", "utf8").trim();
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+  } catch { return null; }
+}
+function parentAlive() {
+  try { process.kill(parentPid, 0); } catch (error) { return error.code === "EPERM"; }
+  return !parentToken || process.platform !== "linux" || startToken(parentPid) === parentToken;
+}
+let provider = null;
+let inputEnded = config.promptTransport !== "stdin";
+const pendingInput = [];
+if (config.promptTransport === "stdin") {
+  process.stdin.on("data", (chunk) => {
+    if (provider) provider.stdin.write(chunk);
+    else pendingInput.push(chunk);
+  });
+  process.stdin.on("end", () => {
+    inputEnded = true;
+    if (provider) provider.stdin.end();
+  });
+}
+function killGroup(signal) {
+  try { process.kill(-process.pid, signal); } catch {}
+}
+function stopProvider() {
+  try { provider?.kill("SIGTERM"); } catch {}
+  setTimeout(() => killGroup("SIGKILL"), 100).unref();
+}
+// Providers write directly into the log files: a provider with non-blocking
+// stdout (EAGAIN on a full pipe) must never die because the controller's event
+// loop is briefly busy. Cap the files to the last maxLogBytes afterwards.
+function capLog(path, preservePrefix = false) {
+  try {
+    const size = statSync(path).size;
+    if (size <= maxLogBytes) return;
+    if (preservePrefix) {
+      const prefixLimit = Math.min(64 * 1024, maxLogBytes - 1);
+      const prefix = Buffer.alloc(prefixLimit);
+      const prefixFd = openSync(path, "r");
+      readSync(prefixFd, prefix, 0, prefixLimit, 0);
+      closeSync(prefixFd);
+      const prefixEnd = prefix.lastIndexOf(10);
+      if (prefixEnd >= 0) {
+        const tailLimit = maxLogBytes - prefixEnd - 1;
+        const tail = Buffer.alloc(tailLimit);
+        const tailFd = openSync(path, "r");
+        readSync(tailFd, tail, 0, tailLimit, size - tailLimit);
+        closeSync(tailFd);
+        const tailStart = tail.indexOf(10);
+        const suffix = tailStart >= 0 ? tail.subarray(tailStart + 1) : Buffer.alloc(0);
+        const out = openSync(path, "w");
+        writeSync(out, Buffer.concat([prefix.subarray(0, prefixEnd + 1), suffix]));
+        closeSync(out);
+        return;
+      }
+    }
+    const fd = openSync(path, "r");
+    const buffer = Buffer.alloc(maxLogBytes);
+    readSync(fd, buffer, 0, maxLogBytes, size - maxLogBytes);
+    closeSync(fd);
+    const out = openSync(path, "w");
+    writeSync(out, buffer);
+    closeSync(out);
+  } catch {}
+}
+function childEnv() {
+  const merged = { ...process.env };
+  for (const [key, value] of Object.entries(config.env ?? {})) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  // Worker providers are not a notification surface: strip the controller-only
+  // transport after the driver overlay so no driver can reintroduce it.
+  delete merged.INTENT_FACTORY_NOTIFY_BIN;
+  return merged;
+}
+process.on("SIGTERM", () => stopProvider());
+process.on("SIGINT", () => stopProvider());
+const timer = setInterval(() => {
+  if (!parentAlive()) { clearInterval(timer); stopProvider(); return; }
+  if (!existsSync(releasePath)) return;
+  clearInterval(timer);
+  const stdoutFd = openSync(config.stdoutPath, "wx", 0o600);
+  const stderrFd = openSync(config.stderrPath, "wx", 0o600);
+  provider = spawn(config.executable, config.args, {
+    cwd: config.cwd,
+    env: childEnv(),
+    stdio: [config.promptTransport === "stdin" ? "pipe" : "ignore", stdoutFd, stderrFd],
+  });
+  if (config.promptTransport === "stdin") {
+    for (const chunk of pendingInput) provider.stdin.write(chunk);
+    pendingInput.length = 0;
+    if (inputEnded) provider.stdin.end();
+  }
+  provider.once("error", () => process.exitCode = 127);
+  provider.once("close", (code) => {
+    capLog(config.stdoutPath, config.driver === "codex");
+    capLog(config.stderrPath);
+    process.exit(code ?? 1);
+  });
+}, 10);
+`;
+
+const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
+
+/** Fixed-size read for incremental transcript observation. */
+const MONITOR_CHUNK_BYTES = 64 * 1024;
+
+/** Per-observation read budget: one tick never blocks on a huge backlog. */
+const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
+
+/** @typedef {{prompt: string|null, stdout: string, stderr: string}} PathSet */
+/** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, driver: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, nodeId?: string, attempt?: number, workspace?: string, worktreeBranch?: string|null, worktreeBaseSha?: string|null, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
+/** @typedef {import("node:child_process").ChildProcess} ChildProcess */
+/** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
+/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
+
+/**
+ * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, workspace?: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
+ * @returns {Job}
+ */
+export function startProcess({ contract, node, state, runtime, prompt, paths, phase, workspace = contract.cwd, commandOptions = {}, onInvocation, onInvocationUpdate, onProgress }) {
+  const command = providerCommand(runtime, prompt, commandOptions);
+  if (paths.prompt) writeFileSync(paths.prompt, prompt, { flag: "wx", mode: 0o600 });
+  const gateConfigPath = `${paths.prompt}.gate.json`;
+  const gateReleasePath = `${paths.prompt}.gate.release`;
+  writeJsonAtomic(gateConfigPath, {
+    cwd: workspace,
+    executable: command.executable,
+    args: command.args,
+    promptTransport: command.promptTransport,
+    driver: runtime.driver,
+    env: command.env ?? null,
+    stdoutPath: paths.stdout,
+    stderrPath: paths.stderr,
+  });
+  let child;
+  try {
+    child = spawn(process.execPath, ["-e", GATE_SCRIPT], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        INTENT_FACTORY_GATE_CONFIG: gateConfigPath,
+        INTENT_FACTORY_GATE_RELEASE: gateReleasePath,
+        INTENT_FACTORY_GATE_PARENT_PID: String(process.pid),
+        INTENT_FACTORY_GATE_PARENT_TOKEN: processStartToken(process.pid) ?? "",
+      },
+      detached: process.platform !== "win32",
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+  } catch (error) {
+    cleanupGate({ gateConfigPath, gateReleasePath });
+    throw error;
+  }
+  const startedAt = new Date().toISOString();
+  const timeoutSec = latestTimeoutSec(state, node.timeoutSec ?? contract.timeoutSec);
+  /** @type {Invocation} */
+  const invocation = {
+    id: randomUUID(),
+    pid: /** @type {number} */ (child.pid),
+    processGroupId: process.platform === "win32" ? null : /** @type {number} */ (child.pid),
+    processStartToken: processStartToken(/** @type {number} */ (child.pid)),
+    driver: runtime.driver,
+    runtimeId: runtime.id ?? null,
+    revision: state.revisions ?? 0,
+    phase,
+    promptPath: paths.prompt ?? null,
+    stdoutPath: paths.stdout,
+    stderrPath: paths.stderr,
+    startedAt,
+    deadlineAt: Number.isFinite(timeoutSec) ? new Date(Date.parse(startedAt) + timeoutSec * 1_000).toISOString() : null,
+    updatedAt: startedAt,
+    closedAt: null,
+    exitCode: null,
+    signal: null,
+    status: "active",
+    executable: command.executable,
+  };
+  /** @type {Job} */
+  const job = {
+    child,
+    node,
+    state,
+    runtime,
+    cwd: workspace,
+    paths,
+    phase,
+    invocation,
+    startedAt,
+    startedTicks: process.hrtime.bigint(),
+    progressTicks: process.hrtime.bigint(),
+    lastOutputAt: 0,
+    closed: false,
+    exitCode: null,
+    signal: null,
+    spawnError: null,
+    terminating: null,
+    gateConfigPath,
+    gateReleasePath,
+    onInvocationUpdate,
+    onProgress,
+  };
+  child.once("error", (error) => {
+    job.spawnError = error;
+    job.closed = true;
+    closeInvocation(job);
+  });
+  child.once("close", (exitCode, signal) => {
+    job.exitCode = exitCode;
+    job.signal = signal;
+    job.closed = true;
+    closeInvocation(job);
+  });
+  try {
+    if (typeof onInvocation !== "function") throw new Error("durable invocation persistence callback is required");
+    onInvocation(invocation, job);
+    signalGate(job.gateReleasePath);
+    if (command.promptTransport === "stdin") {
+      child.stdin.on("error", () => {});
+      child.stdin.end(command.input);
+    }
+    job.observeTimer = setInterval(() => observeInvocation(job), 25);
+    job.observeTimer.unref?.();
+  } catch (error) {
+    void terminateInvocation(invocation, { graceMs: 100, killGraceMs: 500 }).catch(() => {});
+    cleanupGate(job);
+    throw error;
+  }
+  process.stdout.write(`[node] ${node.id} running · ${phase} · ${runtime.id}\n`);
+  return job;
+}
+
+/**
+ * @param {Job} job
+ */
+function closeInvocation(job) {
+  if (job.observeTimer) clearInterval(job.observeTimer);
+  job.observeTimer = undefined;
+  job.invocation = /** @type {Invocation} */ ({
+    ...job.invocation,
+    updatedAt: new Date().toISOString(),
+    closedAt: new Date().toISOString(),
+    exitCode: job.exitCode,
+    signal: job.signal,
+    status: "closed",
+  });
+  job.onClose?.(job.invocation);
+  cleanupGate(job);
+}
+
+/**
+ * Observe a bounded prefix while the provider is live. Driver normalizers know
+ * how to recognize a continuation-start event without runner-specific parsing.
+ *
+ * @param {Job} job
+ */
+function observeInvocation(job) {
+  if (job.closed || job.invocation.continuationId) return;
+  try {
+    const monitored = monitorInvocation(job);
+    if (!monitored.continuationId) return;
+    job.invocation = {
+      ...job.invocation,
+      continuationId: monitored.continuationId,
+      updatedAt: new Date().toISOString(),
+    };
+    job.onInvocationUpdate?.(job.invocation);
+  } catch {}
+}
+
+/**
+ * Observe the transcript incrementally: read only the bytes appended since
+ * the last observation, in fixed-size chunks folded into a parser whose
+ * retained state never scales with the unread length — so the metrics
+ * survive both a transcript that outgrows any fixed window and an
+ * already-large transcript on the first call after a controller restart.
+ * The gate caps the log only at close, so byte offsets stay valid while the
+ * provider is live. Only newline-terminated records are evidence; a
+ * trailing partial record stays unconsumed for the next observation. The
+ * generic metrics are zero for a provider that does not expose them.
+ *
+ * @param {Job} job
+ * @returns {{continuationId: string|null, turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
+ */
+export function monitorInvocation(job) {
+  try {
+    const parser = job.monitorParser ?? (job.monitorParser = new SessionMetricsParser(job.runtime.driver));
+    const size = statSync(job.paths.stdout).size;
+    let offset = job.monitorOffset ?? 0;
+    let budget = MONITOR_CALL_BUDGET_BYTES;
+    if (size > offset) {
+      const fd = openSync(job.paths.stdout, "r");
+      try {
+        const chunk = Buffer.alloc(MONITOR_CHUNK_BYTES);
+        while (offset < size && budget > 0) {
+          const read = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset, budget), offset);
+          if (read <= 0) break;
+          parser.push(chunk.subarray(0, read));
+          offset += read;
+          budget -= read;
+        }
+      } finally {
+        closeSync(fd);
+      }
+      job.monitorOffset = offset;
+    }
+    return { continuationId: parser.continuationId, ...parser.metrics() };
+  } catch {
+    return { continuationId: null, turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false };
+  }
+}
+
+/**
+ * @param {string} path
+ */
+function signalGate(path) {
+  const fd = openSync(path, "wx", 0o600);
+  try {
+    writeSync(fd, `${Date.now()}\n`, 0, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * @param {Job|{gateConfigPath: string, gateReleasePath: string}} job
+ */
+function cleanupGate(job) {
+  for (const path of [job.gateConfigPath, job.gateReleasePath]) {
+    try { unlinkSync(path); } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  }
+}
+
+/**
+ * @param {Job|undefined} job
+ * @param {{graceMs?: number, killGraceMs?: number, escalate?: boolean}} options
+ * @returns {Promise<void>}
+ */
+async function terminateProcess(job, options = {}) {
+  if (!job) return;
+  if (job.terminating) return job.terminating;
+  const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
+  job.terminating = (async () => {
+    const invocation = job.invocation;
+    signalInvocation(invocation, "SIGTERM");
+    if (await waitForJobTermination(job, invocation, graceMs)) return;
+    if (options.escalate !== false && process.platform !== "win32") signalInvocation(invocation, "SIGKILL");
+    if (await waitForJobTermination(job, invocation, options.killGraceMs ?? graceMs)) return;
+    throw new Error(`provider invocation ${invocation.id} did not terminate`);
+  })();
+  try {
+    await job.terminating;
+  } finally {
+    job.terminating = null;
+  }
+}
+
+/**
+ * @param {InvocationProbe & {id?: string}|undefined} invocation
+ * @param {{graceMs?: number, killGraceMs?: number, escalate?: boolean}} options
+ * @returns {Promise<void>}
+ */
+export async function terminateInvocation(invocation, options = {}) {
+  if (!invocation || !invocationAlive(invocation)) return;
+  const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
+  signalInvocation(invocation, "SIGTERM");
+  if (await waitForInvocationDeath(invocation, graceMs)) return;
+  if (options.escalate !== false && process.platform !== "win32") signalInvocation(invocation, "SIGKILL");
+  if (!await waitForInvocationDeath(invocation, options.killGraceMs ?? graceMs)) {
+    throw new Error(`provider invocation ${invocation.id} did not terminate`);
+  }
+}
+
+/**
+ * @param {ValidatedContract} contract
+ * @param {Map<string, Job>} running
+ * @param {(job: Job, outcome: "exhausted"|"stalled", error: {code: string, message: string}) => Promise<void>} onTimeout
+ * @param {(job: Job) => Promise<void>|void} [onProgress]
+ */
+export async function detectStalls(contract, running, onTimeout, onProgress) {
+  const now = process.hrtime.bigint();
+  for (const [nodeId, job] of running) {
+    const budgetSec = latestTimeoutSec(job.state, job.node.timeoutSec ?? contract.timeoutSec);
+    if (elapsedSeconds(job.startedTicks, now) >= budgetSec) {
+      await terminateProcess(job);
+      running.delete(nodeId);
+      await onTimeout(job, "exhausted", {
+        code: "wall_clock_timeout",
+        message: `${job.phase} ran longer than ${budgetSec}s`,
+      });
+      continue;
+    }
+    let observed = 0;
+    for (const path of [job.paths.stdout, job.paths.stderr]) {
+      try {
+        observed = Math.max(observed, statSync(path).mtimeMs);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+      }
+    }
+    if (observed > job.lastOutputAt) {
+      job.lastOutputAt = observed;
+      job.progressTicks = now;
+    }
+    if (elapsedSeconds(job.progressTicks, now) < contract.stallTimeoutSec) continue;
+    await terminateProcess(job);
+    running.delete(nodeId);
+    await onTimeout(job, "stalled", {
+      code: "stall_timeout",
+      message: `no provider output for ${contract.stallTimeoutSec}s`,
+    });
+  }
+}
+
+/**
+ * @param {InvocationProbe|undefined} invocation
+ * @returns {boolean}
+ */
+export function invocationAlive(invocation) {
+  if (!invocation?.pid || !Number.isInteger(invocation.pid)) return false;
+  let leaderAlive = false;
+  try {
+    process.kill(invocation.pid, 0);
+    leaderAlive = true;
+  } catch (error) {
+    leaderAlive = errorCode(error) === "EPERM";
+  }
+  if (leaderAlive) return processStartTokenMatches(invocation);
+  return processGroupAlive(invocation.processGroupId ?? null);
+}
+
+/**
+ * @param {number|null} processGroupId
+ * @returns {boolean}
+ */
+function processGroupAlive(processGroupId) {
+  if (process.platform === "win32" || typeof processGroupId !== "number" || !Number.isInteger(processGroupId) || processGroupId <= 0) return false;
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) === "EPERM";
+  }
+}
+
+/**
+ * @param {{stdoutPath: string}} invocation
+ * @param {DriverRuntime} runtime
+ * @param {import("./drivers/index.mjs").NormalizeOptions} options
+ * @returns {import("./drivers/index.mjs").ProviderEnvelope|null}
+ */
+export function invocationResult(invocation, runtime, options = {}) {
+  try {
+    const stdout = boundedRegion(invocation.stdoutPath);
+    return normalizeProviderResult(runtime, stdout, options.exitCode ?? 0, options.signal ?? null, options);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} path
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+function boundedRegion(path, maxBytes = MAX_PROVIDER_LOG_BYTES) {
+  try {
+    return dropPartialLogLine(readFileSync(`${path}.tail`, "utf8"));
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+  const size = statSync(path).size;
+  if (size <= maxBytes) return readFileSync(path, "utf8");
+  const fd = openSync(path, "r");
+  try {
+    const bytes = Buffer.alloc(maxBytes);
+    readSync(fd, bytes, 0, maxBytes, size - maxBytes);
+    return dropPartialLogLine(bytes.toString("utf8"));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * @param {InvocationProbe} invocation
+ * @returns {boolean}
+ */
+function processStartTokenMatches(invocation) {
+  if (!invocation.processStartToken) return true;
+  const current = processStartToken(invocation.pid);
+  return current === invocation.processStartToken;
+}
+
+/**
+ * @param {InvocationProbe & {id?: string}} invocation
+ * @param {string} signal
+ */
+function signalInvocation(invocation, signal) {
+  if (!invocationAlive(invocation)) return;
+  const pid = invocation.pid;
+  if (pid === null || pid === undefined) return;
+  const target = process.platform === "win32" ? pid : -(invocation.processGroupId ?? pid);
+  try {
+    process.kill(target, signal);
+  } catch (error) {
+    if (errorCode(error) !== "ESRCH") throw error;
+  }
+}
+
+/**
+ * @param {Job} job
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+function waitForJobClose(job, timeoutMs) {
+  if (job.closed) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    const previous = job.onClose;
+    job.onClose = (invocation) => {
+      previous?.(invocation);
+      clearTimeout(timer);
+      resolve(true);
+    };
+  });
+}
+
+/**
+ * @param {Job} job
+ * @param {Invocation} invocation
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function waitForJobTermination(job, invocation, timeoutMs) {
+  const [closed, dead] = await Promise.all([
+    waitForJobClose(job, timeoutMs),
+    waitForInvocationDeath(invocation, timeoutMs),
+  ]);
+  return closed && dead;
+}
+
+/**
+ * @param {InvocationProbe} invocation
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function waitForInvocationDeath(invocation, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!invocationAlive(invocation)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !invocationAlive(invocation);
+}
+
+/**
+ * @param {bigint} fromTicks
+ * @param {bigint} toTicks
+ * @returns {number}
+ */
+function elapsedSeconds(fromTicks, toTicks) {
+  return Number(toTicks - fromTicks) / 1e9;
 }
 
 /** @param {string} runDir */
@@ -438,24 +1006,20 @@ export async function runContract(contractPath) {
     if (errorCode(error) === "EEXIST") throw new Error(`run already exists: ${runDir}`);
     throw error;
   }
-  const lease = acquireControllerLease(runDir, {
-    contractVersion: INTENT_FACTORY_VERSION,
-    processStartToken: processStartToken(process.pid),
-  });
-  lease.startHeartbeat();
+  const lock = acquireLock(runDir);
   try {
     const runtimePlan = await runtimeAssignments(contract);
     const scopeBoundaries = captureNodeScopeBoundaries(contract);
     const sourceIdentity = await captureRunIdentity(contract, scopeBoundaries);
     const integrationRef = createRunRef(contract.cwd, contract.id, sourceIdentity.gitHead);
-    lease.assert();
+    lock.assert();
     const runsDir = join(contract.cwd, ".runs");
     const campaign = resolveCampaign(runsDir, contract.campaignId);
     mkdirSync(join(runDir, "nodes"), { recursive: true });
     mkdirSync(join(runDir, "logs"), { recursive: true });
     writeJsonAtomic(join(runDir, "contract.json"), serializableContract(contract));
     writeJsonAtomic(join(runDir, "judge.schema.json"), JUDGE_SCHEMA);
-    writeJsonAtomic(join(runDir, "run.json"), createRunMetadata(lease, sourceIdentity, {}, integrationRef));
+    writeJsonAtomic(join(runDir, "run.json"), createRunMetadata(lock, sourceIdentity, {}, integrationRef));
     registerRun(campaign.path, contract.id);
     renderCampaignHandoffSafely(campaign, runsDir, runDir);
 
@@ -496,14 +1060,14 @@ export async function runContract(contractPath) {
         integratedHead: null,
       };
       states.set(node.id, state);
-      writeNode(runDir, state, lease);
+      writeNode(runDir, state, lock);
     }
     syncAgentSignal(runsDir);
-    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity);
+    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity);
     syncAgentSignal(runsDir);
     return outcome;
   } catch (error) {
-    lease.release();
+    lock.release();
     throw error;
   }
 }
@@ -546,11 +1110,7 @@ export async function resumeRun(runDirPath, options = {}) {
   assertRunMutable(runDir);
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
-  const lease = acquireControllerLease(runDir, {
-    contractVersion: INTENT_FACTORY_VERSION,
-    processStartToken: processStartToken(process.pid),
-  });
-  lease.startHeartbeat();
+  const lock = acquireLock(runDir);
   try {
     const storedMetadata = validateRunMetadata(readJson(join(runDir, "run.json")), { requireSourceIdentity: true });
     if (!gitHead(contract.cwd, runRefName(contract.id))) throw new Error(`integration ref is unavailable for ${contract.id}`);
@@ -574,7 +1134,7 @@ export async function resumeRun(runDirPath, options = {}) {
     const runsDir = join(runDir, "..");
     const campaign = resolveCampaign(runsDir, contract.campaignId);
     registerRun(campaign.path, contract.id);
-    await recoverIntegrationTransactions(contract, runDir, states, lease, campaign.path);
+    await recoverIntegrationTransactions(contract, runDir, states, lock, campaign.path);
     const plan = planResumeRetry(contract, states, { node: options.node, reconcile: options.reconcile });
     for (const item of plan.attention) {
       process.stdout.write(`[run] ${contract.id} attention · ${item.id} · ${item.reason}\n`);
@@ -590,7 +1150,7 @@ export async function resumeRun(runDirPath, options = {}) {
       // Adoption before retry: an unresolved blocking review is re-judged from
       // the preserved worker result, never reset to a fresh worker attempt.
       if (action === "rejudge") {
-        transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
+        transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lock);
         continue;
       }
       if (action === "hold") continue;
@@ -600,14 +1160,14 @@ export async function resumeRun(runDirPath, options = {}) {
             kind: "recovery",
             decision: "reconcile_acknowledged",
             reason: `unknown_effect_reconciled acknowledged by --reconcile; node ${node.id} is re-dispatched`,
-          }, lease);
+          }, lock);
         }
         state.previousAttempt = renderPreviousAttemptSection(state) ?? state.previousAttempt;
-        transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lease);
+        transition(runDir, state, "pending", { phase: "worker", error: null, blockedBy: [] }, lock);
         continue;
       }
       const lastInvocation = state.invocations?.at(-1);
-      await recoverVerificationAttempts(runDir, state, lease);
+      await recoverVerificationAttempts(runDir, state, lock);
       const pendingStart = state.status === "pending" && (state.phase === "worker" || state.phase === "judge") && lastInvocation?.status === "active";
       if (!pendingStart && state.status === "pending" && (state.phase === "worker" || state.phase === "judge")) continue;
       const lastInvocationId = lastInvocation?.id;
@@ -620,8 +1180,8 @@ export async function resumeRun(runDirPath, options = {}) {
       const recoveryState = pendingStart ? /** @type {NodeSnapshot} */ ({ ...state, status: "running" }) : state;
       const recovery = (state.status === "running" || pendingStart) && persistedRecovery
         ? recoveryFromOverride(persistedRecovery, lastInvocationId)
-        : await recoverOrphan(runDir, contract, node, recoveryState, lease);
-      await persistRecoveryUsage(runDir, state, recovery, lease);
+        : await recoverOrphan(runDir, contract, node, recoveryState, lock);
+      await persistRecoveryUsage(runDir, state, recovery, lock);
       if (recovery?.kind === "reconciled") {
         transition(runDir, state, "blocked", {
           phase: recovery.phase ?? "worker",
@@ -629,7 +1189,7 @@ export async function resumeRun(runDirPath, options = {}) {
             code: "unknown_effect_reconciled",
             message: excerpt(recovery.reason ?? "unknown effect requires manual reconciliation"),
           },
-        }, lease);
+        }, lock);
         continue;
       }
       if (recovery?.kind === "exhausted") {
@@ -643,7 +1203,7 @@ export async function resumeRun(runDirPath, options = {}) {
           hadCost ? undefined : recovery.costUsd,
         );
         state.costUsd = invocationCost(state);
-        writeNode(runDir, state, lease);
+        writeNode(runDir, state, lock);
         settleInvocation(runDir, /** @type {string | Invocation} */ (invocation ?? recovery.invocationId), {
           status: "exhausted",
           usage: invocation?.usage ?? recovery.usage ?? null,
@@ -666,7 +1226,7 @@ export async function resumeRun(runDirPath, options = {}) {
             error: recovery.error ?? { code: "provider_exhausted", message: recovery.reason ?? "provider exhausted" },
           },
           invocation?.runtimeId ?? null,
-          lease,
+          lock,
           states,
           campaign.path,
         );
@@ -694,7 +1254,7 @@ export async function resumeRun(runDirPath, options = {}) {
           phase: recovery.phase ?? (invocation?.phase === "judge" ? "judge" : "worker"),
           error: recovery.error ?? { code: "progress_stalled", message: recovery.reason ?? "worker made no progress" },
           usage: state.usage,
-        }, lease);
+        }, lock);
         continue;
       }
       if (recovery?.kind === "adopted" || recovery?.kind === "rejudge") {
@@ -709,7 +1269,7 @@ export async function resumeRun(runDirPath, options = {}) {
             ? recoverWorkerResult(runDir, state, contract, node)
             : canonicalWorkerResultText(runDir, node.id) ?? recovery.result;
         } catch (error) {
-          await applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
+          await applyInvalidWorkerResult(contract, node, state, runDir, null, lock, errorMessage(error), states, campaign.path);
           continue;
         }
         if (recovery.phase === "worker" && workerResult !== null && workerResult !== undefined) {
@@ -718,7 +1278,7 @@ export async function resumeRun(runDirPath, options = {}) {
             : state.invocations?.find((item) => item.id === recovery.invocationId);
           // A recovered result-materialization turn keeps its live-path rule:
           // the turn had no workspace authority, so any change is a violation.
-          if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, {
+          if (!checkPersistedWorkerScope(contract, runDir, state, node, invocation, lock, {
             materialization: isResultMaterializationInvocation(invocation),
           })) continue;
           /** @type {WorkerResult|undefined} */
@@ -726,14 +1286,14 @@ export async function resumeRun(runDirPath, options = {}) {
           try {
             parsedWorkerResult = parseWorkerResult(String(extractJson(workerResult) ?? workerResult));
           } catch (error) {
-            await applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
+            await applyInvalidWorkerResult(contract, node, state, runDir, null, lock, errorMessage(error), states, campaign.path);
             continue;
           }
           if (node.taskPacket.mode === "discovery" && parsedWorkerResult.status === "done") {
             try {
               parseDiscoveryResult(parsedWorkerResult, attemptWorkspace(state) ?? contract.cwd);
             } catch (error) {
-              await applyInvalidWorkerResult(contract, node, state, runDir, null, lease, errorMessage(error), states, campaign.path);
+              await applyInvalidWorkerResult(contract, node, state, runDir, null, lock, errorMessage(error), states, campaign.path);
               continue;
             }
           }
@@ -743,12 +1303,12 @@ export async function resumeRun(runDirPath, options = {}) {
               phase: "complete",
               result: parsedWorkerResult,
               error: { code: "context_missing", message: parsedWorkerResult.missingContext.join("; ") },
-            }, lease);
+            }, lock);
             continue;
           }
-          await executeControllerVerification(contract, runDir, node, state, lease);
+          await executeControllerVerification(contract, runDir, node, state, lock);
           if (!state.verification?.passed) {
-            applyVerificationFailure(contract, node, state, runDir, null, lease, states, campaign.path);
+            applyVerificationFailure(contract, node, state, runDir, null, lock, states, campaign.path);
             continue;
           }
         } else {
@@ -783,13 +1343,13 @@ export async function resumeRun(runDirPath, options = {}) {
           reason: recovery.kind === "rejudge"
             ? `judge invocation ${recovery.invocationId} was not adopted; completed worker stream was re-judged`
             : `${recovery.phase} invocation ${recovery.invocationId} completed after controller loss`,
-        }, lease);
+        }, lock);
         if (recovery.phase === "worker" && node.gate.enabled) {
-          transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
+          transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lock);
         } else if (recovery.phase === "judge") {
-          await applyJudgeResult(contract, node, state, recovery.result, runDir, lease, null, states, campaign.path);
+          await applyJudgeResult(contract, node, state, recovery.result, runDir, lock, null, states, campaign.path);
         } else {
-          await settleDone(contract, node, state, runDir, lease, states, campaign.path, { phase: "complete", error: null, blockedBy: [] });
+          await settleDone(contract, node, state, runDir, lock, states, campaign.path, { phase: "complete", error: null, blockedBy: [] });
         }
         continue;
       }
@@ -817,7 +1377,7 @@ export async function resumeRun(runDirPath, options = {}) {
           transition(runDir, state, "failed", {
             phase: "worker",
             error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result before the controller was interrupted" },
-          }, lease);
+          }, lock);
           continue;
         }
         if (recoveryPhase === "worker" || recoveryPhase === "judge") {
@@ -835,7 +1395,7 @@ export async function resumeRun(runDirPath, options = {}) {
           if (hasUnknownEffect) {
             // The controller died inside the spawn→settlement window: this
             // attempt's workspace effects are unknown until proven otherwise.
-            const resolution = await resolveUnknownEffect(contract, runDir, node, state, workerInvocation, lease);
+            const resolution = await resolveUnknownEffect(contract, runDir, node, state, workerInvocation, lock);
             const targetInvocation = unknownInvocation ?? workerInvocation ?? unknownEffectId;
             const targetUsage = unknownInvocation?.usage ?? recovery.usage ?? null;
             const targetCost = typeof unknownInvocation?.costUsd === "number" ? unknownInvocation.costUsd : recovery.costUsd ?? null;
@@ -858,13 +1418,13 @@ export async function resumeRun(runDirPath, options = {}) {
               reason: resolution.action === "replay"
                 ? "unknown_effect resolved as safe replay; scope clean and deterministic verification passed"
                 : resolution.reason,
-            }, lease);
+            }, lock);
             if (resolution.action === "replay") {
               if (recoveryPhase === "judge") {
                 // A judge has no workspace effect of its own. Replaying it
                 // must keep the accepted worker result and schedule a fresh
                 // judge invocation rather than rerunning the worker.
-                transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
+                transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lock);
                 continue;
               }
             }
@@ -872,7 +1432,7 @@ export async function resumeRun(runDirPath, options = {}) {
               transition(runDir, state, "blocked", {
                 phase: recoveryPhase,
                 error: { code: "unknown_effect_reconciled", message: excerpt(resolution.reason) },
-              }, lease);
+              }, lock);
               continue;
             }
           }
@@ -880,7 +1440,7 @@ export async function resumeRun(runDirPath, options = {}) {
         if (recovery.phase === "worker" || restartInvocation?.phase === "worker") {
           const invocation = restartInvocation
             ?? [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker");
-          if (reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lease)) continue;
+          if (reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lock)) continue;
         }
         const recoveredInvocation = state.invocations?.find((invocation) => invocation.id === recovery.invocationId);
         const hadUsage = Boolean(recoveredInvocation?.usage);
@@ -908,7 +1468,7 @@ export async function resumeRun(runDirPath, options = {}) {
             || readOperationSettlement(runDir, recovery.invocationId ?? "")?.status === "safe_replay");
         if (replayingJudge) {
           state.costUsd = invocationCost(state);
-          transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lease);
+          transition(runDir, state, "pending", { phase: "judge", error: null, blockedBy: [] }, lock);
           continue;
         }
         state.costUsd = invocationCost(state);
@@ -921,15 +1481,15 @@ export async function resumeRun(runDirPath, options = {}) {
           usage: recovery.usage,
           costUsd: recovery.costUsd,
           reason: recovery.reason,
-        }, lease);
+        }, lock);
       }
-      transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] }, lease);
+      transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] }, lock);
     }
-    const outcome = await driveRun(contract, runDir, states, campaign, lease, sourceIdentity, resumeMetadata);
+    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resumeMetadata);
     syncAgentSignal(runsDir);
     return outcome;
   } catch (error) {
-    lease.release();
+    lock.release();
     throw error;
   }
 }
@@ -959,45 +1519,25 @@ function isUnknownEffectTerminal(state) {
  * @param {string} runDir
  * @param {Map<string, NodeSnapshot>} states
  * @param {CampaignRef} campaign
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {SourceIdentity} sourceIdentity
  * @param {{identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
  * @returns {Promise<RunOutcome>}
  */
-export async function driveRun(contract, runDir, states, campaign, lease, sourceIdentity, resume = {}) {
-  lease.assert();
+export async function driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resume = {}) {
+  lock.assert();
   assertEnvironmentReady(contract, runDir, sourceIdentity);
   const runsDir = join(contract.cwd, ".runs");
-  const currentLease = lease.current;
   const bootstrapNonce = bootstrapNonceForProcess();
   const detachedBootstrap = hasDetachedBootstrapNonce();
-  const runMetadata = createRunMetadata(lease, sourceIdentity, resume, runRefName(contract.id));
+  const runMetadata = createRunMetadata(lock, sourceIdentity, resume, runRefName(contract.id));
   writeJsonAtomic(join(runDir, "run.json"), runMetadata);
-  /** @type {Error|null} */
-  let leaseLost = null;
-  /**
-   * @param {LeaseRecord} current
-   */
-  const refreshMetadata = (current) => {
-    writeJsonAtomic(join(runDir, "run.json"), {
-      ...runMetadata,
-      leaseRenewedAt: current.renewedAt,
-      leaseExpiresAt: current.expiresAt,
-    });
-  };
-  lease.options.onRenew = refreshMetadata;
-  lease.startHeartbeat((error) => {
-    if (!leaseLost) leaseLost = error;
-  });
   writeJsonAtomic(bootstrapPath(runDir), {
     status: "ready",
     nonce: bootstrapNonce,
     pid: process.pid,
     processStartToken: processStartToken(process.pid),
     runDir,
-    holderId: currentLease.holderId,
-    generation: currentLease.generation,
-    leaseExpiresAt: currentLease.expiresAt,
     metadataPath: join(runDir, "run.json"),
     at: new Date().toISOString(),
   });
@@ -1007,20 +1547,18 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       nonce: bootstrapNonce,
       pid: process.pid,
       processStartToken: processStartToken(process.pid),
-      holderId: currentLease.holderId,
-      generation: currentLease.generation,
   });
-  lease.assert();
+  lock.assert();
   renderCampaignHandoffSafely(campaign, runsDir, runDir);
 
   /** @type {string|null} */
   let statusFingerprint = null;
-  /** @param {boolean} force @param {LeaseHandle|null} [renderLease] */
-  const renderStatusIfChanged = (force = false, renderLease = lease) => {
+  /** @param {boolean} force @param {LockHandle|null} [renderLock] */
+  const renderStatusIfChanged = (force = false, renderLock = lock) => {
     const fingerprint = statesFingerprint(states);
     if (!force && fingerprint === statusFingerprint) return;
     statusFingerprint = fingerprint;
-    render(runDir, contract, states, renderLease);
+    render(runDir, contract, states, renderLock);
   };
   let handoffFingerprint = statesFingerprint(states);
   const renderHandoffIfChanged = () => {
@@ -1105,8 +1643,8 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
   process.once("SIGHUP", cancel);
   try {
     while ([...states.values()].some((state) => !TERMINAL.has(state.status))) {
-      lease.assert();
-      if (leaseLost || existsSync(join(runDir, "cancel.request.json"))) canceled = true;
+      lock.assert();
+      if (existsSync(join(runDir, "cancel.request.json"))) canceled = true;
       if (canceled) {
         const jobs = [...running.values()];
         await Promise.all(jobs.map((job) => terminateProcess(job)));
@@ -1114,7 +1652,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         for (const job of jobs) envelopes.set(job.invocation.id, recordInvocationUsage(job, { accumulate: false }));
         for (const job of jobs) {
           const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
-          const scopeOk = job.phase !== "worker" || checkWorkerScope(contract, runDir, job, lease);
+          const scopeOk = job.phase !== "worker" || checkWorkerScope(contract, runDir, job, lock);
           settleInvocation(runDir, invocation, {
             status: scopeOk ? "canceled" : "failed",
             usage: invocation.usage ?? null,
@@ -1126,19 +1664,19 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         }
         running.clear();
         for (const state of states.values()) {
-          if (!TERMINAL.has(state.status)) transition(runDir, state, "canceled", { phase: "canceled" }, lease);
+          if (!TERMINAL.has(state.status)) transition(runDir, state, "canceled", { phase: "canceled" }, lock);
         }
         break;
       }
 
-      await finalizeClosedJobs(contract, runDir, states, running, lease, campaign.path);
+      await finalizeClosedJobs(contract, runDir, states, running, lock, campaign.path);
       await detectStalls(contract, running, async (job, status, error) => {
         const envelope = recordInvocationUsage(job);
         job.state.usage = invocationUsage(job.state);
         job.state.costUsd = invocationCost(job.state);
         const invocation = job.state.invocations?.find((item) => item.id === job.invocation.id) ?? job.invocation;
         appendUsageRecord(runDir, invocation);
-        if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lease)) {
+        if (job.phase === "worker" && !checkWorkerScope(contract, runDir, job, lock)) {
           settleInvocation(runDir, invocation, {
             status: "failed",
             usage: invocation.usage ?? null,
@@ -1161,14 +1699,14 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
         // judge protocol defect, not a node outcome: it earns the one bounded
         // re-ask, and only then the review mode settles the node.
         if (job.phase === "judge" && error.code === "wall_clock_timeout") {
-          await applyJudgeProtocolFailure(contract, job.node, job.state, runDir, running, lease, states, campaign.path, error.message);
+          await applyJudgeProtocolFailure(contract, job.node, job.state, runDir, running, lock, states, campaign.path, error.message);
           return;
         }
-        transition(runDir, job.state, status, { phase: job.phase, error }, lease);
+        transition(runDir, job.state, status, { phase: job.phase, error }, lock);
       }, async (job) => {
-        writeNode(runDir, job.state, lease);
+        writeNode(runDir, job.state, lock);
       });
-      blockDependents(contract, runDir, states, lease);
+      blockDependents(contract, runDir, states, lock);
 
       const slots = contract.maxParallel - running.size;
       if (slots > 0) {
@@ -1180,12 +1718,12 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
           const state = states.get(node.id);
           if (!state || routingBackoffActive(state, state.phase)) continue;
           if (state.phase === "judge" && state.result) {
-            await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaign.path);
+            await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaign.path);
             continue;
           }
           state.attempt += 1;
           const prompt = state.gate?.verdict === "fail" ? retryPrompt(node, state.gate) : node.prompt;
-          startWorker(contract, node, state, runDir, running, prompt, lease, states, campaign.path);
+          startWorker(contract, node, state, runDir, running, prompt, lock, states, campaign.path);
         }
       }
 
@@ -1195,7 +1733,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
       if ([...states.values()].some((state) => !TERMINAL.has(state.status))) await delay(contract.pollIntervalMs);
     }
   } catch (error) {
-    if (!(error instanceof LeaseLostError)) throw error;
+    if (!(error instanceof LockLostError)) throw error;
     await Promise.all([...running.values()].map((job) => terminateProcess(job)));
     clearRunLivenessMemory(runDir);
     return { runDir, states, ok: false, error };
@@ -1203,8 +1741,7 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
     process.removeListener("SIGINT", cancel);
     process.removeListener("SIGTERM", cancel);
     process.removeListener("SIGHUP", cancel);
-    lease.stopHeartbeat();
-    if (!leaseLost) lease.release();
+    lock.release();
   }
   renderStatusIfChanged(false, null);
   renderCampaignHandoffSafely(campaign, runsDir, runDir);
@@ -1233,30 +1770,25 @@ export async function driveRun(contract, runDir, states, campaign, lease, source
 }
 
 /**
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {SourceIdentity} sourceIdentity
  * @param {{identityWarnings?: string[]}} [resume]
  * @param {string} [integrationRef]
  * @returns {RunMetadata}
  */
-function createRunMetadata(lease, sourceIdentity, resume = {}, integrationRef = undefined) {
-  const current = lease.current;
+function createRunMetadata(lock, sourceIdentity, resume = {}, integrationRef = undefined) {
+  const current = lock.current;
   const metadata = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     contractVersion: INTENT_FACTORY_VERSION,
-    pid: process.pid,
-    processStartToken: processStartToken(process.pid),
-    startedAt: new Date().toISOString(),
-    holderId: current.holderId,
-    leaseGeneration: current.generation,
-    leaseAcquiredAt: current.acquiredAt,
-    leaseRenewedAt: current.renewedAt,
-    leaseExpiresAt: current.expiresAt,
+    pid: current.pid,
+    processStartToken: current.processStartToken,
+    startedAt: current.startedAt,
     sourceIdentity,
     ...(integrationRef ? { integrationRef } : {}),
     ...(resume.identityWarnings?.length ? { identityWarnings: resume.identityWarnings } : {}),
   };
-  return validateRunMetadata(metadata, { requireLease: true });
+  return validateRunMetadata(metadata);
 }
 
 /**
@@ -1438,11 +1970,11 @@ function workerToolPolicy(runtime) {
  * @param {RuntimeSnapshot} runtime
  * @param {{prompt: string, continuationId: string|null, mode: "fresh"|"reuse"|"rotate"}} phasePlan
  * @param {string} runDir
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {import("./drivers/index.mjs").CommandOptions} [extra]
  * @returns {import("./drivers/index.mjs").CommandOptions}
  */
-function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, extra = {}) {
+function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, extra = {}) {
   return {
     ...extra,
     continuationId: runtime.capabilities.continuation === true ? phasePlan.continuationId : null,
@@ -1463,10 +1995,10 @@ function attemptWorkspace(state) {
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
  * @param {string} runDir
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {string}
  */
-function ensureAttemptWorkspace(contract, node, state, runDir, lease) {
+function ensureAttemptWorkspace(contract, node, state, runDir, lock) {
   const expectedPath = attemptWorktreePath(runDir, contract.id, node.id, state.attempt);
   if (state.worktree?.path === expectedPath && attemptWorkspace(state)) return expectedPath;
   const worktree = createAttemptWorktree({
@@ -1479,7 +2011,7 @@ function ensureAttemptWorkspace(contract, node, state, runDir, lease) {
   const boundary = captureWorkspaceScope(worktree.path, workerScope(node.taskPacket));
   state.worktree = worktree;
   state.scope = emptyScope(boundary);
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   return worktree.path;
 }
 
@@ -1487,11 +2019,11 @@ function ensureAttemptWorkspace(contract, node, state, runDir, lease) {
  * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {Map<string, NodeSnapshot>} states
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {string} campaignPath
  * @returns {Promise<import("./integrate.mjs").IntegrationResult|null>}
  */
-async function recoverIntegrationTransactions(contract, runDir, states, lease, campaignPath) {
+async function recoverIntegrationTransactions(contract, runDir, states, lock, campaignPath) {
   return recoverIntegrations({
     repo: contract.cwd,
     runDir,
@@ -1522,9 +2054,9 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
           phase: "complete",
           integratedHead: transaction.candidateSha,
           worktree: { ...(state.worktree ?? {}), status: "removed", commit: transaction.attemptSha, baseSha: transaction.previousRunRefTip },
-        }, lease);
+        }, lock);
       }
-      if (state.attempt === transaction.attempt && state.status === "done") ensureTerminalEvent(runDir, state, lease);
+      if (state.attempt === transaction.attempt && state.status === "done") ensureTerminalEvent(runDir, state, lock);
       removeWorktree(contract.cwd, path);
     },
     onVerificationFailure: async (transaction) => {
@@ -1533,7 +2065,7 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
       if (!node || !state || TERMINAL.has(state.status)) return;
       const verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope);
       verdict.summary = "integrated candidate verification failed during recovery";
-      applyRejection(contract, node, state, runDir, null, lease, states, campaignPath, verdict, {
+      applyRejection(contract, node, state, runDir, null, lock, states, campaignPath, verdict, {
         code: "verification_failed",
         label: "candidate-verification",
       });
@@ -1545,7 +2077,7 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
       transition(runDir, state, "blocked", {
         phase: "complete",
         error: { code: "integration_conflict", message: `integration conflict in: ${paths}` },
-      }, lease);
+      }, lock);
       await raiseNodeAttention(campaignPath, runDir, state, "integration_conflict");
     },
     onConcurrentMove: async (transaction) => {
@@ -1554,7 +2086,7 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
       transition(runDir, state, "blocked", {
         phase: "complete",
         error: { code: "integration_concurrent_move", message: `run ref moved from ${transaction.previousRunRefTip} to ${transaction.currentRunRefTip ?? "unknown"}` },
-      }, lease);
+      }, lock);
       await raiseNodeAttention(campaignPath, runDir, state, "integration_concurrent_move");
     },
   });
@@ -1567,17 +2099,17 @@ async function recoverIntegrationTransactions(contract, runDir, states, lease, c
  * @param {string} runDir
  * @param {Map<string, Job>} running
  * @param {string} prompt
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} campaignPath
  */
-function startWorker(contract, node, state, runDir, running, prompt, lease, states, campaignPath) {
+function startWorker(contract, node, state, runDir, running, prompt, lock, states, campaignPath) {
   let workspace;
   try {
-    workspace = ensureAttemptWorkspace(contract, node, state, runDir, lease);
+    workspace = ensureAttemptWorkspace(contract, node, state, runDir, lock);
   } catch (error) {
     state.worktree = { ...(state.worktree ?? {}), status: "failed", path: state.worktree?.path ?? null, branch: state.worktree?.branch ?? null, commit: state.worktree?.commit ?? null, baseSha: state.worktree?.baseSha ?? null };
-    transition(runDir, state, "failed", { phase: "worker", error: { code: errorCode(error) ?? "worktree_create_failed", message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: errorCode(error) ?? "worktree_create_failed", message: errorMessage(error) } }, lock);
     return;
   }
   const runtime = routeRuntimeForState(contract, node, state, "worker");
@@ -1593,7 +2125,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
   const effectivePrompt = workerProtocolPrompt(phasePlan.prompt, resultPath);
   const paths = logPaths(runDir, node.id, "worker", state.attempt);
   if (Buffer.byteLength(effectivePrompt, "utf8") > 64 * 1024) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "worker_prompt_too_large", message: "worker prompt exceeds 65536 bytes" } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "worker_prompt_too_large", message: "worker prompt exceeds 65536 bytes" } }, lock);
     return;
   }
   /** @type {import("./verification.mjs").WorkspaceScopeBoundary} */
@@ -1604,7 +2136,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
     boundary = persistedScopeBoundary(contract, node, state, workspace);
     baseline = captureWorkspaceSnapshot(workspace);
   } catch (error) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: errorMessage(error) } }, lock);
     return;
   }
   const snapshotPath = `${paths.prompt}.snapshot.json`;
@@ -1636,18 +2168,18 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
   state.startedAt ??= new Date().toISOString();
   state.error = null;
   state.scope = emptyScope(boundary);
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   try {
     const job = startProcess({
       contract, node, state, runtime, workspace, prompt: effectivePrompt, paths, phase: "worker",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, {
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, {
         toolPolicy: workerToolPolicy(runtime),
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, state, runDir, "worker", phasePlan.mode, phasePlan.continuationId);
         invocation.snapshotPath = snapshotPath;
         currentJob.scopeBaseline = baseline;
-        persistInvocation(runDir, state, invocation, currentJob, lease);
+        persistInvocation(runDir, state, invocation, currentJob, lock);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "worker",
@@ -1656,10 +2188,10 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
           prompt: effectivePrompt,
         });
       },
-      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
-      onProgress: () => writeNode(runDir, state, lease),
+      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lock),
+      onProgress: () => writeNode(runDir, state, lock),
     });
-    transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lease);
+    transition(runDir, state, "running", { phase: "worker", runtime, error: null }, lock);
     running.set(node.id, job);
   } catch (error) {
     const invocation = state.invocations?.at(-1);
@@ -1671,7 +2203,7 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
         nextState: operationNextState(state),
       });
     }
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "spawn_error", message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "spawn_error", message: errorMessage(error) } }, lock);
   }
 }
 
@@ -1688,15 +2220,15 @@ function startWorker(contract, node, state, runDir, running, prompt, lease, stat
  * @param {Invocation} sourceInvocation
  * @param {DriverRuntime & {id: string|null}} runtime
  * @param {string|null} continuationId
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function startResultMaterialization(contract, node, state, runDir, running, sourceInvocation, runtime, continuationId, lease) {
+function startResultMaterialization(contract, node, state, runDir, running, sourceInvocation, runtime, continuationId, lock) {
   const materializationRuntime = runtime.id ? runtimeSnapshot(contract, runtime.id) : null;
   if (!materializationRuntime || materializationRuntime.capabilities.continuation !== true || !continuationId) {
     transition(runDir, state, "failed", {
       phase: "worker",
       error: { code: "missing_worker_result", message: "worker completed without a canonical result file and this runtime did not provide a resumable session for the one-turn materialization" },
-    }, lease);
+    }, lock);
     return;
   }
   const paths = logPaths(runDir, node.id, "worker", state.attempt);
@@ -1712,13 +2244,13 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
     baseline = captureWorkspaceSnapshot(workspace);
     writeJsonAtomic(`${paths.prompt}.snapshot.json`, baseline);
   } catch (error) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_snapshot_invalid", message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_snapshot_invalid", message: errorMessage(error) } }, lock);
     return;
   }
   state.phase = "worker";
   state.runtime = materializationRuntime;
   state.error = { code: "result_materialization_pending", message: "awaiting one-turn canonical worker-result materialization" };
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   try {
     const job = startProcess({
       contract, node, state, runtime: materializationRuntime, workspace, prompt, paths, phase: "worker",
@@ -1726,7 +2258,7 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
         prompt,
         continuationId,
         mode: "reuse",
-      }, runDir, lease, {
+      }, runDir, lock, {
         toolPolicy: workerToolPolicy(materializationRuntime),
       }),
       onInvocation: (invocation, currentJob) => {
@@ -1734,7 +2266,7 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
         invocation.snapshotPath = `${paths.prompt}.snapshot.json`;
         currentJob.resultMaterialization = true;
         currentJob.recoveryBaseline = baseline;
-        persistInvocation(runDir, state, invocation, currentJob, lease);
+        persistInvocation(runDir, state, invocation, currentJob, lock);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "worker",
@@ -1743,17 +2275,17 @@ function startResultMaterialization(contract, node, state, runDir, running, sour
           prompt,
         });
       },
-      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
+      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lock),
     });
-    transition(runDir, state, "running", { phase: "worker", runtime: materializationRuntime }, lease);
+    transition(runDir, state, "running", { phase: "worker", runtime: materializationRuntime }, lock);
     running.set(node.id, job);
   } catch (error) {
-    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_failed", message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "worker", error: { code: "result_materialization_failed", message: errorMessage(error) } }, lock);
   }
 }
 
-/** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when the review mode is `none` or no judgment item exists. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
-async function startJudge(contract, node, state, runDir, running, workerResult, lease, states, campaignPath) {
+/** Gate a completed worker: mechanical proofs gate first, the judge arbitrates only judgment items and is skipped when the review mode is `none` or no judgment item exists. A judge protocol re-ask never re-runs the round's mechanical proofs. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>} running @param {unknown} workerResult @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+async function startJudge(contract, node, state, runDir, running, workerResult, lock, states, campaignPath) {
   const reaskReason = judgeReaskReason(state);
   const reask = reaskReason !== undefined;
   const workspace = attemptWorkspace(state) ?? contract.cwd;
@@ -1766,14 +2298,14 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
   );
   state.review = reviewMode(node.gate);
   if (verdict.verdict === "fail") {
-    applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+    applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, {
       code: "mechanical_gate_failed",
       label: "mechanical-gate",
     });
     return;
   }
   if (!judgeRequired(node)) {
-    await settleDone(contract, node, state, runDir, lease, states, campaignPath, { phase: "complete", result: workerResult, gate: verdict });
+    await settleDone(contract, node, state, runDir, lock, states, campaignPath, { phase: "complete", result: workerResult, gate: verdict });
     return;
   }
   const runtime = routeRuntimeForState(contract, node, state, "judge");
@@ -1805,13 +2337,13 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
       contract, node, state, runtime, workspace,
       prompt: phasePlan.prompt,
       paths, phase: "judge",
-      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lease, {
+      commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, {
         schema: JUDGE_SCHEMA,
         schemaPath: join(runDir, "judge.schema.json"),
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, state, runDir, "judge", phasePlan.mode, phasePlan.continuationId);
-        persistInvocation(runDir, state, invocation, currentJob, lease);
+        persistInvocation(runDir, state, invocation, currentJob, lock);
         persistInvocationIntent(runDir, invocation, {
           nodeId: node.id,
           role: "judge",
@@ -1820,9 +2352,9 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
           prompt: phasePlan.prompt,
         });
       },
-      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lease),
+      onInvocationUpdate: (invocation) => persistInvocationUpdate(runDir, state, invocation, lock),
     });
-    transition(runDir, state, "running", { phase: "judge", runtime }, lease);
+    transition(runDir, state, "running", { phase: "judge", runtime }, lock);
     running.set(node.id, job);
   } catch (error) {
     const invocation = state.invocations?.at(-1);
@@ -1834,7 +2366,7 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
         nextState: operationNextState(state),
       });
     }
-    transition(runDir, state, "failed", { phase: "judge", error: { code: /** @type {string} */ (errorCode(error) ?? "spawn_error"), message: errorMessage(error) } }, lease);
+    transition(runDir, state, "failed", { phase: "judge", error: { code: /** @type {string} */ (errorCode(error) ?? "spawn_error"), message: errorMessage(error) } }, lock);
   }
 }
 
@@ -1843,12 +2375,12 @@ async function startJudge(contract, node, state, runDir, running, workerResult, 
  * @param {NodeSnapshot} state
  * @param {Invocation} invocation
  * @param {Job} job
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function persistInvocation(runDir, state, invocation, job, lease) {
+function persistInvocation(runDir, state, invocation, job, lock) {
   state.invocations = [...(state.invocations ?? []), invocation];
   state.updatedAt = invocation.updatedAt;
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   job.onClose = (closed) => {
     try {
       let continuationId = closed.continuationId ?? null;
@@ -1873,7 +2405,7 @@ function persistInvocation(runDir, state, invocation, job, lease) {
       state.usage = invocationUsage(state);
       state.costUsd = invocationCost(state);
       state.updatedAt = closed.updatedAt;
-      writeNode(runDir, state, lease);
+      writeNode(runDir, state, lock);
       settleInvocation(runDir, completed, {
         status: envelopeStatus,
         usage,
@@ -1885,7 +2417,7 @@ function persistInvocation(runDir, state, invocation, job, lease) {
         nextState: operationNextState(state),
       });
     } catch (error) {
-      if (!(error instanceof LeaseLostError)) throw error;
+      if (!(error instanceof LockLostError)) throw error;
     }
   };
 }
@@ -1898,15 +2430,15 @@ function persistInvocation(runDir, state, invocation, job, lease) {
  * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {Invocation} invocation
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function persistInvocationUpdate(runDir, state, invocation, lease) {
+function persistInvocationUpdate(runDir, state, invocation, lock) {
   try {
     state.invocations = (state.invocations ?? []).map((item) => item.id === invocation.id ? invocation : item);
     state.updatedAt = invocation.updatedAt;
-    writeNode(runDir, state, lease);
+    writeNode(runDir, state, lock);
   } catch (error) {
-    if (!(error instanceof LeaseLostError)) throw error;
+    if (!(error instanceof LockLostError)) throw error;
   }
 }
 
@@ -2320,17 +2852,17 @@ function verificationAttemptRecords(state) {
 /**
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {VerificationAttempt} attempt
  */
-function persistVerificationAttempt(runDir, state, lease, attempt) {
+function persistVerificationAttempt(runDir, state, lock, attempt) {
   const attempts = verificationAttemptRecords(state);
   const index = attempts.findIndex((item) => item.invocationId === attempt.invocationId);
   if (index >= 0) attempts[index] = { ...attempts[index], ...attempt };
   else attempts.push({ ...attempt, completedAt: attempt.completedAt ?? null, result: attempt.result ?? null });
   state.verification ??= { passed: false, commands: [], completed: false, attempts: [] };
   state.verification.attempts = attempts.slice(-16);
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
 }
 
 /**
@@ -2338,10 +2870,10 @@ function persistVerificationAttempt(runDir, state, lease, attempt) {
  * @param {string} runDir
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {Promise<import("./contract.mjs").VerificationState>}
  */
-async function executeControllerVerification(contract, runDir, node, state, lease) {
+async function executeControllerVerification(contract, runDir, node, state, lock) {
   if (state.verification?.completed === true) return /** @type {import("./contract.mjs").VerificationState} */ (state.verification);
   state.verification = {
     passed: false,
@@ -2349,17 +2881,17 @@ async function executeControllerVerification(contract, runDir, node, state, leas
     completed: false,
     attempts: [...(state.verification?.attempts ?? [])],
   };
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   const workspace = attemptWorkspace(state) ?? contract.cwd;
   try {
     const result = await runVerification([...node.taskPacket.verification, ...finalVerificationCommands(contract, node)], workspace, {
       logDir: join(runDir, "logs", `${node.id}.${state.attempt}.verification`),
-      onAttemptStart: (attempt) => persistVerificationAttempt(runDir, state, lease, attempt),
-      onAttemptSpawn: (attempt) => persistVerificationAttempt(runDir, state, lease, {
+      onAttemptStart: (attempt) => persistVerificationAttempt(runDir, state, lock, attempt),
+      onAttemptSpawn: (attempt) => persistVerificationAttempt(runDir, state, lock, {
         ...attempt,
         processStartToken: processStartToken(attempt.pid),
       }),
-      onAttemptComplete: (attempt) => persistVerificationAttempt(runDir, state, lease, {
+      onAttemptComplete: (attempt) => persistVerificationAttempt(runDir, state, lock, {
         ...attempt,
         result: boundedVerificationAttemptResult(attempt.result),
       }),
@@ -2378,17 +2910,17 @@ async function executeControllerVerification(contract, runDir, node, state, leas
       attempts: verificationAttemptRecords(state),
     };
   }
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   return state.verification;
 }
 
 /**
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {Promise<void>}
  */
-async function recoverVerificationAttempts(runDir, state, lease) {
+async function recoverVerificationAttempts(runDir, state, lock) {
   const active = (state.verification?.attempts ?? []).filter((attempt) => attempt.status === "active");
   if (!active.length) return;
   for (const attempt of active) {
@@ -2404,7 +2936,7 @@ async function recoverVerificationAttempts(runDir, state, lease) {
         throw new Error(`verification attempt ${attempt.invocationId} could not be terminated: ${errorMessage(error)}`);
       }
     }
-    persistVerificationAttempt(runDir, state, lease, {
+    persistVerificationAttempt(runDir, state, lock, {
       ...attempt,
       status: "crashed",
       completedAt: new Date().toISOString(),
@@ -2413,18 +2945,18 @@ async function recoverVerificationAttempts(runDir, state, lease) {
   }
   state.verification = { ...state.verification, completed: false, passed: false };
   delete state.verification.error;
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
 }
 
 /**
  * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {Job} job
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {{deferViolation?: boolean}} [options]
  * @returns {boolean}
  */
-function checkWorkerScope(contract, runDir, job, lease, options = {}) {
+function checkWorkerScope(contract, runDir, job, lock, options = {}) {
   if (job.scopeChecked) return !job.scopeViolation;
   job.scopeChecked = true;
   const state = job.state;
@@ -2444,17 +2976,17 @@ function checkWorkerScope(contract, runDir, job, lease, options = {}) {
     const shown = bounded.unexpectedPaths.slice(0, 8).join(", ");
     const message = `unexpected paths changed (${scope.unexpectedPaths.length}): ${shown}`;
     if (!TERMINAL.has(state.status)) {
-      transition(runDir, state, "failed", { phase: "worker", error: { code: "unexpected_write", message: excerpt(message) } }, lease);
+      transition(runDir, state, "failed", { phase: "worker", error: { code: "unexpected_write", message: excerpt(message) } }, lock);
       appendTransitionEvent(runDir, state, "failed", "failed", {
         unexpectedPaths: bounded.unexpectedPaths,
         unexpectedPathCount: bounded.unexpectedPathCount,
-      }, lease);
+      }, lock);
     }
     return false;
   } catch (error) {
     job.scopeViolation = true;
     if (!TERMINAL.has(state.status)) {
-      transition(runDir, state, "failed", { phase: "worker", error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: excerpt(errorMessage(error)) } }, lease);
+      transition(runDir, state, "failed", { phase: "worker", error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: excerpt(errorMessage(error)) } }, lock);
     }
     return false;
   }
@@ -2468,11 +3000,11 @@ function checkWorkerScope(contract, runDir, job, lease, options = {}) {
  * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {Job} job
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {string} [label]
  * @returns {boolean}
  */
-function checkResultMaterializationScope(contract, runDir, job, lease, label = "result materialization") {
+function checkResultMaterializationScope(contract, runDir, job, lock, label = "result materialization") {
   if (job.scopeChecked) return !job.scopeViolation;
   job.scopeChecked = true;
   const state = job.state;
@@ -2486,14 +3018,14 @@ function checkResultMaterializationScope(contract, runDir, job, lease, label = "
     transition(runDir, state, "failed", {
       phase: "worker",
       error: { code: "unexpected_write", message: excerpt(`${label} changed workspace paths (${scope.changedPaths.length}): ${shown}`) },
-    }, lease);
+    }, lock);
     return false;
   } catch (error) {
     job.scopeViolation = true;
     transition(runDir, state, "failed", {
       phase: "worker",
       error: { code: /** @type {string} */ (errorCode(error) ?? "scope_snapshot_invalid"), message: excerpt(errorMessage(error)) },
-    }, lease);
+    }, lock);
     return false;
   }
 }
@@ -2575,10 +3107,10 @@ function evaluatePersistedWorkerScope(contract, node, state, invocation, options
  * @param {Invocation|undefined} invocation
  * @param {RecoveryOutcome} recovery
  * @param {Record<string, unknown>|undefined} persistedRecovery
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {boolean}
  */
-function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lease) {
+function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocation, recovery, persistedRecovery, lock) {
   const evaluation = evaluatePersistedWorkerScope(contract, node, state, invocation, { strict: true });
   if (evaluation.ok) return false;
   const invocationId = recovery.invocationId ?? invocation?.id;
@@ -2604,11 +3136,11 @@ function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocati
     invocationId,
     phase: recovery.phase,
     reason,
-  }, lease);
+  }, lock);
   transition(runDir, state, "blocked", {
     phase: recovery.phase,
     error: { code: "unknown_effect_reconciled", message: excerpt(reason) },
-  }, lease);
+  }, lock);
   return true;
 }
 
@@ -2618,11 +3150,11 @@ function reconcileAmbiguousWorkerRestart(contract, runDir, node, state, invocati
  * @param {NodeSnapshot} state
  * @param {ValidatedNode} node
  * @param {Invocation|undefined} invocation
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {{materialization?: boolean}} [options]
  * @returns {boolean}
  */
-function checkPersistedWorkerScope(contract, runDir, state, node, invocation, lease, options = {}) {
+function checkPersistedWorkerScope(contract, runDir, state, node, invocation, lock, options = {}) {
   const materialization = options.materialization === true;
   const evaluation = evaluatePersistedWorkerScope(contract, node, state, invocation, { strict: materialization });
   if (evaluation.ok) return true;
@@ -2638,12 +3170,12 @@ function checkPersistedWorkerScope(contract, runDir, state, node, invocation, le
   transition(runDir, state, "failed", {
     phase: "worker",
     error: failure,
-  }, lease);
+  }, lock);
   if (evaluation.unexpectedPaths) {
     appendTransitionEvent(runDir, state, "failed", "failed", {
       unexpectedPaths: evaluation.unexpectedPaths,
       unexpectedPathCount: evaluation.unexpectedPathCount,
-    }, lease);
+    }, lock);
   }
   return false;
 }
@@ -2655,17 +3187,17 @@ function checkPersistedWorkerScope(contract, runDir, state, node, invocation, le
  *
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function recordScopeFinding(runDir, state, lease) {
+function recordScopeFinding(runDir, state, lock) {
   if (!state.scope?.unexpectedPaths?.length) return;
   state.scopeFindings = scopeFindingFromScope(state.scope);
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   appendTransitionEvent(runDir, state, state.status, state.status, {
     type: "scope.finding",
     unexpectedPaths: state.scopeFindings.unexpectedPaths,
     unexpectedPathCount: state.scope.unexpectedPathCount,
-  }, lease);
+  }, lock);
 }
 
 /**
@@ -2678,10 +3210,10 @@ function recordScopeFinding(runDir, state, lease) {
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
  * @param {Invocation|undefined} workerInvocation
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {Promise<{action: "replay"}|{action: "reconcile", reason: string}>}
  */
-async function resolveUnknownEffect(contract, runDir, node, state, workerInvocation, lease) {
+async function resolveUnknownEffect(contract, runDir, node, state, workerInvocation, lock) {
   const policy = node.replayPolicy ?? "safe";
   if (policy !== "safe") {
     return { action: "reconcile", reason: `node ${state.id} declares replayPolicy ${policy}; the interrupted attempt with unknown effects requires manual reconciliation` };
@@ -2695,7 +3227,7 @@ async function resolveUnknownEffect(contract, runDir, node, state, workerInvocat
         : `workspace moved outside the declared write scope across the ambiguous window: ${evaluation.detail}`,
     };
   }
-  await executeControllerVerification(contract, runDir, node, state, lease);
+  await executeControllerVerification(contract, runDir, node, state, lock);
   if (!state.verification?.passed) {
     return { action: "reconcile", reason: `deterministic verification failed while resolving the ambiguous window for node ${state.id}; partial effects cannot be proven absent` };
   }
@@ -2707,11 +3239,11 @@ async function resolveUnknownEffect(contract, runDir, node, state, workerInvocat
  * @param {string} runDir
  * @param {Map<string, NodeSnapshot>} states
  * @param {Map<string, Job>} running
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {string} campaignPath
  * @returns {Promise<void>}
  */
-async function finalizeClosedJobs(contract, runDir, states, running, lease, campaignPath) {
+async function finalizeClosedJobs(contract, runDir, states, running, lock, campaignPath) {
   for (const [nodeId, job] of running) {
     if (!job.closed || invocationAlive(job.invocation)) continue;
     running.delete(nodeId);
@@ -2723,7 +3255,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // persisted zero usage for 1.2M+ token workers on exactly this path).
     if (TERMINAL.has(state.status)) {
       recordInvocationUsage(job, { accumulate: false });
-      writeNode(runDir, state, lease);
+      writeNode(runDir, state, lock);
       continue;
     }
     // The branch's onClose already persisted this invocation's usage and
@@ -2737,7 +3269,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         reason: "provider did not start",
         nextState: operationNextState(state),
       });
-      transition(runDir, state, "failed", { phase: job.phase, error: { code: "spawn_error", message: job.spawnError.message } }, lease);
+      transition(runDir, state, "failed", { phase: job.phase, error: { code: "spawn_error", message: job.spawnError.message } }, lock);
       continue;
     }
     // The provider close evidence was already read by recordInvocationUsage
@@ -2770,8 +3302,8 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       && adoptedWorkerResult?.status === "done";
     if (job.phase === "worker") {
       const scopeOk = job.resultMaterialization
-        ? checkResultMaterializationScope(contract, runDir, job, lease)
-        : checkWorkerScope(contract, runDir, job, lease, { deferViolation: completedAttempt });
+        ? checkResultMaterializationScope(contract, runDir, job, lock)
+        : checkWorkerScope(contract, runDir, job, lock, { deferViolation: completedAttempt });
       if (!scopeOk) {
         settleInvocation(runDir, job.invocation, {
           status: "failed",
@@ -2815,7 +3347,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
     // path fails it today.
     if (workerResultError) {
       if (envelope.status === "done") {
-        await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(workerResultError), states, campaignPath);
+        await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lock, errorMessage(workerResultError), states, campaignPath);
         continue;
       }
       adoptedWorkerResult = null;
@@ -2833,7 +3365,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       });
     }
     if (!adoptedWorkerResult && envelope.status === "exhausted") {
-      handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lease, states, campaignPath);
+      handleProviderExhaustion(contract, runDir, job.node, state, /** @type {"worker"|"judge"} */ (job.phase), envelope, job.runtime.id, lock, states, campaignPath);
       continue;
     }
     // A judge provider that failed outright (its turn died, its tool host was
@@ -2848,7 +3380,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       // same bounded network waits a worker does, on the runtime it already
       // warmed, and spends none of the one re-dispatch counted below.
       const network = networkTransition(contract, job.node, state, "judge", envelope, job.exitCode);
-      if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
+      if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lock, states, campaignPath, network)) continue;
       // The provider died on the bounded re-ask itself, so the one permitted
       // re-ask is spent: settle by review mode here rather than dispatch a
       // third judge invocation behind a fresh failure count.
@@ -2856,16 +3388,16 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       // re-ask is spent: settle by review mode here rather than dispatch a
       // third judge invocation behind a fresh failure count.
       if (judgeReaskOutstanding(state)) {
-        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lease, states, campaignPath, envelope.error?.message ?? "judge provider failed");
+        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lock, states, campaignPath, envelope.error?.message ?? "judge provider failed");
         continue;
       }
       state.judgeFailures = (state.judgeFailures ?? 0) + 1;
       if (state.judgeFailures < JUDGE_MAX_FAILURES) {
-        writeNode(runDir, state, lease);
-        await startJudge(contract, job.node, state, runDir, running, state.result, lease, states, campaignPath);
+        writeNode(runDir, state, lock);
+        await startJudge(contract, job.node, state, runDir, running, state.result, lock, states, campaignPath);
         continue;
       }
-      await settleUnavailableJudge(contract, job.node, state, runDir, lease, states, campaignPath, envelope.error?.message ?? "judge provider failed");
+      await settleUnavailableJudge(contract, job.node, state, runDir, lock, states, campaignPath, envelope.error?.message ?? "judge provider failed");
       continue;
     }    // Whatever else this invocation produced, it is not exactly one usable
     // verdict: no verdict at all, several of them in separate agent messages,
@@ -2877,11 +3409,11 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       const evidence = judgeVerdictEvidence(envelope);
       if (!evidence.ok) {
         const network = networkTransition(contract, job.node, state, "judge", envelope, job.exitCode);
-        if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
-        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lease, states, campaignPath, evidence.reason);
+        if (network && handleProviderExhaustion(contract, runDir, job.node, state, "judge", envelope, job.runtime.id, lock, states, campaignPath, network)) continue;
+        await applyJudgeProtocolFailure(contract, job.node, state, runDir, running, lock, states, campaignPath, evidence.reason);
         continue;
       }
-      await applyJudgeResult(contract, job.node, state, evidence.result, runDir, lease, running, states, campaignPath);
+      await applyJudgeResult(contract, job.node, state, evidence.result, runDir, lock, running, states, campaignPath);
       continue;
     }
     // An empty final message is a missing worker result, not a no-op worker:
@@ -2895,7 +3427,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
         transition(runDir, state, "failed", {
           phase: "worker",
           error: { code: "missing_worker_result", message: "result-only materialization produced no canonical worker result" },
-        }, lease);
+        }, lock);
       } else {
         startResultMaterialization(
           contract,
@@ -2906,7 +3438,7 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           job.invocation,
           job.runtime,
           envelope.continuationId ?? job.invocation.continuationId ?? null,
-          lease,
+          lock,
         );
       }
       continue;
@@ -2917,13 +3449,13 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
       // the waits and the edges are both spent, the failure is reported here.
       const role = /** @type {"worker"|"judge"} */ (job.phase);
       const network = networkTransition(contract, job.node, state, role, envelope, job.exitCode);
-      if (network && handleProviderExhaustion(contract, runDir, job.node, state, role, envelope, job.runtime.id, lease, states, campaignPath, network)) continue;
+      if (network && handleProviderExhaustion(contract, runDir, job.node, state, role, envelope, job.runtime.id, lock, states, campaignPath, network)) continue;
       transition(runDir, state, envelope.status, {
         phase: job.phase,
         result: state.result,
         error: envelope.error,
         usage: state.usage,
-      }, lease);
+      }, lock);
       continue;
     }
     if (job.phase === "worker") {
@@ -2936,17 +3468,17 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           transition(runDir, state, "failed", {
             phase: "worker",
             error: { code: "missing_worker_result", message: `result-only materialization did not produce a valid canonical worker result: ${errorMessage(error)}` },
-          }, lease);
+          }, lock);
           continue;
         }
-        await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
+        await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lock, errorMessage(error), states, campaignPath);
         continue;
       }
       if (job.node.taskPacket.mode === "discovery" && workerResult.status === "done") {
         try {
           parseDiscoveryResult(workerResult, attemptWorkspace(state) ?? contract.cwd);
         } catch (error) {
-          await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lease, errorMessage(error), states, campaignPath);
+          await applyInvalidWorkerResult(contract, job.node, state, runDir, running, lock, errorMessage(error), states, campaignPath);
           continue;
         }
       }
@@ -2956,22 +3488,22 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
           phase: "complete",
           result: workerResult,
           error: { code: "context_missing", message: workerResult.missingContext.join("; ") },
-        }, lease);
+        }, lock);
         continue;
       }
       if (job.resultMaterialization && canReuseResultEvidence(state, job.node)) {
-        if (job.node.gate.enabled) await applyJudgeResult(contract, job.node, state, state.gate, runDir, lease, running, states, campaignPath);
-        else await settleDone(contract, job.node, state, runDir, lease, states, campaignPath, { phase: "complete", result: workerResult, error: null });
+        if (job.node.gate.enabled) await applyJudgeResult(contract, job.node, state, state.gate, runDir, lock, running, states, campaignPath);
+        else await settleDone(contract, job.node, state, runDir, lock, states, campaignPath, { phase: "complete", result: workerResult, error: null });
         continue;
       }
-      await executeControllerVerification(contract, runDir, job.node, state, lease);
+      await executeControllerVerification(contract, runDir, job.node, state, lock);
       if (!state.verification?.passed) {
-        applyVerificationFailure(contract, job.node, state, runDir, running, lease, states, campaignPath);
+        applyVerificationFailure(contract, job.node, state, runDir, running, lock, states, campaignPath);
         continue;
       }
-      if (job.scopeViolation) recordScopeFinding(runDir, state, lease);
-      if (job.node.gate.enabled) await startJudge(contract, job.node, state, runDir, running, workerResult, lease, states, campaignPath);
-      else await settleDone(contract, job.node, state, runDir, lease, states, campaignPath, { phase: "complete", result: workerResult });
+      if (job.scopeViolation) recordScopeFinding(runDir, state, lock);
+      if (job.node.gate.enabled) await startJudge(contract, job.node, state, runDir, running, workerResult, lock, states, campaignPath);
+      else await settleDone(contract, job.node, state, runDir, lock, states, campaignPath, { phase: "complete", result: workerResult });
       continue;
     }
   }
@@ -2992,16 +3524,16 @@ async function finalizeClosedJobs(contract, runDir, states, running, lease, camp
  * @param {"worker"|"judge"} role
  * @param {ProviderEnvelope} envelope
  * @param {string|null} currentRuntime
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} campaignPath
  * @param {import("./backoff.mjs").Transition} [precomputed]
  * @returns {boolean} false when no edge remained and the node was left blocked by the caller
  */
-function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lease, states, campaignPath, precomputed) {
+function handleProviderExhaustion(contract, runDir, node, state, role, envelope, currentRuntime, lock, states, campaignPath, precomputed) {
   const error = envelope.error ?? { code: "provider_exhausted", message: "provider exhausted" };
   if (NON_FAILOVER_CODES.has(error.code)) {
-    transition(runDir, state, "exhausted", { phase: role, result: state.result, usage: state.usage, error }, lease);
+    transition(runDir, state, "exhausted", { phase: role, result: state.result, usage: state.usage, error }, lock);
     return true;
   }
   const current = currentRuntime ?? state.runtime?.id ?? routeRuntimeForState(contract, node, state, role).id;
@@ -3028,7 +3560,7 @@ function handleProviderExhaustion(contract, runDir, node, state, role, envelope,
       result: state.result,
       usage: state.usage,
       error: { ...plan.blocked, ...(exhaustedUntil ? { exhaustedUntil } : {}) },
-    }, lease);
+    }, lock);
     if (attention) void raiseNodeAttention(campaignPath, runDir, state, plan.blocked.code).catch(() => {});
     return true;
   }
@@ -3051,11 +3583,11 @@ function handleProviderExhaustion(contract, runDir, node, state, role, envelope,
           code: "judge_fallback_vendor_conflict",
           message: `judge fallback runtime ${plan.nextRuntime} shares vendor ${judgeFallbackVendor} with worker runtime ${workerRuntimeId}`,
         },
-      }, lease);
+      }, lock);
       return true;
     }
   }
-  applyRoute(contract, runDir, state, lease, { role, error, current, plan, schedule, envelope, status, now });
+  applyRoute(contract, runDir, state, lock, { role, error, current, plan, schedule, envelope, status, now });
   return true;
 }
 
@@ -3067,10 +3599,10 @@ function handleProviderExhaustion(contract, runDir, node, state, role, envelope,
  * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {{role: "worker"|"judge", error: {code: string, message: string}, current: string, plan: ReturnType<typeof planRoute>, schedule: import("./backoff.mjs").Transition, envelope: ProviderEnvelope, status: string, now: number}} options
  */
-function applyRoute(contract, runDir, state, lease, { role, error, current, plan, schedule, envelope, status, now }) {
+function applyRoute(contract, runDir, state, lock, { role, error, current, plan, schedule, envelope, status, now }) {
   const { routing, override, errorCode } = buildRouting(state, {
     role, error, current, plan, schedule, status, now, usage: envelope.usage, costUsd: envelope.costUsd,
   });
@@ -3080,8 +3612,8 @@ function applyRoute(contract, runDir, state, lease, { role, error, current, plan
     result: state.result,
     error: null,
     routing,
-  }, lease);
-  appendTransitionEvent(runDir, state, "pending", "pending", { role, status, currentRuntime: current, errorCode, override }, lease);
+  }, lock);
+  appendTransitionEvent(runDir, state, "pending", "pending", { role, status, currentRuntime: current, errorCode, override }, lock);
 }
 /**
  * Extract the invocation's provider envelope from the bounded transcript tail
@@ -3147,18 +3679,18 @@ const INVALID_JUDGE_OUTPUT_CODE = "invalid_judge_output";
  * @param {NodeSnapshot} state
  * @param {string} runDir
  * @param {Map<string, Job>|null} running
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} campaignPath
  * @param {string} reason
  */
-async function applyJudgeProtocolFailure(contract, node, state, runDir, running, lease, states, campaignPath, reason) {
+async function applyJudgeProtocolFailure(contract, node, state, runDir, running, lock, states, campaignPath, reason) {
   if (judgeReaskOutstanding(state)) {
     if (reviewMode(node.gate) === "advisory") {
       // The deterministic verification passed, so the review cannot fail the
       // node; completing with the defect recorded keeps it visible instead of
       // silently discarding the review.
-      await settleAdvisoryReview(contract, node, state, runDir, lease, states, campaignPath, invalidJudgeVerdict(reason));
+      await settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, invalidJudgeVerdict(reason));
       await raiseNodeAttention(campaignPath, runDir, state, INVALID_JUDGE_OUTPUT_CODE);
       return;
     }
@@ -3170,7 +3702,7 @@ async function applyJudgeProtocolFailure(contract, node, state, runDir, running,
       result: state.result,
       usage: state.usage,
       error: { code: JUDGE_UNAVAILABLE_CODE, message: excerpt(reason) ?? "judge unavailable" },
-    }, lease);
+    }, lock);
     await raiseNodeAttention(campaignPath, runDir, state, JUDGE_UNAVAILABLE_CODE);
     return;
   }
@@ -3181,10 +3713,10 @@ async function applyJudgeProtocolFailure(contract, node, state, runDir, running,
   if (!running) {
     // A verdict recovered after controller loss keeps its durable bound:
     // the drive loop dispatches the one remaining bounded re-ask.
-    transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lease);
+    transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lock);
     return;
   }
-  await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaignPath);
+  await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath);
 }
 
 /**
@@ -3197,12 +3729,12 @@ async function applyJudgeProtocolFailure(contract, node, state, runDir, running,
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
  * @param {string} runDir
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} campaignPath
  * @param {JudgeVerdict} verdict
  */
-async function settleAdvisoryReview(contract, node, state, runDir, lease, states, campaignPath, verdict) {
+async function settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, verdict) {
   clearJudgeReask(state);
   state.gate = verdict;
   if (verdict.verdict !== "pass") {
@@ -3210,15 +3742,15 @@ async function settleAdvisoryReview(contract, node, state, runDir, lease, states
       type: "gate.advisory",
       verdict: verdict.verdict,
       summary: verdict.summary,
-    }, lease);
+    }, lock);
   }
-  await settleDone(contract, node, state, runDir, lease, states, campaignPath, { phase: "complete", gate: verdict });
+  await settleDone(contract, node, state, runDir, lock, states, campaignPath, { phase: "complete", gate: verdict });
 }
 
-/** Settle a judge whose provider failed its bounded re-dispatches: blocking review blocks with the work preserved; advisory review completes with the defect recorded. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {string} providerMessage */
-async function settleUnavailableJudge(contract, node, state, runDir, lease, states, campaignPath, providerMessage) {
+/** Settle a judge whose provider failed its bounded re-dispatches: blocking review blocks with the work preserved; advisory review completes with the defect recorded. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {string} providerMessage */
+async function settleUnavailableJudge(contract, node, state, runDir, lock, states, campaignPath, providerMessage) {
   if (reviewMode(node.gate) === "advisory") {
-    await settleAdvisoryReview(contract, node, state, runDir, lease, states, campaignPath, invalidJudgeVerdict(providerMessage));
+    await settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, invalidJudgeVerdict(providerMessage));
     await raiseNodeAttention(campaignPath, runDir, state, INVALID_JUDGE_OUTPUT_CODE);
     return;
   }
@@ -3227,18 +3759,18 @@ async function settleUnavailableJudge(contract, node, state, runDir, lease, stat
     result: state.result,
     usage: state.usage,
     error: { code: JUDGE_UNAVAILABLE_CODE, message: excerpt(providerMessage) ?? "judge unavailable" },
-  }, lease);
+  }, lock);
   await raiseNodeAttention(campaignPath, runDir, state, JUDGE_UNAVAILABLE_CODE);
 }
 
-/** Apply a judge verdict: pass settles done; a rejection citing no judgment item id is a judge protocol failure — one durable bounded re-ask, then blocked judge_protocol attention — and never consumes a revision, at any severity. Under advisory review a fail verdict is recorded and the node still completes. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {unknown} result @param {string} runDir @param {LeaseHandle} lease @param {Map<string, Job>|null} running @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
-async function applyJudgeResult(contract, node, state, result, runDir, lease, running, states, campaignPath) {
+/** Apply a judge verdict: pass settles done; a rejection citing no judgment item id is a judge protocol failure — one durable bounded re-ask, then blocked judge_protocol attention — and never consumes a revision, at any severity. Under advisory review a fail verdict is recorded and the node still completes. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {unknown} result @param {string} runDir @param {LockHandle} lock @param {Map<string, Job>|null} running @param {Map<string, NodeSnapshot>} states @param {string} campaignPath */
+async function applyJudgeResult(contract, node, state, result, runDir, lock, running, states, campaignPath) {
   /** @type {JudgeVerdict} */
   let verdict;
   try {
     verdict = parseJudge(String(result ?? ""));
   } catch (error) {
-    await applyJudgeProtocolFailure(contract, node, state, runDir, running, lease, states, campaignPath, errorMessage(error));
+    await applyJudgeProtocolFailure(contract, node, state, runDir, running, lock, states, campaignPath, errorMessage(error));
     return;
   }
   state.gate = verdict;
@@ -3247,7 +3779,7 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
   const protocolFailure = verdict.verdict === "fail" && uncitedRejection(verdict, node);
   if (protocolFailure && judgeReaskOutstanding(state)) {
     if (advisory) {
-      await settleAdvisoryReview(contract, node, state, runDir, lease, states, campaignPath, verdict);
+      await settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, verdict);
       await raiseNodeAttention(campaignPath, runDir, state, "judge_protocol");
       return;
     }
@@ -3256,7 +3788,7 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
       gate: verdict,
       result: state.result,
       error: { code: "judge_protocol", message: "judge rejection cited no Definition of Done item id after the bounded re-ask" },
-    }, lease);
+    }, lock);
     await raiseNodeAttention(campaignPath, runDir, state, "judge_protocol");
     return;
   }
@@ -3265,32 +3797,32 @@ async function applyJudgeResult(contract, node, state, result, runDir, lease, ru
     if (!running) {
       // A verdict recovered after controller loss keeps its durable bound:
       // the drive loop dispatches the one remaining bounded re-ask.
-      transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lease);
+      transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lock);
       return;
     }
-    await startJudge(contract, node, state, runDir, running, state.result, lease, states, campaignPath);
+    await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath);
     return;
   }
   clearJudgeReask(state);
   if (advisory) {
-    await settleAdvisoryReview(contract, node, state, runDir, lease, states, campaignPath, verdict);
+    await settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, verdict);
     return;
   }
   const shouldFail = verdict.verdict === "fail" && verdict.maxSeverity !== "none"
     && (node.gate.failOn ?? ["critical"]).includes(verdict.maxSeverity);
   if (!shouldFail) {
-    await settleDone(contract, node, state, runDir, lease, states, campaignPath, { phase: "complete", gate: verdict });
+    await settleDone(contract, node, state, runDir, lock, states, campaignPath, { phase: "complete", gate: verdict });
     return;
   }
-  applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+  applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, {
     code: "revision_cap",
     label: "gate",
     phase: "judge",
   });
 }
 
-/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", message?: string}} options */
-function applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, options) {
+/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", message?: string}} options */
+function applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, options) {
   const { code, label, phase = "worker", message = verdict.summary } = options;
   state.gate = verdict;
   if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
@@ -3298,20 +3830,20 @@ function applyRejection(contract, node, state, runDir, running, lease, states, c
     state.revisions += 1;
     state.attempt += 1;
     process.stdout.write(`[${label}] ${node.id} retry · ${verdict.summary}\n`);
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lease, states, campaignPath);
-    else transition(runDir, state, "pending", { phase: "worker", error: null }, lease);
+    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lock, states, campaignPath);
+    else transition(runDir, state, "pending", { phase: "worker", error: null }, lock);
     return;
   }
   transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
     phase,
     gate: verdict,
     error: { code, message },
-  }, lease);
+  }, lock);
 }
 
-/** Deterministic verification failure settles through the shared rejection path. The verdict carries this attempt's unexpected paths, so a red attempt reports them whether it stops here or starts its revision (TECH-SPEC lean, rule 1). @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
-function applyVerificationFailure(contract, node, state, runDir, running, lease, states, campaignPath, verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope)) {
-  applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
+/** Deterministic verification failure settles through the shared rejection path. The verdict carries this attempt's unexpected paths, so a red attempt reports them whether it stops here or starts its revision (TECH-SPEC lean, rule 1). @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
+function applyVerificationFailure(contract, node, state, runDir, running, lock, states, campaignPath, verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope)) {
+  applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
 }
 
 /**
@@ -3323,19 +3855,19 @@ function applyVerificationFailure(contract, node, state, runDir, running, lease,
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
  * @param {string} runDir
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @param {Map<string, NodeSnapshot>} states
  * @param {string} campaignPath
  * @param {Partial<NodeSnapshot>} [patch]
  * @returns {Promise<import("./integrate.mjs").IntegrationResult|null|undefined>}
  */
-async function settleDone(contract, node, state, runDir, lease, states, campaignPath, patch = {}) {
+async function settleDone(contract, node, state, runDir, lock, states, campaignPath, patch = {}) {
   const workspace = attemptWorkspace(state);
   if (!workspace || !state.worktree?.branch || !state.worktree.baseSha) {
     transition(runDir, state, "failed", {
       phase: "complete",
       error: { code: "attempt_worktree_missing", message: "completed attempt has no isolated worktree" },
-    }, lease);
+    }, lock);
     return;
   }
   let sealed;
@@ -3349,12 +3881,12 @@ async function settleDone(contract, node, state, runDir, lease, states, campaign
       attempt: state.attempt,
     });
     state.worktree = { ...state.worktree, commit: sealed.sha, status: "ready" };
-    writeNode(runDir, state, lease);
+    writeNode(runDir, state, lock);
   } catch (error) {
     transition(runDir, state, "failed", {
       phase: "complete",
       error: { code: errorCode(error) ?? "attempt_seal_failed", message: errorMessage(error) },
-    }, lease);
+    }, lock);
     return;
   }
   const result = await integrateAttempt({
@@ -3374,9 +3906,9 @@ async function settleDone(contract, node, state, runDir, lease, states, campaign
           ...patch,
           integratedHead: transaction.candidateSha,
           worktree: { ...(state.worktree ?? {}), status: "removed", commit: transaction.attemptSha, baseSha: transaction.previousRunRefTip },
-        }, lease);
+        }, lock);
       }
-      if (state.attempt === transaction.attempt) ensureTerminalEvent(runDir, state, lease);
+      if (state.attempt === transaction.attempt) ensureTerminalEvent(runDir, state, lock);
       removeWorktree(contract.cwd, acceptedPath);
     },
     onVerificationFailure: async (transaction) => {
@@ -3387,7 +3919,7 @@ async function settleDone(contract, node, state, runDir, lease, states, campaign
         description: "the sealed candidate did not pass the node verification in its integration worktree",
         evidence: boundedUtf8(JSON.stringify(transaction.candidateEvidence ?? {}), 4 * 1024),
       }];
-      applyRejection(contract, node, state, runDir, null, lease, states, campaignPath, verdict, {
+      applyRejection(contract, node, state, runDir, null, lock, states, campaignPath, verdict, {
         code: "verification_failed",
         label: "candidate-verification",
       });
@@ -3397,14 +3929,14 @@ async function settleDone(contract, node, state, runDir, lease, states, campaign
       transition(runDir, state, "blocked", {
         phase: "complete",
         error: { code: "integration_conflict", message: `integration conflict in: ${paths}` },
-      }, lease);
+      }, lock);
       if (campaignPath) await raiseNodeAttention(campaignPath, runDir, state, "integration_conflict");
     },
     onConcurrentMove: async (transaction) => {
       transition(runDir, state, "blocked", {
         phase: "complete",
         error: { code: "integration_concurrent_move", message: `run ref moved from ${transaction.previousRunRefTip} to ${transaction.currentRunRefTip ?? "unknown"}` },
-      }, lease);
+      }, lock);
       if (campaignPath) await raiseNodeAttention(campaignPath, runDir, state, "integration_concurrent_move");
     },
   });
@@ -3441,9 +3973,9 @@ async function verifyCandidateWorkspace(contract, node, state, runDir, workspace
  * and when no edge remains, it blocks and raises attention rather than filing
  * a quiet exhaustion nobody reads.
  *
- * @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LeaseHandle} lease @param {string} message @param {Map<string, NodeSnapshot>} states @param {string} campaignPath
+ * @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {string} message @param {Map<string, NodeSnapshot>} states @param {string} campaignPath
  */
-async function applyInvalidWorkerResult(contract, node, state, runDir, running, lease, message, states, campaignPath) {
+async function applyInvalidWorkerResult(contract, node, state, runDir, running, lock, message, states, campaignPath) {
   const verdict = /** @type {JudgeVerdict} */ ({
     verdict: "fail",
     maxSeverity: "critical",
@@ -3455,7 +3987,7 @@ async function applyInvalidWorkerResult(contract, node, state, runDir, running, 
     }],
   });
   if (isRepairable(node, state)) {
-    applyRejection(contract, node, state, runDir, running, lease, states, campaignPath, verdict, {
+    applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, {
       code: "invalid_worker_result",
       label: "worker-result",
       message,
@@ -3476,12 +4008,12 @@ async function applyInvalidWorkerResult(contract, node, state, runDir, running, 
   // of the work to fix: `state.gate` must not carry this synthetic verdict
   // into the next dispatch, or the generic retry prompt would frame it as a
   // quality gate rejection instead of a plain new attempt.
-  const routed = handleProviderExhaustion(contract, runDir, node, state, "worker", envelope, state.runtime?.id ?? null, lease, states, campaignPath, { kind: "failover", reason: "protocol_failure" });
+  const routed = handleProviderExhaustion(contract, runDir, node, state, "worker", envelope, state.runtime?.id ?? null, lock, states, campaignPath, { kind: "failover", reason: "protocol_failure" });
   if (routed) {
     process.stdout.write(`[worker-result] ${node.id} protocol failure · failing over\n`);
     return;
   }
-  transition(runDir, state, "blocked", { phase: "worker", gate: verdict, result: state.result, usage: state.usage, error }, lease);
+  transition(runDir, state, "blocked", { phase: "worker", gate: verdict, result: state.result, usage: state.usage, error }, lock);
   await raiseNodeAttention(campaignPath, runDir, state, "protocol_failure");
 }
 
@@ -3512,15 +4044,15 @@ async function raiseNodeAttention(campaignPath, runDir, state, code) {
  * @param {ValidatedContract} contract
  * @param {string} runDir
  * @param {Map<string, NodeSnapshot>} states
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function blockDependents(contract, runDir, states, lease) {
+function blockDependents(contract, runDir, states, lock) {
   for (const node of contract.nodes) {
     const state = states.get(node.id);
     if (!state) continue;
     if (state.status !== "pending") continue;
     const blockedBy = node.dependsOn.filter((id) => TERMINAL.has(states.get(id)?.status ?? "") && states.get(id)?.status !== "done");
-    if (blockedBy.length) transition(runDir, state, "blocked", { phase: "dependency", blockedBy, error: { code: "dependency_failed", message: `blocked by ${blockedBy.join(", ")}` } }, lease);
+    if (blockedBy.length) transition(runDir, state, "blocked", { phase: "dependency", blockedBy, error: { code: "dependency_failed", message: `blocked by ${blockedBy.join(", ")}` } }, lock);
   }
 }
 
@@ -3630,10 +4162,10 @@ function synchronizeRunUsage(runDir, states) {
  * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {RecoveryOutcome|null|undefined} recovery
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {Promise<void>}
  */
-async function persistRecoveryUsage(runDir, state, recovery, lease) {
+async function persistRecoveryUsage(runDir, state, recovery, lock) {
   if (!recovery?.invocationId) return;
   const current = state.invocations?.find((invocation) => invocation.id === recovery.invocationId);
   if (!current) return;
@@ -3646,7 +4178,7 @@ async function persistRecoveryUsage(runDir, state, recovery, lease) {
       ? { ...invocation, usage, costUsd: costUsd ?? null }
       : invocation);
     state.usage = invocationUsage(state);
-    writeNode(runDir, state, lease);
+    writeNode(runDir, state, lock);
   }
   const updated = state.invocations?.find((invocation) => invocation.id === current.id);
   if (updated) appendUsageRecord(runDir, updated);
@@ -3657,10 +4189,10 @@ async function persistRecoveryUsage(runDir, state, recovery, lease) {
  * @param {NodeSnapshot} state
  * @param {import("./contract.mjs").NodeStatus} status
  * @param {Record<string, unknown>} [patch]
- * @param {LeaseHandle|null} [lease]
+ * @param {LockHandle|null} [lock]
  */
-function transition(runDir, state, status, patch = {}, lease = null) {
-  lease?.assert();
+function transition(runDir, state, status, patch = {}, lock = null) {
+  lock?.assert();
   const from = state.status;
   const updatedAt = new Date().toISOString();
   Object.assign(state, patch, { status, updatedAt });
@@ -3670,7 +4202,7 @@ function transition(runDir, state, status, patch = {}, lease = null) {
     livenessTransitionAtByRun.set(runDir, transitionAt);
   }
   transitionAt.set(state.id, updatedAt);
-  writeNode(runDir, state, lease);
+  writeNode(runDir, state, lock);
   if (status === "done" && process.env.INTENT_FACTORY_INTEGRATION_INTERRUPT === "after-state") {
     throw new Error("integration interrupted after node state write");
   }
@@ -3678,7 +4210,7 @@ function transition(runDir, state, status, patch = {}, lease = null) {
   if (invocation && hasOperationSettlement(runDir, invocation.id)) {
     settleInvocation(runDir, invocation, { nextState: operationNextState(state) });
   }
-  appendTransitionEvent(runDir, state, from, status, {}, lease);
+  appendTransitionEvent(runDir, state, from, status, {}, lock);
   if (TERMINAL.has(status)) {
     const note = state.gate?.summary ?? resultSummary(state.result) ?? state.error?.message;
     process.stdout.write(`[node] ${state.id} ${status}${note ? ` · ${note}` : ""}\n`);
@@ -3688,11 +4220,11 @@ function transition(runDir, state, status, patch = {}, lease = null) {
 /**
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle|null} [lease]
+ * @param {LockHandle|null} [lock]
  */
-function ensureTerminalEvent(runDir, state, lease = null) {
+function ensureTerminalEvent(runDir, state, lock = null) {
   if (!hasDoneEvent(runDir, state.id, state.attempt)) {
-    appendTransitionEvent(runDir, state, "done", "done", { recovery: "terminal side effects replayed" }, lease);
+    appendTransitionEvent(runDir, state, "done", "done", { recovery: "terminal side effects replayed" }, lock);
   }
 }
 
@@ -3739,10 +4271,10 @@ function resultSummary(result) {
  * @param {string} from
  * @param {string} to
  * @param {Record<string, unknown>} [details]
- * @param {LeaseHandle|null} [lease]
+ * @param {LockHandle|null} [lock]
  */
-function appendTransitionEvent(runDir, state, from, to, details = {}, lease = null) {
-  lease?.assert();
+function appendTransitionEvent(runDir, state, from, to, details = {}, lock = null) {
+  lock?.assert();
   /** @type {Record<string, unknown>} */
   const event = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -3772,22 +4304,22 @@ function appendTransitionEvent(runDir, state, from, to, details = {}, lease = nu
  * @param {string} runDir
  * @param {NodeSnapshot} state
  * @param {import("./contract.mjs").ExecutionOverride} override
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  */
-function recordExecutionOverride(runDir, state, override, lease) {
+function recordExecutionOverride(runDir, state, override, lock) {
   const entry = { ...override, at: override.at ?? new Date().toISOString() };
   state.executionOverrides = [...(state.executionOverrides ?? []), entry];
-  writeNode(runDir, state, lease);
-  appendTransitionEvent(runDir, state, state.status, state.status, { override: entry, recovery: entry.decision }, lease);
+  writeNode(runDir, state, lock);
+  appendTransitionEvent(runDir, state, state.status, state.status, { override: entry, recovery: entry.decision }, lock);
 }
 
 /**
  * @param {string} runDir
  * @param {NodeSnapshot} state
- * @param {LeaseHandle|null} [lease]
+ * @param {LockHandle|null} [lock]
  */
-function writeNode(runDir, state, lease = null) {
-  lease?.assert();
+function writeNode(runDir, state, lock = null) {
+  lock?.assert();
   validateNodeSnapshot(state);
   const serialized = JSON.stringify(state);
   if (Buffer.byteLength(serialized, "utf8") > 128 * 1024) throw new Error("node snapshot exceeds 131072 bytes");
@@ -3798,10 +4330,10 @@ function writeNode(runDir, state, lease = null) {
  * @param {string} runDir
  * @param {ValidatedContract} contract
  * @param {Map<string, NodeSnapshot>} states
- * @param {LeaseHandle|null} [lease]
+ * @param {LockHandle|null} [lock]
  */
-function render(runDir, contract, states, lease = null) {
-  lease?.assert();
+function render(runDir, contract, states, lock = null) {
+  lock?.assert();
   writeTextAtomic(join(runDir, "STATUS.md"), renderFinalStatus(runDir, contract, states));
 }
 
@@ -4140,7 +4672,7 @@ function workerProtocolPrompt(prompt, resultPath) {
  * @param {string} nodeId
  * @param {string} phase
  * @param {number} attempt
- * @returns {import("./supervisor.mjs").PathSet}
+ * @returns {PathSet}
  */
 function logPaths(runDir, nodeId, phase, attempt) {
   const base = `${nodeId}.${attempt}.${phase}`;
@@ -4255,10 +4787,10 @@ function persistedJudgeResult(state, invocation, settlement) {
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
  * @param {NodeSnapshot} state
- * @param {LeaseHandle} lease
+ * @param {LockHandle} lock
  * @returns {Promise<RecoveryOutcome|null>}
  */
-async function recoverOrphan(runDir, contract, node, state, lease) {
+async function recoverOrphan(runDir, contract, node, state, lock) {
   const invocation = state.invocations?.at(-1);
   if (state.status !== "running") return null;
   if (!invocation) return { kind: "restart", reason: `node ${state.id} has no live invocation` };
@@ -4737,23 +5269,22 @@ export async function cancelRun(runDirPath) {
   const contractPath = join(runDir, "contract.json");
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
   writeJsonAtomic(join(runDir, "cancel.request.json"), { requestedAt: new Date().toISOString(), pid: process.pid });
-  const lease = readLease(runDir);
-  const currentLease = lease && !lease.invalid ? /** @type {LeaseRecord} */ (lease) : null;
-  if (currentLease && currentLease.pid === process.pid) {
-    throw new Error("cancel cannot take over a controller lease held by this process");
+  const current = readLock(runDir);
+  const holder = current && !current.invalid ? /** @type {LockRecord} */ (current) : null;
+  if (holder && holder.pid === process.pid) {
+    throw new Error("cancel cannot take over a controller lock held by this process");
   }
-  if (currentLease) {
-    const controller = { pid: currentLease.pid, processStartToken: currentLease.processStartToken };
+  if (holder) {
+    const controller = { pid: holder.pid, processStartToken: holder.processStartToken };
     if (invocationAlive(controller)) {
-      signalController(currentLease, "SIGTERM");
+      signalController(holder, "SIGTERM");
       if (!await waitForProcessDeath(controller, 2_000)) {
-        signalController(currentLease, "SIGKILL");
+        signalController(holder, "SIGKILL");
         if (!await waitForProcessDeath(controller, 2_000)) throw new Error("cancel could not confirm controller termination");
       }
     }
-    if (leaseHealthy(currentLease)) await waitForLeaseExpiry(runDir, 30_000);
   }
-  const controllerLease = await acquireStaleControllerLease(runDir);
+  const controllerLock = await acquireStaleLock(runDir);
   try {
     const states = readRunNodes(runDir, contract);
     /** @type {Error[]} */
@@ -4795,13 +5326,13 @@ export async function cancelRun(runDirPath) {
         state.verification.passed = false;
         state.verification.error = "verification canceled";
       }
-      if (state.verification?.attempts?.length) writeNode(runDir, state, controllerLease);
+      if (state.verification?.attempts?.length) writeNode(runDir, state, controllerLock);
       if (failures.length) continue;
       const closedAt = new Date().toISOString();
       const invocations = (state.invocations ?? []).map((invocation) => invocation.status === "active"
         ? { ...invocation, status: "terminated", closedAt, updatedAt: closedAt }
         : invocation);
-      if (!TERMINAL.has(state.status)) transition(runDir, state, "canceled", { phase: "canceled", invocations }, controllerLease);
+      if (!TERMINAL.has(state.status)) transition(runDir, state, "canceled", { phase: "canceled", invocations }, controllerLock);
     }
     if (failures.length) {
       const error = new Error(`cancel could not confirm termination of ${failures.length} invocation${failures.length === 1 ? "" : "s"}`);
@@ -4812,50 +5343,39 @@ export async function cancelRun(runDirPath) {
     syncAgentSignal(join(runDir, ".."));
     return true;
   } finally {
-    controllerLease.release();
+    controllerLock.release();
   }
 }
 
 /**
+ * The controller pid is already confirmed dead (or was never alive) by the
+ * time this is called, so the lock is stale and acquire() takes it over on
+ * its own; the retry here only covers a lock file whose write has not
+ * settled yet, never a live rival.
  * @param {string} runDir
- * @returns {Promise<LeaseHandle>}
+ * @returns {Promise<LockHandle>}
  */
-async function acquireStaleControllerLease(runDir) {
+async function acquireStaleLock(runDir) {
   for (;;) {
     try {
-      return acquireControllerLease(runDir, { contractVersion: INTENT_FACTORY_VERSION, processStartToken: processStartToken(process.pid) });
+      return acquireLock(runDir);
     } catch (error) {
-      const record = /** @type {Record<string, unknown>} */ (error);
-      const lease = /** @type {LeaseRecord|undefined} */ (record.lease);
-      if (!lease || !leaseHealthy(lease)) throw error;
-      await delay(Math.min(100, Math.max(10, Date.parse(lease.expiresAt) - Date.now())));
+      if (!(error instanceof LockBusyError)) throw error;
+      const holder = /** @type {LockRecord|null} */ (error.lock);
+      if (!holder || pidAlive(holder.pid)) throw error;
+      await delay(50);
     }
   }
 }
 
 /**
- * @param {string} runDir
- * @param {number} timeoutMs
- * @returns {Promise<void>}
- */
-async function waitForLeaseExpiry(runDir, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const lease = readLease(runDir);
-    if (!lease || lease.invalid || !leaseHealthy(lease)) return;
-    await delay(Math.min(100, Math.max(10, Date.parse(lease.expiresAt) - Date.now())));
-  }
-  throw new Error("controller lease did not become stale during cancellation");
-}
-
-/**
- * @param {LeaseRecord} lease
+ * @param {LockRecord} lock
  * @param {NodeJS.Signals} signal
  */
-function signalController(lease, signal) {
-  if (!invocationAlive({ pid: lease.pid, processStartToken: lease.processStartToken })) return;
+function signalController(lock, signal) {
+  if (!invocationAlive({ pid: lock.pid, processStartToken: lock.processStartToken })) return;
   try {
-    process.kill(lease.pid, signal);
+    process.kill(lock.pid, signal);
   } catch (error) {
     if (errorCode(error) !== "ESRCH") throw error;
   }
@@ -5205,191 +5725,6 @@ function reusedDoneWarnings(contract) {
 }
 
 /**
- * Project the supervised run's governance metrics after a pass and persist
- * them atomically next to the campaign heartbeat. Advisory: a failure writes
- * one stderr warning and never stops supervision.
- *
- * @param {string} runDir
- * @param {string} campaignPath
- */
-function writeGovernanceMetricsSafely(runDir, campaignPath) {
-  try {
-    const journal = readJournal(campaignPath);
-    const livenessFacts = journal.filter((entry) => entry.type === LIVENESS_JOURNAL_TYPE && entry.runId === basename(runDir));
-    const metrics = deriveGovernanceMetrics({
-      events: readRunEvents(runDir),
-      livenessFacts,
-      outbox: readNotificationOutbox(campaignPath),
-      now: Date.now(),
-      staleSec: LIVENESS_STALE_SEC,
-    });
-    writeGovernanceMetrics(campaignPath, metrics);
-  } catch (error) {
-    process.stderr.write(`[warn] governance metrics failed: ${errorMessage(error)}\n`);
-  }
-}
-
-/**
- * @param {string} runDir
- * @returns {Record<string, unknown>[]}
- */
-function readRunEvents(runDir) {
-  const path = join(runDir, "events.jsonl");
-  if (!existsSync(path)) return [];
-  /** @type {Record<string, unknown>[]} */
-  const events = [];
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
-    if (!line.trim()) continue;
-    events.push(/** @type {Record<string, unknown>} */ (JSON.parse(line)));
-  }
-  return events;
-}
-
-/**
- * @param {string} runDir
- * @param {number} intervalSec
- * @returns {Promise<void>}
- */
-export async function superviseRun(runDir, intervalSec) {
-  if (!existsSync(join(runDir, "contract.json"))) throw new Error(`not a run directory: ${runDir}`);
-  const contractPath = join(runDir, "contract.json");
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath, { persisted: true });
-  const campaign = resolveCampaign(join(contract.cwd, ".runs"), contract.campaignId);
-  const supervisorLease = acquireSupervisorLease(runDir, {
-    contractVersion: INTENT_FACTORY_VERSION,
-    processStartToken: processStartToken(process.pid),
-  });
-  try {
-    validateRunMetadata(readJson(join(runDir, "run.json")), { requireSourceIdentity: true });
-    const bootstrapNonce = bootstrapNonceForProcess();
-    const detachedBootstrap = hasDetachedBootstrapNonce();
-    writeJsonAtomic(bootstrapPath(runDir), {
-      status: "ready",
-      nonce: bootstrapNonce,
-      pid: process.pid,
-      processStartToken: processStartToken(process.pid),
-      runDir,
-      holderId: supervisorLease.holderId,
-      generation: supervisorLease.generation,
-      at: new Date().toISOString(),
-    });
-    writeJsonAtomic(bootstrapAttemptPath(runDir, bootstrapNonce), readJson(bootstrapPath(runDir)));
-    cleanupBootstrapAttempts(runDir, bootstrapNonce);
-    if (detachedBootstrap) await waitForBootstrapAcknowledgement(runDir, {
-        nonce: bootstrapNonce,
-        pid: process.pid,
-        processStartToken: processStartToken(process.pid),
-        holderId: supervisorLease.holderId,
-        generation: supervisorLease.generation,
-      });
-    supervisorLease.assert();
-    supervisorLease.startHeartbeat();
-    /** @type {string|null} */
-    let withheldNotice = null;
-    for (;;) {
-      supervisorLease.assert();
-      const nodes = readRunNodes(runDir, contract);
-      await drainNotificationsSafely(campaign.path);
-      try {
-        await checkRunLiveness(campaign.path, runDir);
-      } catch (error) {
-        process.stderr.write(`[warn] run liveness check failed: ${errorMessage(error)}\n`);
-      }
-      await drainNotificationsSafely(campaign.path);
-      writeGovernanceMetricsSafely(runDir, campaign.path);
-      if (nodes.length && nodes.every((node) => TERMINAL.has(node.status))) {
-        const failed = nodes.filter((node) => node.status !== "done");
-        const runTerminalKey = `${basename(runDir)}:${failed.length ? "attention" : "done"}`;
-        await notifyCampaign(
-          campaign.path,
-          projectEvent({
-            type: "run.terminal",
-            campaignId: campaign.campaign.id,
-            runId: basename(runDir),
-            counters: { done: nodes.length - failed.length, total: nodes.length },
-            data: { runId: basename(runDir), done: nodes.length - failed.length, total: nodes.length, needsAttention: failed.length },
-            key: runTerminalKey,
-          }),
-          runTerminalKey,
-        );
-        process.stdout.write(`[supervise] ${basename(runDir)} finished · ${nodes.filter((node) => node.status === "done").length}/${nodes.length} done\n`);
-        return;
-      }
-      const lease = readLease(runDir);
-      // An expired lease is not an abandoned run: a controller whose heartbeat
-      // is merely late still owns it, and resuming over it forks the run into
-      // competing controllers. Only proof that the recorded pid is dead
-      // authorizes the takeover the detached resume performs.
-      const adoption = leaseAdoption(lease);
-      if (!adoption.adopt) {
-        const notice = `${adoption.reason}:${lease && !lease.invalid ? `${lease.holderId}:${lease.pid}` : ""}`;
-        if (!leaseHealthy(lease) && withheldNotice !== notice) {
-          withheldNotice = notice;
-          process.stdout.write(`[supervise] controller lease expired · takeover withheld · ${adoption.reason}\n`);
-        }
-      } else if (!leaseHealthy(lease)) {
-        withheldNotice = null;
-        /** @type {DetachedChild|null} */
-        let child = null;
-        /** @type {number|null} */
-        let pid = null;
-        try {
-          child = detachSelf("resume", runDir);
-          pid = child.pid ?? null;
-          if (pid === null) throw new Error("detached child has no pid");
-          process.stdout.write(`[supervise] controller lease expired · resumed · pid ${pid}\n`);
-          await waitForBootstrap(runDir, pid, child);
-        } catch (error) {
-          const message = errorMessage(error);
-          const code = message.includes("source drift") ? "source_drift" : "resume_failed";
-          // A stale-lease resume can lose to a concurrently healthy controller
-          // that renewed or took over while the detached child bootstrapped.
-          // That contention is benign: re-read the lease and keep supervising.
-          // Source drift, malformed state, and an absent or unhealthy controller
-          // still need attention.
-          const leaseAfter = readLease(runDir);
-          if (
-            code === "resume_failed" &&
-            leaseAfter !== null &&
-            !leaseAfter.invalid &&
-            leaseHealthy(leaseAfter) &&
-            leaseAfter.pid !== pid
-          ) {
-            process.stdout.write(`[supervise] controller lease contended · healthy controller pid ${leaseAfter.pid} owns the run · continuing\n`);
-            continue;
-          }
-          writeJsonAtomic(join(runDir, "supervisor-attention.json"), {
-            schemaVersion: PROTOCOL_SCHEMA_VERSION,
-            at: new Date().toISOString(),
-            code,
-            message,
-          });
-          const attentionKey = `${basename(runDir)}:${code}:${message}`;
-          await notifyCampaign(
-            campaign.path,
-            projectEvent({
-              type: "run.attention",
-              campaignId: campaign.campaign.id,
-              runId: basename(runDir),
-              identifiers: { errorCode: code },
-              data: { runId: basename(runDir), code },
-              key: attentionKey,
-            }),
-            attentionKey,
-          );
-          process.stderr.write(`[supervise] ${basename(runDir)} needs attention: ${message}\n`);
-          return;
-        }
-      }
-      await delay(intervalSec * 1_000);
-    }
-  } finally {
-    supervisorLease.stopHeartbeat();
-    supervisorLease.release();
-  }
-}
-
-/**
  * @param {string} command
  * @param {string} target
  * @param {string[]} [extraArgs]
@@ -5412,11 +5747,10 @@ function detachSelf(command, target, extraArgs = []) {
  * @param {string} runDir
  * @param {number} pid
  * @param {DetachedChild|null} [child]
- * @param {"controller"|"supervisor"} [leaseKind]
  * @param {number} [timeoutMs]
  * @returns {Promise<BootstrapRecord>}
  */
-async function waitForBootstrap(runDir, pid, child = null, leaseKind = "controller", timeoutMs = 30_000) {
+async function waitForBootstrap(runDir, pid, child = null, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   const nonce = child?.bootstrapNonce;
   if (!nonce) throw new Error(`detached bootstrap has no start nonce for pid ${pid}`);
@@ -5435,12 +5769,8 @@ async function waitForBootstrap(runDir, pid, child = null, leaseKind = "controll
           cleanupBootstrapAttempts(runDir);
           throw new Error(`detached bootstrap failed: ${bootstrap.error}`);
         }
-        const lease = leaseKind === "supervisor" ? readSupervisorLease(runDir) : readLease(runDir);
-        const currentOwner = lease !== null && !lease.invalid && leaseHealthy(lease)
-          && lease.pid === pid
-          && sameProcessStartToken(lease.processStartToken, expectedProcessStartToken)
-          && lease.holderId === bootstrap.holderId
-          && lease.generation === bootstrap.generation;
+        const lock = readLock(runDir);
+        const currentOwner = lockOwnedBy(lock, pid, expectedProcessStartToken);
         if (!childExited && bootstrap.status === "ready" && childIdentity && currentOwner && runIsNonterminal(runDir)) {
           cleanupBootstrapAttempts(runDir);
           try {
@@ -5496,15 +5826,13 @@ function writeBootstrapAcknowledgement(runDir, bootstrap, expectedProcessStartTo
     nonce: bootstrap.nonce,
     pid: bootstrap.pid ?? null,
     processStartToken: expectedProcessStartToken,
-    holderId: bootstrap.holderId ?? null,
-    generation: bootstrap.generation ?? null,
     at: new Date().toISOString(),
   });
 }
 
 /**
  * @param {string} runDir
- * @param {{nonce: string, pid: number, processStartToken: string|null, holderId: string, generation: number}} expected
+ * @param {{nonce: string, pid: number, processStartToken: string|null}} expected
  * @returns {Promise<void>}
  */
 async function waitForBootstrapAcknowledgement(runDir, expected) {
@@ -5519,9 +5847,7 @@ async function waitForBootstrapAcknowledgement(runDir, expected) {
           acknowledgement.status === "acknowledged" &&
           acknowledgement.nonce === expected.nonce &&
           acknowledgement.pid === expected.pid &&
-          sameProcessStartToken(acknowledgement.processStartToken, expected.processStartToken) &&
-          acknowledgement.holderId === expected.holderId &&
-          acknowledgement.generation === expected.generation
+          sameProcessStartToken(acknowledgement.processStartToken, expected.processStartToken)
         ) {
           return;
         }
@@ -5577,7 +5903,7 @@ function bootstrapRunDir(command, target) {
       const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
       return join(contract.cwd, ".runs", contract.id);
     }
-    if (["resume", "supervise", "cancel"].includes(command)) {
+    if (["resume", "cancel"].includes(command)) {
       if (!target) return null;
       return resolve(target);
     }
@@ -5602,12 +5928,9 @@ function writeBootstrapFailure(command, target, error) {
   let current = null;
   try {
     current = /** @type {BootstrapRecord} */ (readJson(bootstrapPath(runDir)));
-    const controllerLease = readLease(runDir);
-    const supervisorLease = readSupervisorLease(runDir);
-    const currentOwnerActive = current.status === "ready" && current.pid !== process.pid && (
-      leaseOwnedBy(controllerLease, current.pid, current.processStartToken) ||
-      leaseOwnedBy(supervisorLease, current.pid, current.processStartToken)
-    );
+    const controllerLock = readLock(runDir);
+    const currentOwnerActive = current.status === "ready" && current.pid !== process.pid
+      && lockOwnedBy(controllerLock, current.pid, current.processStartToken);
     if (currentOwnerActive) return;
   } catch (readError) {
     if (errorCode(readError) !== "ENOENT") return;
@@ -5622,14 +5945,14 @@ function writeBootstrapFailure(command, target, error) {
 }
 
 /**
- * @param {import("./store.mjs").ReadLeaseResult} lease
+ * @param {import("./lock.mjs").ReadLockResult} lock
  * @param {number|undefined} pid
  * @param {string|null|undefined} processStartToken
  * @returns {boolean}
  */
-function leaseOwnedBy(lease, pid, processStartToken) {
-  return lease !== null && !lease.invalid && lease.pid === pid && leaseHealthy(lease)
-    && sameProcessStartToken(lease.processStartToken, processStartToken);
+function lockOwnedBy(lock, pid, processStartToken) {
+  return lock !== null && !lock.invalid && lock.pid === pid
+    && sameProcessStartToken(lock.processStartToken, processStartToken);
 }
 
 /**
@@ -5657,13 +5980,10 @@ function bootstrapNonceForProcess() {
     : randomUUID();
 }
 
-export { detectStalls, runProcessAlive, startProcess };
-
 /** @type {Record<string, import("node:util").ParseArgsOptionsConfig>} */
 const COMMAND_OPTIONS = {
   run: { detach: { type: "boolean" } },
   resume: { detach: { type: "boolean" }, node: { type: "string" }, reconcile: { type: "string" } },
-  supervise: { detach: { type: "boolean" }, interval: { type: "string" } },
   cancel: {},
   preflight: { static: { type: "boolean" }, json: { type: "boolean" } },
   validate: {},
@@ -5703,7 +6023,7 @@ function parseCli(argv, quiet = false) {
 
 /**
  * The retry-in-place options of a `resume` invocation, validated before any
- * lease is taken.
+ * lock is taken.
  *
  * @param {Record<string, unknown>} values
  * @returns {{node?: string, reconcile?: string}}
@@ -5774,20 +6094,6 @@ async function main(argv) {
     if (!result.ok) process.exitCode = 1;
     return;
   }
-  if (command === "supervise") {
-    const intervalSec = typeof values.interval === "string" ? positiveInterval(values.interval) : 30;
-    const runDir = resolve(target);
-    if (values.detach === true) {
-      const child = detachSelf("supervise", runDir, ["--interval", String(intervalSec)]);
-      const pid = child.pid;
-      if (pid === undefined) throw new Error("detached child has no pid");
-      await waitForBootstrap(runDir, pid, child, "supervisor");
-      process.stdout.write(`[supervise] detached · pid ${pid} · ${runDir}\n`);
-      return;
-    }
-    await superviseRun(runDir, intervalSec);
-    return;
-  }
   if (command === "cancel") { await cancelRun(target); return; }
   if (command === "preflight") {
     const absolute = resolve(target);
@@ -5852,20 +6158,10 @@ async function main(argv) {
   usage();
 }
 
-/**
- * @param {string} value
- * @returns {number}
- */
-function positiveInterval(value) {
-  const interval = Number(value);
-  if (!Number.isFinite(interval) || interval <= 0) throw new TypeError("--interval must be a positive number of seconds");
-  return interval;
-}
-
 function usage() {
   process.stderr.write(
     "usage: runner.mjs <run|validate|preflight> <contract.json> [--detach] | " +
-    "<resume|supervise|cancel> <run-dir> [--detach] [--interval <sec>] | " +
+    "<resume|cancel> <run-dir> [--detach] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract <prune|validate> ... | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +

@@ -3,7 +3,6 @@ import { normalizeProviderResult, providerCommand } from "./drivers/index.mjs";
 export { composeAssignments, discoverRuntimes, exhaustedUntilOf, nextSameTierRuntime, normalizeProviderAvailability } from "./runtime-discovery.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { scopeFindingsPromptSection } from "./scope-findings.mjs";
-export { runProcessAlive } from "./supervisor.mjs";
 
 export { validateContract, routeRuntime, normalizeProviderResult, providerCommand };
 export { renderStatus, renderReport, renderFindings } from "./render.mjs";

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { validateContract, validateNodeSnapshot, validateRunMetadata } from "./contract.mjs";
-import { leaseHealthy, readJson, readLease } from "./store.mjs";
+import { readJson } from "./store.mjs";
+import { lockStale, pidAlive, readLock } from "./lock.mjs";
 import { scopeFindingsNote } from "./scope-findings.mjs";
 import { reviewNote } from "./review-modes.mjs";
 
@@ -36,7 +37,8 @@ export function renderStatus(runDir) {
   const widths = [3, 24, 9, 28, 7, 64];
   /** @type {(cells: unknown[]) => string} */
   const row = (cells) => cells.map((cell, i) => fit(String(cell ?? ""), widths[i])).join(" ");
-  const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
+  const controller = controllerStatus(runDir, nodes);
+  const lines = [`# run ${basename(runDir)}`, "", contract.goal, "", `${nodes.length} nodes · ${summary} · in ${compactTokens(usage.inputTokens)} · out ${compactTokens(usage.outputTokens)} · cache ${compactTokens(usage.cacheReadInputTokens)} · cost ${compactCost(usage.costUsd)}`, "", `controller: ${controller.line}`, "", "```", row(["", "NODE", "STATE", "RUNTIME", "TRY", "NOTE"]), row(widths.map((width) => "-".repeat(width)))];
   for (const node of nodes) {
     const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
@@ -52,7 +54,7 @@ export function renderStatus(runDir) {
   }
   lines.push("```", "", "## Needs you", "");
   const attention = nodes.filter((node) => !["pending", "running", "done"].includes(node.status));
-  const orphans = !leaseHealthy(readLease(runDir)) ? nodes.filter((node) => node.status === "running").map((node) => node.id) : [];
+  const orphans = controller.status.state !== "active" ? nodes.filter((node) => node.status === "running").map((node) => node.id) : [];
   if (!attention.length && !orphans.length && !identityWarnings.length) lines.push("Nothing needs you right now.");
   if (orphans.length) lines.push(`- [>] the run process is gone while ${orphans.join(", ")} still claims to be running. Those nodes are orphans, not live work. Resume the run directory to adopt whatever their workers finished.`);
   for (const warning of identityWarnings) lines.push(`- [~] ${warning}`);
@@ -83,7 +85,7 @@ export function renderStatusJson(runDir) {
       cacheReadInputTokens: usage.cacheReadInputTokens,
       costUsd: usage.costUsd,
     },
-    leaseHealthy: leaseHealthy(readLease(runDir)),
+    controller: controllerStatus(runDir, nodes).status,
     identityWarnings,
     summary: [...counts].map(([status, count]) => `${count} ${status}`).join(" · "),
     nodes: nodes.map((node) => ({
@@ -101,6 +103,37 @@ export function renderStatusJson(runDir) {
     })),
   };
   return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/**
+ * The controller line: `active pid N since T` for a live lock, or
+ * `stale pid N (dead|restarted) last tick T` once its holder is proven dead
+ * or the pid was recycled — `T` is then the newest node update, since the
+ * dead controller's own lock carries no useful clock. No lock at all (a run
+ * that never started, or one that shut down cleanly) reports `none`.
+ *
+ * @param {string} runDir
+ * @param {NodeSnapshot[]} nodes
+ * @returns {{line: string, status: {state: "active"|"stale"|"none", pid: number|null, since: string|null, lastTick: string|null}}}
+ */
+function controllerStatus(runDir, nodes) {
+  const lock = readLock(runDir);
+  if (!lock || /** @type {{invalid?: true}} */ (lock).invalid) {
+    return { line: "none", status: { state: "none", pid: null, since: null, lastTick: null } };
+  }
+  const record = /** @type {import("./lock.mjs").LockRecord} */ (lock);
+  if (!lockStale(record)) {
+    return {
+      line: `active pid ${record.pid} since ${record.startedAt}`,
+      status: { state: "active", pid: record.pid, since: record.startedAt, lastTick: null },
+    };
+  }
+  const lastTick = nodes.reduce((latest, node) => (node.updatedAt && node.updatedAt > latest ? node.updatedAt : latest), "") || null;
+  const reason = pidAlive(record.pid) ? "restarted" : "dead";
+  return {
+    line: `stale pid ${record.pid} (${reason}) last tick ${lastTick ?? "-"}`,
+    status: { state: "stale", pid: record.pid, since: record.startedAt, lastTick },
+  };
 }
 
 /**

@@ -17,11 +17,10 @@ import { TERMINAL } from "./lib.mjs";
 import {
   acquireFileMutationLock,
   acquireLease,
-  leaseHealthy,
   readJson,
-  readLease,
   writeJsonAtomic,
 } from "./store.mjs";
+import { lockStale, readLock } from "./lock.mjs";
 import {
   campaignDir,
   closeCampaign,
@@ -786,8 +785,8 @@ function inspectRun(campaignPath, record) {
     try { nodes.push(JSON.parse(readFileSync(join(nodesPath, entry.name), "utf8"))); } catch (error) { return { runDir, invalid: `invalid node state: ${entry.name}: ${errorMessage(error)}` }; }
   }
   if (!nodes.length) return { runDir, invalid: `run has no node states: ${runDir}` };
-  const lease = readLease(runDir);
-  const controllerAlive = Boolean(lease && !lease.invalid && leaseHealthy(lease) && pidAlive(/** @type {unknown} */ (lease.pid)));
+  const lock = readLock(runDir);
+  const controllerAlive = Boolean(lock && !/** @type {{invalid?: true}} */ (lock).invalid && !lockStale(lock));
   const allGreen = nodes.every((node) => node.status === "done" || node.status === "no-op");
   const failedNode = causalFailureNode(nodes, contract);
   const firstStatus = allGreen ? "done" : failedNode?.status ?? (controllerAlive ? "running" : "stalled");

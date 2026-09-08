@@ -12,10 +12,22 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "./render.mjs";
-import { cancelRun, livenessState, preflightContract, runContract, resumeRun, superviseRun } from "./runner.mjs";
-import { invocationAlive, invocationResult, processStartToken, quotaResetSchedule } from "./supervisor.mjs";
+import {
+  cancelRun,
+  detectStalls,
+  invocationAlive,
+  invocationResult,
+  livenessState,
+  monitorInvocation,
+  preflightContract,
+  runContract,
+  resumeRun,
+  startProcess,
+  terminateInvocation,
+} from "./runner.mjs";
+import { processStartToken } from "./lock.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "./failover.mjs";
-import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts } from "./backoff.mjs";
+import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "./backoff.mjs";
 import { captureWorkspaceSnapshot } from "./verification.mjs";
 import { attemptWorktreePath, runRefName } from "./worktree.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "./store.mjs";
@@ -439,7 +451,7 @@ test("status --json and report --json emit stable machine-readable output", asyn
   const statusPayload = JSON.parse(status.stdout);
   assert.equal(statusPayload.schemaVersion, 1);
   assert.equal(statusPayload.run, "json-status-run");
-  assert.equal(statusPayload.leaseHealthy, false);
+  assert.equal(statusPayload.controller.state, "none");
   assert.equal(statusPayload.nodes[0].status, "done");
   const report = spawnSync(process.execPath, [cli, "report", "--json", runDir], { encoding: "utf8" });
   assert.equal(report.status, 0, report.stderr);
@@ -1434,11 +1446,11 @@ test("the judge re-ask bound survives a controller crash in either gap because i
   // standalone marker left open: the write that dispatches the bounded re-ask,
   // and the moment its verdict is durable while the blocked transition is not.
   // Each excludes what no successor controller inherits: the dead controller's
-  // lease, its in-flight atomic temporaries and its file locks.
+  // lock, its in-flight atomic temporaries and its file locks.
   const dispatchGap = join(directory, ".runs", "judge-reask-dispatch-gap");
   const verdictGap = join(directory, ".runs", "judge-reask-verdict-gap");
   /** @param {string} source @returns {boolean} */
-  const inherited = (source) => !source.endsWith(".tmp") && !source.endsWith(".lock") && !source.endsWith("controller-lease.json");
+  const inherited = (source) => !source.endsWith(".tmp") && !source.endsWith(".lock") && !source.endsWith("controller.lock");
   const uncited = JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "not acceptable", findings: [{ severity: "critical", description: "the work is not acceptable", evidence: "inspected the delivered diff" }] });
   const fake = join(directory, "durable-provider.mjs");
   writeFileSync(fake, `#!/usr/bin/env node
@@ -2670,12 +2682,12 @@ test("simultaneous resumes allow one controller and reject the other", async () 
   try {
     // A freshly spawned `resume` controller spends several seconds in startup
     // (identity probing, snapshots) before its first provider spawn, so the
-    // lease-held observation needs a wider window than the 5s default.
+    // lock-held observation needs a wider window than the 5s default.
     await waitForValue(() => {
       try {
         return existsSync(started)
           && first.exitCode === null
-          && JSON.parse(readFileSync(join(runDir, "controller-lease.json"), "utf8")).pid === first.pid
+          && JSON.parse(readFileSync(join(runDir, "controller.lock"), "utf8")).pid === first.pid
           ? "held"
           : null;
       } catch {
@@ -2688,7 +2700,7 @@ test("simultaneous resumes allow one controller and reject the other", async () 
     });
     const secondResult = await closeResult(second);
     assert.notEqual(secondResult.code, 0, secondResult.stderr);
-    assert.match(secondResult.stderr, /lease/u);
+    assert.match(secondResult.stderr, /lock/u);
     writeFileSync(release, "release");
     const firstResult = await closeResult(first);
     assert.equal(firstResult.code, 0, `${firstResult.stderr}\n${firstResult.stdout}`);
@@ -2766,16 +2778,12 @@ test("cancelRun confirms controller death and terminates every recorded provider
     }],
   };
   writeFileSync(nodePath, JSON.stringify({ ...state, invocations: [invocation] }, null, 2));
-  writeFileSync(join(runDir, "controller-lease.json"), JSON.stringify({
+  writeFileSync(join(runDir, "controller.lock"), JSON.stringify({
     schemaVersion: 1,
-    contractVersion: "0.1.0",
-    holderId: "controller-under-test",
-    generation: 1,
     pid: childPid(controller),
     processStartToken: processStartToken(childPid(controller)),
-    acquiredAt: new Date(now - 100).toISOString(),
-    renewedAt: new Date(now - 100).toISOString(),
-    expiresAt: new Date(now + 250).toISOString(),
+    startedAt: new Date(now - 100).toISOString(),
+    hostname: "test-host",
   }, null, 2));
   try {
     await cancelRun(runDir);
@@ -3103,14 +3111,14 @@ test("status separates a live running node from an orphaned one", async () => {
   assert.match(renderStatus(runDir), /build still claims to be running/u);
 });
 
-test("status --json flags an orphaned running node with leaseHealthy false", async () => {
+test("status --json flags an orphaned running node with controller state none", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-orphan-json-"));
   const path = writeContract(directory, fixture({ id: "orphan-json-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
 
-  const payload = /** @type {{leaseHealthy: boolean, summary: string, nodes: {id: string, status: string}[]}} */ (JSON.parse(renderStatusJson(runDir)));
-  assert.equal(payload.leaseHealthy, false, "a missing controller lease while a node claims running must be machine-readable");
+  const payload = /** @type {{controller: {state: string}, summary: string, nodes: {id: string, status: string}[]}} */ (JSON.parse(renderStatusJson(runDir)));
+  assert.equal(payload.controller.state, "none", "a missing controller lock while a node claims running must be machine-readable");
   assert.equal(payload.nodes.find((node) => node.id === "build")?.status, "running");
 });
 
@@ -4539,139 +4547,6 @@ test("run warnings ignore a historical snapshot from an older capability schema"
   assert.doesNotMatch(result.stdout, /old-run/u);
 });
 
-test("supervise resumes a run whose controller died", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-supervise-"));
-  const path = writeContract(directory, fixture({ id: "supervise-run", pollIntervalMs: 10 }));
-  const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
-  // Simulate a controller that died mid-work: the node claims running but the
-  // recorded pid is gone.
-  orphan(runDir, "build");
-  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...metadata, pid: 2_147_483_647 }));
-
-  // The supervisor's resumed controller inherits the supervisor's environment, so
-  // the fake provider must stay installed for the whole supervise lifetime.
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
-  const supervisor = spawn(
-    process.execPath,
-    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  try {
-    let stdout = "";
-    supervisor.stdout.on("data", (chunk) => { stdout += chunk; });
-    const finished = await waitForValue(
-      () => (stdout.includes("resumed") && stdout.includes("finished") ? "done" : null),
-      20_000,
-    );
-    assert.equal(finished, "done", stdout);
-    assert.equal(readStatus(join(runDir, "nodes", "build.json")), "done");
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-    supervisor.kill("SIGTERM");
-  }
-});
-
-test("supervise continues when a stale-lease resume loses to a concurrently healthy controller", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-supervise-lease-race-"));
-  const path = writeContract(directory, fixture({ id: "supervise-lease-race-run", pollIntervalMs: 10 }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  orphan(runDir, "build");
-  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ ...metadata, pid: 2_147_483_647 }));
-
-  // The supervisor sees a stale controller lease and spawns a detached resume.
-  writeJsonAtomic(join(runDir, "controller-lease.json"), {
-    schemaVersion: 1,
-    contractVersion: "0.1.0",
-    holderId: "stale-holder",
-    generation: 1,
-    pid: 2_147_483_647,
-    processStartToken: null,
-    acquiredAt: "2026-01-01T00:00:00.000Z",
-    renewedAt: "2026-01-01T00:00:00.000Z",
-    expiresAt: "2026-01-01T00:00:01.000Z",
-  });
-  // Hold the controller lease mutation lock before the supervisor starts so the
-  // detached resume deterministically loses the takeover instead of stealing the
-  // stale lease while the test installs the concurrent healthy controller.
-  const lockPath = join(runDir, "controller-lease.json.lock");
-  writeFileSync(lockPath, `${JSON.stringify({
-    pid: process.pid,
-    holderId: "test-lock-holder",
-    expiresAt: new Date(Date.now() + 4_000).toISOString(),
-  })}\n`, { flag: "wx", mode: 0o600 });
-
-  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
-  const supervisor = spawn(
-    process.execPath,
-    [fileURLToPath(new URL("./runner.mjs", import.meta.url)), "supervise", runDir, "--interval", "0.05"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  try {
-    let stdout = "";
-    supervisor.stdout.on("data", (chunk) => { stdout += chunk; });
-    const resumed = await waitForValue(() => (stdout.includes("controller lease expired · resumed") ? "resumed" : null), 20_000);
-    assert.equal(resumed, "resumed", stdout);
-
-    // A concurrently healthy controller owns the run lease. The detached resume
-    // loses the lease race and supervision must continue without attention.
-    writeJsonAtomic(join(runDir, "controller-lease.json"), {
-      schemaVersion: 1,
-      contractVersion: "0.1.0",
-      holderId: "concurrent-controller",
-      generation: 2,
-      pid: process.pid,
-      processStartToken: processStartToken(process.pid),
-      acquiredAt: new Date().toISOString(),
-      renewedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
-    unlinkSync(lockPath);
-
-    const contended = await waitForValue(() => (stdout.includes("lease contended") ? "contended" : null), 20_000);
-    assert.equal(contended, "contended", stdout);
-    assert.equal(existsSync(join(runDir, "supervisor-attention.json")), false, "benign lease contention must not raise attention");
-  } finally {
-    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
-    try { unlinkSync(lockPath); } catch {}
-    supervisor.kill("SIGTERM");
-  }
-});
-
-test("supervisor persists and delivers attention when resume is refused", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-supervisor-attention-"));
-  const path = writeContract(directory, fixture({ id: "supervisor-attention-run", pollIntervalMs: 10 }));
-  const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  orphan(runDir, "build");
-  const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
-  metadata.sourceIdentity.cwd = "/unexpected-source";
-  writeFileSync(join(runDir, "run.json"), JSON.stringify(metadata));
-  const delivered = join(directory, "attention.jsonl");
-  const notifier = join(directory, "notify-attention.mjs");
-  writeFileSync(notifier, `#!/usr/bin/env node\nimport { appendFileSync } from "node:fs"; let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => { input += chunk; }); process.stdin.on("end", () => { appendFileSync(${JSON.stringify(delivered)}, input); });\n`);
-  chmodSync(notifier, 0o755);
-  const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
-  const previousCodex = process.env.INTENT_FACTORY_CODEX_BIN;
-  process.env.INTENT_FACTORY_NOTIFY_BIN = notifier;
-  process.env.INTENT_FACTORY_CODEX_BIN = fakeCodex(directory, "pass");
-  try {
-    await superviseRun(runDir, 0.01);
-    const attention = JSON.parse(readFileSync(join(runDir, "supervisor-attention.json"), "utf8"));
-    assert.equal(attention.code, "resume_failed");
-    const events = readFileSync(delivered, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.ok(events.some((event) => event.type === "run.attention" && event.data.code === "resume_failed"));
-  } finally {
-    if (previousNotify === undefined) delete process.env.INTENT_FACTORY_NOTIFY_BIN;
-    else process.env.INTENT_FACTORY_NOTIFY_BIN = previousNotify;
-    if (previousCodex === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
-    else process.env.INTENT_FACTORY_CODEX_BIN = previousCodex;
-  }
-});
 
 test("detached resume surfaces bootstrap failure before reporting success", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-bootstrap-failure-"));

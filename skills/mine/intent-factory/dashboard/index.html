@@ -400,7 +400,7 @@ function runHtml(r) {
   return `<details class="card run" data-run="${esc(r.id)}" ${open ? "open" : ""}>
     <summary>
       <span class="rid">${esc(r.id)}</span>
-      ${r.terminal ? pill(r.nodes.every((n) => n.status === "done") ? "done" : "blocked", "small") : (r.leaseHealthy ? `<span class="pill small running">controller alive</span>` : `<span class="pill small failed">controller lost</span>`)}
+      ${r.terminal ? pill(r.nodes.every((n) => n.status === "done") ? "done" : "blocked", "small") : (r.controllerActive ? `<span class="pill small running">controller alive</span>` : `<span class="pill small failed">controller lost</span>`)}
       <span class="dim">${esc(r.summary ?? "")}</span>
       <span class="ago">${fmtTokens(r.totals?.weightedInputTokens)} weighted · started ${fmtAgo(r.startedAt)} · last event ${fmtAgo(r.lastEventAt)}</span>
     </summary>
