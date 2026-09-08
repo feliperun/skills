@@ -427,6 +427,7 @@ export async function superviseCampaignOnce(campaignPath, options = {}) {
   }
   if (state.status !== "attention" && state.runs.length > 0 && state.runs.every((record) => record.status === "done")) {
     state.status = "completed";
+    state.attention = null;
     state.updatedAt = now;
     // Evidence is durable before the derived status becomes visible:
     // the outbox event exists before readers can observe "completed".

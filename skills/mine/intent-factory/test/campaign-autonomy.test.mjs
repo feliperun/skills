@@ -206,6 +206,11 @@ test("a completed repair settles its failed source run and completes the campaig
   const value = tempRepo();
   try {
     await startCampaign(value.campaignPath, { executor: async () => {} });
+    const statePath = join(value.campaignPath, CAMPAIGN_STATE_FILE);
+    const attentionState = JSON.parse(readFileSync(statePath, "utf8"));
+    attentionState.status = "attention";
+    attentionState.attention = { code: "stale", message: "stale attention" };
+    writeJsonAtomic(statePath, attentionState);
     const initialContractPath = join(value.campaignPath, value.plan.initialRunContract);
     const initialContract = JSON.parse(readFileSync(initialContractPath, "utf8"));
     const initialRunDir = join(value.root, ".runs", "initial-run");
@@ -232,6 +237,7 @@ test("a completed repair settles its failed source run and completes the campaig
 
     const status = await superviseCampaignOnce(value.campaignPath, { executor: async () => { throw new Error("must not dispatch a completed repair"); } });
     assert.equal(status.status, "completed");
+    assert.equal(status.attention, null);
     const runs = /** @type {{status: string}[]} */ (status.runs);
     assert.ok(runs.every((run) => run.status === "done"));
   } finally { cleanup(value); }
