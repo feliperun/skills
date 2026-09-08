@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** @typedef {{status: "ready", path: string, branch: string, commit: string|null, baseSha: string}} AttemptWorktree */
@@ -59,12 +59,16 @@ export function createRunRef(repo, runId, head) {
 }
 
 /**
- * @param {{repo: string, runDir: string, runId: string, nodeId: string, attempt: number}} args
+ * @param {{repo: string, runDir: string, runId: string, nodeId: string, attempt: number, base?: string}} args
+ *   `base` cuts the new branch from a sealed sha instead of the run ref tip —
+ *   the previous attempt's sealed work, when it left one (TECH-SPEC lean
+ *   v0.3 section 3 rule 4). Omitted, it falls back to the run ref tip as
+ *   before.
  * @returns {AttemptWorktree}
  */
-export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt }) {
-  const baseSha = gitHead(repo, runRefName(runId));
-  if (!baseSha) throw Object.assign(new Error(`integration ref is unavailable for ${runId}`), { code: "run_ref_missing" });
+export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt, base }) {
+  const runRefSha = gitHead(repo, runRefName(runId));
+  if (!runRefSha) throw Object.assign(new Error(`integration ref is unavailable for ${runId}`), { code: "run_ref_missing" });
   const path = attemptWorktreePath(runDir, runId, nodeId, attempt);
   const branch = attemptBranchName(runId, nodeId, attempt);
   mkdirSync(dirname(path), { recursive: true });
@@ -75,9 +79,37 @@ export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt }) 
   } else if (existingBranch) {
     execFileSync("git", ["-C", repo, "worktree", "add", path, branch], { stdio: "ignore" });
   } else {
-    execFileSync("git", ["-C", repo, "worktree", "add", path, "-b", branch, runRefName(runId)], { stdio: "ignore" });
+    execFileSync("git", ["-C", repo, "worktree", "add", path, "-b", branch, base ?? runRefName(runId)], { stdio: "ignore" });
   }
-  return { status: "ready", path, branch, commit: gitHead(path), baseSha };
+  linkNodeModules(repo, path);
+  return { status: "ready", path, branch, commit: gitHead(path), baseSha: base ?? runRefSha };
+}
+
+/**
+ * Link the repository's installed `node_modules` into a fresh attempt
+ * worktree as a symlink — never copied — so repository-level tooling that
+ * needs installed binaries (commitlint through the commit-msg hook,
+ * `npm run typecheck`) works inside the attempt without an install. A no-op
+ * when the repository has nothing installed, or the worktree already has an
+ * entry at that path.
+ *
+ * @param {string} repo @param {string} path @returns {void}
+ */
+function linkNodeModules(repo, path) {
+  const source = join(repo, "node_modules");
+  if (!existsSync(source)) return;
+  const target = join(path, "node_modules");
+  if (existsSync(target) || isSymlink(target)) return;
+  symlinkSync(source, target);
+}
+
+/** @param {string} path @returns {boolean} */
+function isSymlink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -251,6 +251,7 @@ if (process.argv.includes("--version")) {
     const protocolModes = new Set(["write-result", "write-unexpected", "write-unexpected-judge-prompt", "write-unexpected-long-review", "new-symlink-escape", "retargeted-symlink-escape", "write-outside-file-root", "write-under-file-root"]);
     if (mode !== "exhausted") console.log(JSON.stringify({type:"thread.started",thread_id:"fake-thread"}));
     if (mode === "write-allowed" && !judge) writeFileSync("README.md", "worker output\\n");
+    if (mode === "continuation-carries-file" && !judge && !existsSync("carried.txt")) writeFileSync("carried.txt", "attempt-1\\n");
     if (mode === "write-unexpected" && !judge) writeFileSync("unexpected.txt", "out of scope\\n");
     if (mode === "new-symlink-escape" && !judge) {
       symlinkSync("outside.txt", "alias.txt");

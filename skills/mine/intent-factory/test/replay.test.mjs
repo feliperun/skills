@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
 import { runContract, resumeRun } from "../scripts/runner.mjs";
 import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../scripts/integrate.mjs";
 import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../scripts/worktree.mjs";
+import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
 import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
 const bin = fileURLToPath(new URL("../scripts/drivers/replay-bin.mjs", import.meta.url));
@@ -737,6 +738,64 @@ test("two sequential attempts use the first integrated head as the second base",
   assert.equal(second.status, "accepted");
   assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "first.txt"), "first\n");
   assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "second.txt"), "second\n");
+});
+
+test("a retried attempt continues from the previous attempt's sealed sha instead of the integration head", async () => {
+  const fixture = integrationFixture("continue-after-verification-failure");
+  const first = await integrateFixtureAttempt(fixture, "build", 1, (workspace) => writeFileSync(join(workspace, "first.txt"), "first\n"), {
+    verifyCandidate: async () => ({ passed: false, error: "candidate failed" }),
+  });
+  assert.equal(first.status, "verification_failed", "the failed candidate never moves the run ref");
+  assert.equal(first.sealed.empty, false);
+
+  const worktree2 = createAttemptWorktree({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "build", attempt: 2, base: first.sealed.sha,
+  });
+  assert.equal(worktree2.baseSha, first.sealed.sha, "the second attempt's base is the first attempt's sealed sha, not the run ref tip");
+  assert.equal(readFileSync(join(worktree2.path, "first.txt"), "utf8"), "first\n", "the second attempt starts from the first attempt's sealed edit");
+  writeFileSync(join(worktree2.path, "second.txt"), "second\n");
+  const sealed2 = sealAttempt({ repo: fixture.repo, path: worktree2.path, baseSha: worktree2.baseSha, runId: fixture.id, nodeId: "build", attempt: 2 });
+  const result2 = await integrateAttempt({
+    repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "build", attempt: 2,
+    attemptSha: sealed2.sha, branch: worktree2.branch, verificationEvidence: { passed: true },
+    verifyCandidate: async () => ({ passed: true }),
+  });
+  assert.ok(result2);
+  assert.equal(result2.status, "accepted");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "first.txt"), "first\n", "the accepted candidate carries the continued attempt's whole history");
+  assert.equal(showRefFile(fixture.repo, runRefName(fixture.id), "second.txt"), "second\n");
+});
+
+test("an attempt that sealed nothing leaves the next attempt cut from the integration head", () => {
+  const fixture = integrationFixture("no-continuation-when-empty");
+  const { sealed } = sealFixtureAttempt(fixture, "build", 1);
+  assert.equal(sealed.empty, true, "an attempt with no edits seals empty");
+  const worktree2 = createAttemptWorktree({ repo: fixture.repo, runDir: fixture.runDir, runId: fixture.id, nodeId: "build", attempt: 2 });
+  assert.equal(worktree2.baseSha, gitHead(fixture.repo, runRefName(fixture.id)), "with nothing sealed, the next attempt is cut from the run ref tip as before");
+});
+
+test("an attempt worktree links the repository's node_modules as a symlink, and the workspace snapshot excludes it", () => {
+  const repo = mkdtempSync(join(tmpdir(), "node-modules-symlink-git-"));
+  writeFileSync(join(repo, "README.md"), "base\n");
+  writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+  initializeGit(repo);
+  const runId = "node-modules-symlink";
+  const runDir = join(repo, ".runs", runId);
+  mkdirSync(runDir, { recursive: true });
+  createRunRef(repo, runId, gitHead(repo));
+  mkdirSync(join(repo, "node_modules", "left-pad"), { recursive: true });
+  writeFileSync(join(repo, "node_modules", "left-pad", "index.js"), "module.exports = () => {};\n");
+
+  const worktree = createAttemptWorktree({ repo, runDir, runId, nodeId: "build", attempt: 1 });
+  const linkPath = join(worktree.path, "node_modules");
+  assert.equal(lstatSync(linkPath).isSymbolicLink(), true, "node_modules is linked, never copied");
+  assert.equal(readFileSync(join(linkPath, "left-pad", "index.js"), "utf8"), "module.exports = () => {};\n", "the linked tree is readable through the symlink");
+
+  const snapshot = captureWorkspaceSnapshot(worktree.path);
+  assert.ok(
+    !snapshot.entries.some((entry) => entry.path === "node_modules" || entry.path.startsWith("node_modules/")),
+    "the workspace snapshot never captures node_modules, symlinked or not, and never reports it as a symlink escape",
+  );
 });
 
 test("failed candidate verification leaves the run ref unchanged and keeps the attempt worktree", async () => {

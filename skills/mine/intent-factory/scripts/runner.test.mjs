@@ -994,6 +994,32 @@ test("fails deterministic verification before the judge", async () => {
   assert.match(state.gate.findings[0].evidence, /exit=2/u);
 });
 
+test("a retried attempt continues from the previous attempt's sealed worktree instead of a fresh cut from the integration head", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-continue-sealed-"));
+  const path = writeContract(directory, fixture({
+    id: "continue-sealed-run",
+    pollIntervalMs: 10,
+    nodes: [{
+      id: "build",
+      type: "backend",
+      taskPacket: packet({ writeFiles: ["README.md", "carried.txt"], verification: [{ argv: [process.execPath, "-e", "process.exit(2)"] }] }),
+      gate: {},
+    }],
+  }));
+  const result = await withFakeCodex(directory, "continuation-carries-file", () => runContract(path));
+  const state = nodeState(result);
+  assert.equal(state.status, "exhausted");
+  assert.equal(state.attempt, 2);
+  assert.equal(state.revisions, 1);
+  assert.equal(state.worktree?.previousAttempt, 1, "the second attempt's worktree records which sealed attempt it continues");
+  assert.ok(state.worktree?.path && existsSync(state.worktree.path), "the exhausted attempt keeps its worktree for inspection");
+  assert.equal(
+    readFileSync(join(state.worktree.path, "carried.txt"), "utf8"),
+    "attempt-1\n",
+    "attempt 2 began from attempt 1's sealed edit rather than a fresh cut from the integration head",
+  );
+});
+
 test("oversized judge prompt fails before judge spawn or persistence", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-prompt-cap-"));
   const path = writeContract(directory, fixture({

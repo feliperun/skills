@@ -97,7 +97,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{available: boolean, exhaustedUntil: string|null, reason: string}} RuntimeAvailability */
 /** @typedef {{history: RoutingHistoryEntry[], currentOverride: RoutingOverride|null, assignments?: RuntimeAssignments, availability?: Record<string, RuntimeAvailability>}} RoutingState */
 /** @typedef {{revision?: number, heartbeatCount: number, dryHeartbeatCount: number, progressSignature?: string|null, lastHeartbeatAt: string|null, lastProgressAt: string|null, nextCheckAt?: string|null}} ProgressState */
-/** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null}} WorktreeState */
+/** @typedef {{status: "unassigned"|"provisioning"|"ready"|"failed"|"removed", path: string|null, branch: string|null, commit: string|null, baseSha?: string|null, previousAttempt?: number|null}} WorktreeState */
 /** @typedef {{schemaVersion: number, contractVersion: string, id: string, type: string, sourceIdentity: SourceIdentity, packetHash: string, status: NodeStatus, phase: NodePhase, attempt: number, revisions: number, judgeFailures?: number, review?: ("none"|"advisory"|"blocking"), runtime: RuntimeSnapshot|null, blockedBy: string[], startedAt: string|null, updatedAt: string, result: unknown, gate: GateResult|null, error: SnapshotError|null, usage?: Usage, costUsd?: number, routing?: RoutingState|null, progress?: ProgressState|null, worktree?: WorktreeState|null, integratedHead?: string|null, invocations?: Invocation[], executionOverrides?: ExecutionOverride[], verification?: VerificationState|null, scope?: BoundedScope|null, scopeFindings?: ScopeFindings|null, previousAttempt?: string}} NodeSnapshot */
 /** @typedef {{schemaVersion: number, contractVersion: string, pid: number, processStartToken: string|null, startedAt: string, sourceIdentity: SourceIdentity, integrationRef?: string, identityWarnings?: string[]}} RunMetadata */
 /** @typedef {{schemaVersion: number, contractVersion: string, at: string, node: string, from?: string, to: string, type?: string, phase?: string, attempt?: number, role?: "worker"|"judge", status?: NodeStatus, runtime?: string, currentRuntime?: string, errorCode?: string, error?: SnapshotError, verdict?: string, summary?: string, revisions?: number, sourceIdentity: SourceIdentity, packetHash: string, override?: unknown, recovery?: unknown, invocationId?: string, unexpectedPaths?: string[], unexpectedPathCount?: number}} EventRecord */
@@ -1027,13 +1027,14 @@ function validateProgressState(value, label) {
  */
 function validateWorktreeState(value, label) {
   assertObject(value, label);
-  rejectUnknown(value, new Set(["status", "path", "branch", "commit", "baseSha"]), label);
+  rejectUnknown(value, new Set(["status", "path", "branch", "commit", "baseSha", "previousAttempt"]), label);
   if (!["unassigned", "provisioning", "ready", "failed", "removed"].includes(/** @type {string} */ (value.status))) {
     throw new TypeError(`${label}.status is invalid`);
   }
   for (const [key, maxBytes] of /** @type {[string, number][]} */ ([['path', 4096], ['branch', 512], ['commit', 256], ['baseSha', 256]])) {
     if (value[key] !== undefined && value[key] !== null) boundedString(value[key], `${label}.${key}`, maxBytes);
   }
+  if (value.previousAttempt !== undefined && value.previousAttempt !== null) positiveInteger(value.previousAttempt, `${label}.previousAttempt`);
 }
 
 /**

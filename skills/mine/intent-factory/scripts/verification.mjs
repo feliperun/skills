@@ -555,6 +555,13 @@ function relevantWorkspacePaths(cwd) {
   for (const value of output.toString("utf8").split("\0")) {
     if (!value) continue;
     if (value === ".runs" || value.startsWith(".runs/")) continue;
+    // Same exclusion as the ignore-source walk above: a repository's
+    // gitignore conventionally excludes `node_modules/` as a directory
+    // pattern, which does not match the symlink an attempt worktree links it
+    // in as (TECH-SPEC lean v0.3 section 3 rule 4). Exclude it here too, so
+    // linking never turns an installed dependency tree into an unexpected
+    // workspace write or a symlink escape.
+    if (value === "node_modules" || value.startsWith("node_modules/")) continue;
     if (paths.size >= VERIFICATION_LIMITS.snapshotEntries) {
       throw fail("snapshot_too_large", `workspace snapshot exceeds ${VERIFICATION_LIMITS.snapshotEntries} entries`);
     }

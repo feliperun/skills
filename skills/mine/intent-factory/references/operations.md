@@ -17,6 +17,15 @@ Provider commands, snapshots, verification, progress monitoring, capsule
 capture, and judge inspection receive the attempt path as their cwd. The run
 directory remains the home for state, logs, journals, and control artifacts.
 
+A retried attempt never discards the previous one's edits: the controller
+seals the previous attempt's worktree first, and when that seal carries a
+diff, the next attempt's branch and worktree are cut from that sealed sha
+instead of the run ref tip, with `worktree.previousAttempt` recording which
+attempt it continues. A previous attempt that sealed empty falls back to the
+run ref tip, as before. When the repository root has an installed
+`node_modules`, every attempt worktree links it in as a symlink, never a
+copy.
+
 The worker-result prompt points at the attempt-local `.runs/results` sidecar.
 After the worker closes, the controller copies that JSON into the canonical
 run-directory result path. The sidecar is excluded from attempt commits.
@@ -64,7 +73,11 @@ not infer verified work from ancestry. Preparation failures clean and rebuild
 the candidate deterministically; a verified transaction reuses its recorded
 candidate evidence. Recovery handles the conditional ref move, the done-state
 write, worktree removal, and terminal event as separate idempotent effects.
-This includes a candidate whose SHA equals the previous run-ref tip.
+This includes a candidate whose SHA equals the previous run-ref tip. A resume
+that re-dispatches a failed, stalled, exhausted, or canceled node retries it
+in place through the same continuation rule as any other retry: the next
+attempt is cut from the previous attempt's sealed sha, not a fresh worktree
+from the run ref.
 
 ## Controller lock and takeover
 

@@ -1863,8 +1863,41 @@ function attemptWorkspace(state) {
 }
 
 /**
+ * Seal the worktree the previous attempt left behind so its edits become the
+ * base of the next attempt instead of being abandoned in a discarded
+ * worktree (TECH-SPEC lean v0.3 section 3 rule 4). By the time this runs,
+ * `state.worktree` still points at the previous attempt — the caller always
+ * increments `state.attempt` before dispatching the next one — so that
+ * attempt's number is `state.attempt - 1`. Returns null when there is no
+ * previous worktree to seal, or it carries no diff from its own base: the
+ * next attempt is then cut from the integration head as before.
+ *
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @returns {{sha: string, attempt: number}|null}
+ */
+function sealPreviousAttempt(contract, node, state) {
+  const path = attemptWorkspace(state);
+  if (!path || !state.worktree?.branch || !state.worktree.baseSha) return null;
+  const attempt = state.attempt - 1;
+  const sealed = sealAttempt({
+    repo: contract.cwd,
+    path,
+    baseSha: state.worktree.baseSha,
+    runId: contract.id,
+    nodeId: node.id,
+    attempt,
+  });
+  return sealed.empty ? null : { sha: sealed.sha, attempt };
+}
+
+/**
  * Create the isolated workspace for the current attempt, or reuse the exact
- * one already recorded for a controller restart.
+ * one already recorded for a controller restart. A retried attempt continues
+ * from the previous attempt's sealed sha rather than a fresh cut from the
+ * integration head, so sealed work is never abandoned in a discarded
+ * worktree.
  *
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
@@ -1876,15 +1909,17 @@ function attemptWorkspace(state) {
 function ensureAttemptWorkspace(contract, node, state, runDir, lock) {
   const expectedPath = attemptWorktreePath(runDir, contract.id, node.id, state.attempt);
   if (state.worktree?.path === expectedPath && attemptWorkspace(state)) return expectedPath;
+  const previous = sealPreviousAttempt(contract, node, state);
   const worktree = createAttemptWorktree({
     repo: contract.cwd,
     runDir,
     runId: contract.id,
     nodeId: node.id,
     attempt: state.attempt,
+    base: previous?.sha,
   });
   const boundary = captureWorkspaceScope(worktree.path, workerScope(node.taskPacket));
-  state.worktree = worktree;
+  state.worktree = previous ? { ...worktree, previousAttempt: previous.attempt } : worktree;
   state.scope = emptyScope(boundary);
   writeNode(runDir, state, lock);
   return worktree.path;
