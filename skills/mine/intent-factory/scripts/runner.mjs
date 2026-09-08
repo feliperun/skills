@@ -293,7 +293,7 @@ function activeLivenessNode(contract, states) {
  * @param {Map<string, NodeSnapshot>} states
  * @returns {string}
  */
-function livenessState(states) {
+export function livenessState(states) {
   const all = [...states.values()];
   const running = all.filter((state) => state.status === "running");
   if (running.some((state) => state.phase !== "judge")) return "running";
@@ -343,7 +343,11 @@ function lastLivenessProgressAt(states, runDir) {
   try {
     const metadata = /** @type {{startedAt?: unknown}} */ (readJson(join(runDir, "run.json")));
     if (typeof metadata.startedAt === "string") return metadata.startedAt;
-  } catch {}
+  } catch (error) {
+    // run.json not existing yet (a run still bootstrapping) is expected; a
+    // metadata file that exists but will not parse is a defect worth surfacing.
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
   return "1970-01-01T00:00:00.000Z";
 }
 

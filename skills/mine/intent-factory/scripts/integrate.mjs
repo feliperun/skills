@@ -447,7 +447,14 @@ function conflictPaths(repo, first, second, output) {
     for (const path of git(repo, ["diff", "--name-only", base, second]).split("\n").filter(Boolean)) {
       if (left.has(path)) paths.add(path);
     }
-  } catch {}
+  } catch (error) {
+    // Two candidates with no common ancestor cannot be diffed against a base;
+    // the paths already parsed from the merge output above are still
+    // reported. Anything else is a git defect worth surfacing.
+    const stderr = /** @type {{stderr?: unknown}} */ (error).stderr;
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/no merge base|unrelated histories/iu.test(String(stderr ?? message))) throw error;
+  }
   return [...paths].sort();
 }
 

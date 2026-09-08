@@ -685,6 +685,8 @@ test("public campaign CLI continues a detached controller after the launcher exi
     writeFileSync(join(root, ".gitignore"), ".runs/\n");
     writeFileSync(join(root, "README.md"), "ready\n");
     writeFileSync(join(root, "contract.json"), "{}\n");
+    execFileSync("git", ["-C", root, "add", "."]);
+    execFileSync("git", ["-C", root, "-c", "user.email=runner@example.test", "-c", "user.name=runner", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
     writeJsonAtomic(contractPath, fixture({
       id: "cli-run",
       campaignId,
