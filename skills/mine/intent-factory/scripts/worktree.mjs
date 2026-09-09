@@ -123,7 +123,12 @@ export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
   // ignores `.runs/` (every real worker writes it), so stage everything and
   // unstage the sidecar afterwards; that also covers a repository that does
   // not ignore it.
-  const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs"]);
+  // The probe must exclude exactly what the staging step below unstages.
+  // `node_modules/` in .gitignore does not match the symlink of the same name,
+  // so a re-sealed attempt whose only entry is that link would look dirty here,
+  // stage it, unstage it, and then commit an empty change set — which exits 1
+  // and turns every retry of an already-sealed attempt into a hard failure.
+  const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs", ":(exclude)node_modules"]);
   if (dirty) {
     execFileSync("git", ["-C", path, "add", "-A", "--", "."], { stdio: "ignore" });
     // node_modules is linked into the worktree as a symlink, which `node_modules/`
