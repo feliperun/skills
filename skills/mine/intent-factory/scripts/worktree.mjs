@@ -175,6 +175,11 @@ export function createCandidateWorktree({ repo, runDir, runId, ref = candidateRe
   const path = candidateWorktreePath(runDir, runId);
   mkdirSync(dirname(path), { recursive: true });
   execFileSync("git", ["-C", repo, "worktree", "add", "--detach", path, ref], { stdio: "ignore" });
+  // The candidate runs the same node verification the attempt just passed, so
+  // it needs the same installed binaries. Without this link a suite that shells
+  // out to a devDependency passes in the attempt and fails at integration, and
+  // the failure reads as the node's own defect rather than a missing install.
+  linkNodeModules(repo, path);
   return path;
 }
 
