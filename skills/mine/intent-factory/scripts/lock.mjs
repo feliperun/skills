@@ -11,6 +11,7 @@
  * process can ever hold a live pid, so at most one takeover can ever observe
  * a captured lock as stale.
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
@@ -48,19 +49,34 @@ export function lockPath(runDir) {
 }
 
 /**
- * The Linux process start time (field 22 of /proc/<pid>/stat) distinguishes a
- * live pid from a recycled one. Other platforms have no cheap equivalent, so
- * the pid probe alone decides there.
+ * The process start time distinguishes a live pid from a recycled one. On
+ * Linux, field 22 of /proc/<pid>/stat. On darwin, there is no /proc, so the
+ * fingerprint comes from the OS process table instead: `ps -o lstart=`
+ * reports the same live process's own start time on every call and a
+ * different one for whatever process next reuses that pid, without a
+ * compiled addon or elevated privileges. Every other platform has no cheap
+ * equivalent, so the pid probe alone decides there.
  * @param {number|null} pid @returns {string|null}
  */
 export function processStartToken(pid) {
-  if (process.platform !== "linux" || !pid) return null;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
-  } catch {
-    return null;
+  if (!pid) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+    } catch {
+      return null;
+    }
   }
+  if (process.platform === "darwin") {
+    try {
+      const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
+      return started.length > 0 ? started : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /** @param {number|null|undefined} pid @returns {boolean} */
