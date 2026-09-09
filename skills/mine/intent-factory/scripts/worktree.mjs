@@ -16,7 +16,7 @@ export function candidateRefName(runId) {
 }
 
 /** @param {string} runDir @param {string} runId @returns {string} */
-export function worktreeRoot(runDir, runId) {
+function worktreeRoot(runDir, runId) {
   return join(dirname(runDir), "worktrees", runId);
 }
 
@@ -26,7 +26,7 @@ export function attemptWorktreePath(runDir, runId, nodeId, attempt) {
 }
 
 /** @param {string} runId @param {string} nodeId @param {number} attempt @returns {string} */
-export function attemptBranchName(runId, nodeId, attempt) {
+function attemptBranchName(runId, nodeId, attempt) {
   return `if/${runId}/${nodeId}/${attempt}`;
 }
 

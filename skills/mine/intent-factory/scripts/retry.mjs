@@ -17,23 +17,23 @@
 import { Buffer } from "node:buffer";
 
 /** Heading of the section appended to a retried attempt's worker and judge prompt. */
-export const PREVIOUS_ATTEMPT_HEADING = "Previous attempt";
+const PREVIOUS_ATTEMPT_HEADING = "Previous attempt";
 
 /** Hard ceiling for the whole `Previous attempt` section, in bytes. */
-export const PREVIOUS_ATTEMPT_MAX_BYTES = 8 * 1024;
+const PREVIOUS_ATTEMPT_MAX_BYTES = 8 * 1024;
 
 /**
  * Node statuses an ordinary resume re-dispatches as attempt plus one.
  * `blocked` is deliberately absent: only its two error codes have a retry
  * meaning, and `context_missing` stays terminal.
  */
-export const RETRYABLE_STATUSES = new Set(["failed", "stalled", "exhausted", "canceled"]);
+const RETRYABLE_STATUSES = new Set(["failed", "stalled", "exhausted", "canceled"]);
 
 /**
  * @param {{status?: string, error?: {code?: string}|null}} state
  * @returns {boolean}
  */
-export function isJudgeUnavailable(state) {
+function isJudgeUnavailable(state) {
   return state.status === "blocked" && state.error?.code === "judge_unavailable";
 }
 
@@ -41,7 +41,7 @@ export function isJudgeUnavailable(state) {
  * @param {{status?: string, error?: {code?: string}|null}} state
  * @returns {boolean}
  */
-export function isDependencyFailed(state) {
+function isDependencyFailed(state) {
   return state.status === "blocked" && state.error?.code === "dependency_failed";
 }
 
@@ -57,7 +57,7 @@ export function isUnknownEffectStop(state) {
  * @param {{status?: string, error?: {code?: string}|null}} state
  * @returns {boolean}
  */
-export function isRetryableFailure(state) {
+function isRetryableFailure(state) {
   return RETRYABLE_STATUSES.has(/** @type {string} */ (state.status)) || isDependencyFailed(state);
 }
 
@@ -70,7 +70,7 @@ export function isRetryableFailure(state) {
  * @param {string} nodeId
  * @returns {Set<string>}
  */
-export function retryTargets(planNodes, nodeId) {
+function retryTargets(planNodes, nodeId) {
   const targets = new Set([nodeId]);
   let grew = true;
   while (grew) {

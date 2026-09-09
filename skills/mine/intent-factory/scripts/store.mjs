@@ -15,7 +15,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
-export const BOOTSTRAP_FILE = "bootstrap.json";
+const BOOTSTRAP_FILE = "bootstrap.json";
 const JSONL_RECOVERY_TAIL_BYTES = 64 * 1024;
 
 /**

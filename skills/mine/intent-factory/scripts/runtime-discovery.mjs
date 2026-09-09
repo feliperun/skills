@@ -16,15 +16,6 @@ export const DISCOVERY_RUNTIME_DEFINITIONS = Object.freeze({
   claude: { driver: "claude", model: "claude-sonnet-5", vendor: "anthropic", tier: 2, costRank: 2 },
 });
 
-/** @param {unknown} value @returns {value is RuntimeAvailability} */
-export function isRuntimeAvailability(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = /** @type {Record<string, unknown>} */ (value);
-  return typeof record.available === "boolean"
-    && (record.exhaustedUntil === null || typeof record.exhaustedUntil === "string")
-    && typeof record.reason === "string";
-}
-
 /**
  * Normalize a provider envelope or recorded provider response into the
  * availability shape used by discovery and routing.

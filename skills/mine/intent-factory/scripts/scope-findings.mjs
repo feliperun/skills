@@ -18,7 +18,7 @@ export function scopeFindingFromScope(scope) {
  * @param {{unexpectedPaths: string[], unexpectedPathCount?: number}} scope
  * @returns {string}
  */
-export function describeUnexpectedPaths(scope) {
+function describeUnexpectedPaths(scope) {
   const count = scope.unexpectedPathCount ?? scope.unexpectedPaths.length;
   const shown = scope.unexpectedPaths.slice(0, 8).join(", ");
   return `unexpected paths changed (${count}): ${shown}`;

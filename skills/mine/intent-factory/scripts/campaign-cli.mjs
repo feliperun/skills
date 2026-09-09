@@ -133,7 +133,7 @@ async function watch(campaignId, values) {
  * @param {{pollMs?: number, once?: boolean, now?: () => number, sleep?: (ms: number) => Promise<void>, emit?: (line: string) => void}} [options]
  * @returns {Promise<void>}
  */
-export async function watchCampaignWake(campaignPath, runsDir, options = {}) {
+async function watchCampaignWake(campaignPath, runsDir, options = {}) {
   const pollMs = options.pollMs ?? DEFAULT_WAKE_POLL_MS;
   const now = options.now ?? (() => Date.now());
   const sleep = options.sleep ?? ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));

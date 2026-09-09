@@ -23,10 +23,10 @@ import { TOOL_OUTPUT_LIMIT_BYTES, truncateToolOutput } from "./drivers/exec-json
 export const HOOK_PATH = fileURLToPath(import.meta.url);
 
 /** Tools whose only purpose is to observe a background invocation. */
-export const BACKGROUND_OUTPUT_TOOLS = ["TaskOutput", "BashOutput", "Monitor"];
+const BACKGROUND_OUTPUT_TOOLS = ["TaskOutput", "BashOutput", "Monitor"];
 
 /** PreToolUse matcher covering every tool the policy may deny. */
-export const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS].join("|");
+const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS].join("|");
 
 /** Standard foreground-only denial; it tells the model how to retry. */
 export const FOREGROUND_ONLY_DENIAL = "background tool invocation denied by the foreground-only tool policy; rerun the tool in the foreground and wait for it to finish";
@@ -35,7 +35,7 @@ export const FOREGROUND_ONLY_DENIAL = "background tool invocation denied by the 
  * @param {string[]} argv
  * @returns {{foregroundOnly: boolean, maxToolOutputBytes: number}}
  */
-export function parsePolicy(argv) {
+function parsePolicy(argv) {
   const flags = parseArgs({ args: argv, options: {
     "foreground-only": { type: "boolean", default: false },
     "max-tool-output-bytes": { type: "string" },
@@ -91,7 +91,7 @@ export function hookSettings(policy) {
  * @param {{tool_name?: unknown, tool_input?: unknown}} payload
  * @returns {{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: string}}|null}
  */
-export function preToolUseDecision(policy, payload) {
+function preToolUseDecision(policy, payload) {
   if (policy.foregroundOnly !== true) return null;
   const name = typeof payload?.tool_name === "string" ? payload.tool_name : "";
   const input = payload?.tool_input;
@@ -117,7 +117,7 @@ export function preToolUseDecision(policy, payload) {
  * @param {unknown} toolResponse
  * @returns {string|Record<string, unknown>|null}
  */
-export function boundedToolOutput(maxBytes, toolResponse) {
+function boundedToolOutput(maxBytes, toolResponse) {
   if (typeof toolResponse === "string") {
     const bounded = truncateToolOutput(toolResponse, maxBytes);
     return bounded === toolResponse ? null : bounded;
@@ -169,7 +169,7 @@ function allocateTextBudgets(sizes, maxBytes) {
  * @param {unknown} payload
  * @returns {{hookSpecificOutput: Record<string, unknown>}|null}
  */
-export function hookDecision(policy, payload) {
+function hookDecision(policy, payload) {
   if (!payload || typeof payload !== "object") return null;
   const record = /** @type {Record<string, unknown>} */ (payload);
   const event = typeof record.hook_event_name === "string"

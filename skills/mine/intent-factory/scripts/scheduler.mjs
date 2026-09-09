@@ -235,7 +235,7 @@ export async function runContract(contractPath) {
  * @param {ValidatedContract} contract
  * @returns {Promise<{assignments: Record<string, {worker: string, judge: string, composedWorker: boolean, composedJudge: boolean}>, availability: Record<string, import("./runtime-discovery.mjs").RuntimeAvailability>}>}
  */
-export async function runtimeAssignments(contract) {
+async function runtimeAssignments(contract) {
   const needsComposition = contract.nodes.some((node) =>
     (node.runtime === undefined && contract.runtimeDefaults?.worker === undefined)
     || (node.gate.enabled && node.gate.runtime === undefined && contract.runtimeDefaults?.judge === undefined));
@@ -654,20 +654,8 @@ export async function resumeRun(runDirPath, options = {}) {
  * @param {NodeSnapshot} state
  * @returns {boolean}
  */
-export function isBlockedContextTerminal(state) {
+function isBlockedContextTerminal(state) {
   return state.status === "blocked" && state.error?.code === "context_missing";
-}
-
-/**
- * A reconciled unknown effect is a deliberate manual-stop boundary. It must
- * remain blocked on every later resume until a human changes the persisted
- * state; automatically turning it back into pending would replay the effect.
- *
- * @param {NodeSnapshot} state
- * @returns {boolean}
- */
-export function isUnknownEffectTerminal(state) {
-  return state.status === "blocked" && state.error?.code === "unknown_effect_reconciled";
 }
 
 /**
@@ -680,7 +668,7 @@ export function isUnknownEffectTerminal(state) {
  * @param {{identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
  * @returns {Promise<RunOutcome>}
  */
-export async function driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resume = {}) {
+async function driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resume = {}) {
   lock.assert();
   assertEnvironmentReady(contract, runDir, sourceIdentity);
   const runsDir = join(contract.cwd, ".runs");
@@ -896,7 +884,7 @@ export async function driveRun(contract, runDir, states, campaign, lock, sourceI
  * @param {string} [integrationRef]
  * @returns {RunMetadata}
  */
-export function createRunMetadata(lock, sourceIdentity, resume = {}, integrationRef = undefined) {
+function createRunMetadata(lock, sourceIdentity, resume = {}, integrationRef = undefined) {
   const current = lock.current;
   const metadata = {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -919,7 +907,7 @@ export function createRunMetadata(lock, sourceIdentity, resume = {}, integration
  * @param {string} campaignPath
  * @returns {Promise<import("./integrate.mjs").IntegrationResult|null>}
  */
-export async function recoverIntegrationTransactions(contract, runDir, states, lock, campaignPath) {
+async function recoverIntegrationTransactions(contract, runDir, states, lock, campaignPath) {
   return recoverIntegrations({
     repo: contract.cwd,
     runDir,
@@ -994,7 +982,7 @@ export async function recoverIntegrationTransactions(contract, runDir, states, l
  * @param {Map<string, NodeSnapshot>} states
  * @param {LockHandle} lock
  */
-export function blockDependents(contract, runDir, states, lock) {
+function blockDependents(contract, runDir, states, lock) {
   for (const node of contract.nodes) {
     const state = states.get(node.id);
     if (!state) continue;
@@ -1021,9 +1009,9 @@ export function readRunNodes(runDir, contract) {
   });
 }
 
-export const DRIVER_PROBE_RETRIES = 2;
+const DRIVER_PROBE_RETRIES = 2;
 
-export const DRIVER_PROBE_RETRY_BACKOFF_MS = 250;
+const DRIVER_PROBE_RETRY_BACKOFF_MS = 250;
 
 /**
  * Probe a runtime version, retrying transient unavailability so a loaded host
@@ -1034,7 +1022,7 @@ export const DRIVER_PROBE_RETRY_BACKOFF_MS = 250;
  * @param {string} cwd
  * @returns {Promise<string|null>}
  */
-export async function probeRuntimeVersionStable(runtime, cwd) {
+async function probeRuntimeVersionStable(runtime, cwd) {
   for (let attempt = 0; ; attempt += 1) {
     const result = await probeRuntime(runtime, { cwd, timeoutSec: 5 });
     if (result.version !== null || attempt >= DRIVER_PROBE_RETRIES) return result.version ?? null;
@@ -1051,7 +1039,7 @@ export async function probeRuntimeVersionStable(runtime, cwd) {
  * @param {Map<string, import("./verification.mjs").WorkspaceScopeBoundary>} scopeBoundaries
  * @returns {Promise<SourceIdentity>}
  */
-export async function captureRunIdentity(contract, scopeBoundaries) {
+async function captureRunIdentity(contract, scopeBoundaries) {
   const runtimes = reachableRuntimes(contract);
   const versionsPromise = Promise.all([...runtimes.entries()].map(async ([id, { runtime }]) => {
     return [id, await probeRuntimeVersionStable(runtime, contract.cwd)];
@@ -1075,7 +1063,7 @@ export async function captureRunIdentity(contract, scopeBoundaries) {
  * @param {SourceIdentity|undefined} actual
  * @returns {{warnings: string[]}} warnings to surface in status
  */
-export function assertSourceUnchanged(expected, actual) {
+function assertSourceUnchanged(expected, actual) {
   const fields = ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "driverVersions"];
   /** @type {string[]} */
   const warnings = [];
@@ -1123,7 +1111,7 @@ export function assertSourceUnchanged(expected, actual) {
  * @param {string} head
  * @returns {boolean}
  */
-export function isDescendantHead(cwd, recorded, head) {
+function isDescendantHead(cwd, recorded, head) {
   if (!cwd) return false;
   const result = spawnSync("git", ["-C", cwd, "merge-base", "--is-ancestor", recorded, head], { encoding: "utf8" });
   return result.status === 0;
@@ -1133,7 +1121,7 @@ export function isDescendantHead(cwd, recorded, head) {
  * @param {Map<string, NodeSnapshot>} states
  * @returns {string}
  */
-export function statesFingerprint(states) {
+function statesFingerprint(states) {
   return [...states.values()].map((state) => `${state.id}:${state.status}:${state.phase}:${state.attempt ?? 0}:${state.revisions ?? 0}`).join("|");
 }
 
@@ -1141,7 +1129,7 @@ export function statesFingerprint(states) {
  * @param {ValidatedContract} contract
  * @returns {ValidatedContract}
  */
-export function serializableContract(contract) {
+function serializableContract(contract) {
   const { warnings, ...rest } = contract;
   return {
     ...rest,
@@ -1252,7 +1240,7 @@ export async function cancelRun(runDirPath) {
  * @param {string} runDir
  * @returns {Promise<LockHandle>}
  */
-export async function acquireStaleLock(runDir) {
+async function acquireStaleLock(runDir) {
   for (;;) {
     try {
       return acquireLock(runDir);
@@ -1269,7 +1257,7 @@ export async function acquireStaleLock(runDir) {
  * @param {LockRecord} lock
  * @param {NodeJS.Signals} signal
  */
-export function signalController(lock, signal) {
+function signalController(lock, signal) {
   if (!invocationAlive({ pid: lock.pid, processStartToken: lock.processStartToken })) return;
   try {
     process.kill(lock.pid, signal);
@@ -1283,7 +1271,7 @@ export function signalController(lock, signal) {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-export async function waitForProcessDeath(invocation, timeoutMs) {
+async function waitForProcessDeath(invocation, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!invocationAlive(invocation)) return true;
@@ -1297,7 +1285,7 @@ export async function waitForProcessDeath(invocation, timeoutMs) {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-export async function waitForTerminal(runDir, timeoutMs) {
+async function waitForTerminal(runDir, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const contractPath = join(runDir, "contract.json");
@@ -1319,7 +1307,7 @@ export async function waitForTerminal(runDir, timeoutMs) {
  * @param {string} runDir
  * @param {SourceIdentity|undefined} sourceIdentity
  */
-export function assertEnvironmentReady(contract, runDir, sourceIdentity) {
+function assertEnvironmentReady(contract, runDir, sourceIdentity) {
   const report = environmentPreflight({
     cwd: contract.cwd,
     runtimes: reachableRuntimes(contract),

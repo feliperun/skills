@@ -25,10 +25,10 @@
 export const REVIEW_MODES = new Set(["none", "advisory", "blocking"]);
 
 /** A gate that does not declare a review mode reviews advisorially. */
-export const DEFAULT_REVIEW_MODE = "advisory";
+const DEFAULT_REVIEW_MODE = "advisory";
 
 /** The gate record a node carries when the judge never returned a usable verdict. */
-export const INVALID_JUDGE_VERDICT = "invalid_judge_output";
+const INVALID_JUDGE_VERDICT = "invalid_judge_output";
 
 /** The error code a blocking review blocks with when no verdict was produced. */
 export const JUDGE_UNAVAILABLE_CODE = "judge_unavailable";
@@ -40,7 +40,7 @@ export const UNCITED_REJECTION_REASON = "uncited judge rejection spent its one b
  * @param {unknown} value
  * @returns {value is "none"|"advisory"|"blocking"}
  */
-export function isReviewMode(value) {
+function isReviewMode(value) {
   return typeof value === "string" && REVIEW_MODES.has(value);
 }
 
@@ -62,7 +62,7 @@ export function reviewMode(gate) {
  * @param {{review?: unknown}} node
  * @returns {"none"|"advisory"|"blocking"|null}
  */
-export function nodeReviewMode(node) {
+function nodeReviewMode(node) {
   return isReviewMode(node.review) ? node.review : null;
 }
 

@@ -7,8 +7,8 @@ import { scopeFindingsNote } from "./scope-findings.mjs";
 import { reviewNote } from "./review-modes.mjs";
 
 /** Advisory ceiling for status.json (TECH-SPEC lean, rule 5); never enforced destructively. */
-export const STATUS_JSON_MAX_BYTES = 200 * 1024;
-export const STATUS_POINTER_FILE = "status.json";
+const STATUS_JSON_MAX_BYTES = 200 * 1024;
+const STATUS_POINTER_FILE = "status.json";
 const STATUS_POINTER_MAX_BYTES = 1024;
 const POINTER_STRING_CHARS = 64;
 const POINTER_ATTENTION_CHARS = 80;

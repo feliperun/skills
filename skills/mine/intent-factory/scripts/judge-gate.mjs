@@ -12,7 +12,7 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { judgeReaskInstruction, reviewMode, UNCITED_REJECTION_REASON } from "./review-modes.mjs";
+import { reviewMode, UNCITED_REJECTION_REASON } from "./review-modes.mjs";
 
 /** @typedef {import("./definition-of-done.mjs").DefinitionOfDoneItem} DefinitionOfDoneItem */
 /** @typedef {import("./definition-of-done.mjs").DefinitionOfDoneProof} DefinitionOfDoneProof */
@@ -49,7 +49,7 @@ function boundedText(value, maxBytes = MAX_PROOF_OUTPUT_BYTES) {
 }
 
 /** @param {{definitionOfDone?: DefinitionOfDoneItem[]}} node @returns {DefinitionOfDoneItem[]} */
-export function mechanicalItems(node) {
+function mechanicalItems(node) {
   return (node.definitionOfDone ?? []).filter((item) => item.proof !== undefined);
 }
 
@@ -70,7 +70,7 @@ export function judgeRequired(node) {
  * @param {{timeoutMs?: number, verification?: VerificationState|null}} [options]
  * @returns {Promise<Array<{id: string, kind: "command"|"path"|"verification", ref: string, pass: boolean, detail: string}>>}
  */
-export async function runMechanicalProofs(items, cwd, options = {}) {
+async function runMechanicalProofs(items, cwd, options = {}) {
   const timeoutMs = options.timeoutMs ?? 60_000;
   const recorded = options.verification?.commands ?? [];
   const results = [];
@@ -96,7 +96,7 @@ export async function runMechanicalProofs(items, cwd, options = {}) {
  * @param {Array<{argv: string[], passed: boolean, attempts?: Array<{exitCode?: number|null, stdout?: string, stderr?: string}>}>} recorded
  * @returns {{id: string, kind: "verification", ref: string, pass: boolean, detail: string}}
  */
-export function proveVerification(id, proof, recorded) {
+function proveVerification(id, proof, recorded) {
   const index = Number.parseInt(proof.ref, 10);
   const entry = Number.isInteger(index) ? recorded[index] : undefined;
   if (!entry) {
@@ -204,7 +204,7 @@ export function mechanicalVerdict(results) {
  * @param {{definitionOfDone?: DefinitionOfDoneItem[]}} node
  * @returns {Array<{id: string, kind: "command"|"path"|"verification", ref: string, pass: boolean, detail: string}>}
  */
-export function provenDeterministicResults(node) {
+function provenDeterministicResults(node) {
   return mechanicalItems(node).map((item) => {
     const proof = /** @type {DefinitionOfDoneProof} */ (item.proof);
     return { id: item.id, kind: proof.kind, ref: proof.ref, pass: true, detail: "" };
@@ -270,15 +270,6 @@ export function uncitedRejection(verdict, node) {
 /** @param {string} text @param {Set<string>} ids @returns {boolean} */
 function citesItem(text, ids) {
   return text.split(/[^A-Za-z0-9._-]+/u).some((token) => ids.has(token));
-}
-
-/**
- * Bounded instruction appended to the re-asked judge prompt after an uncited
- * gate-failing rejection.
- * @returns {string}
- */
-export function uncitedReaskSuffix() {
-  return judgeReaskInstruction(UNCITED_REJECTION_REASON);
 }
 
 /**

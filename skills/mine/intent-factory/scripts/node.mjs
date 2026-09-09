@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -142,9 +142,9 @@ export function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export const DEFAULT_GRACE_MS = 2_000;
+const DEFAULT_GRACE_MS = 2_000;
 
-export const GATE_SCRIPT = String.raw`
+const GATE_SCRIPT = String.raw`
 import { existsSync, readFileSync, statSync, openSync, closeSync, readSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 export const config = JSON.parse(readFileSync(process.env.INTENT_FACTORY_GATE_CONFIG, "utf8"));
@@ -258,13 +258,13 @@ export const timer = setInterval(() => {
 }, 10);
 `;
 
-export const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
+const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
 
 /** Fixed-size read for incremental transcript observation. */
-export const MONITOR_CHUNK_BYTES = 64 * 1024;
+const MONITOR_CHUNK_BYTES = 64 * 1024;
 
 /** Per-observation read budget: one tick never blocks on a huge backlog. */
-export const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
+const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
 
 /** @typedef {{prompt: string|null, stdout: string, stderr: string}} PathSet */
 /** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, driver: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, nodeId?: string, attempt?: number, workspace?: string, worktreeBranch?: string|null, worktreeBaseSha?: string|null, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
@@ -390,7 +390,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
 /**
  * @param {Job} job
  */
-export function closeInvocation(job) {
+function closeInvocation(job) {
   if (job.observeTimer) clearInterval(job.observeTimer);
   job.observeTimer = undefined;
   job.invocation = /** @type {Invocation} */ ({
@@ -411,7 +411,7 @@ export function closeInvocation(job) {
  *
  * @param {Job} job
  */
-export function observeInvocation(job) {
+function observeInvocation(job) {
   if (job.closed || job.invocation.continuationId) return;
   try {
     const monitored = monitorInvocation(job);
@@ -470,7 +470,7 @@ export function monitorInvocation(job) {
 /**
  * @param {string} path
  */
-export function signalGate(path) {
+function signalGate(path) {
   const fd = openSync(path, "wx", 0o600);
   try {
     writeSync(fd, `${Date.now()}\n`, 0, "utf8");
@@ -483,7 +483,7 @@ export function signalGate(path) {
 /**
  * @param {Job|{gateConfigPath: string, gateReleasePath: string}} job
  */
-export function cleanupGate(job) {
+function cleanupGate(job) {
   for (const path of [job.gateConfigPath, job.gateReleasePath]) {
     try { unlinkSync(path); } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
@@ -593,7 +593,7 @@ export function invocationAlive(invocation) {
  * @param {number|null} processGroupId
  * @returns {boolean}
  */
-export function processGroupAlive(processGroupId) {
+function processGroupAlive(processGroupId) {
   if (process.platform === "win32" || typeof processGroupId !== "number" || !Number.isInteger(processGroupId) || processGroupId <= 0) return false;
   try {
     process.kill(-processGroupId, 0);
@@ -623,7 +623,7 @@ export function invocationResult(invocation, runtime, options = {}) {
  * @param {number} maxBytes
  * @returns {string}
  */
-export function boundedRegion(path, maxBytes = MAX_PROVIDER_LOG_BYTES) {
+function boundedRegion(path, maxBytes = MAX_PROVIDER_LOG_BYTES) {
   try {
     return dropPartialLogLine(readFileSync(`${path}.tail`, "utf8"));
   } catch (error) {
@@ -645,7 +645,7 @@ export function boundedRegion(path, maxBytes = MAX_PROVIDER_LOG_BYTES) {
  * @param {InvocationProbe} invocation
  * @returns {boolean}
  */
-export function processStartTokenMatches(invocation) {
+function processStartTokenMatches(invocation) {
   if (!invocation.processStartToken) return true;
   const current = processStartToken(invocation.pid);
   return current === invocation.processStartToken;
@@ -655,7 +655,7 @@ export function processStartTokenMatches(invocation) {
  * @param {InvocationProbe & {id?: string}} invocation
  * @param {string} signal
  */
-export function signalInvocation(invocation, signal) {
+function signalInvocation(invocation, signal) {
   if (!invocationAlive(invocation)) return;
   const pid = invocation.pid;
   if (pid === null || pid === undefined) return;
@@ -672,7 +672,7 @@ export function signalInvocation(invocation, signal) {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-export function waitForJobClose(job, timeoutMs) {
+function waitForJobClose(job, timeoutMs) {
   if (job.closed) return Promise.resolve(true);
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -691,7 +691,7 @@ export function waitForJobClose(job, timeoutMs) {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-export async function waitForJobTermination(job, invocation, timeoutMs) {
+async function waitForJobTermination(job, invocation, timeoutMs) {
   const [closed, dead] = await Promise.all([
     waitForJobClose(job, timeoutMs),
     waitForInvocationDeath(invocation, timeoutMs),
@@ -704,7 +704,7 @@ export async function waitForJobTermination(job, invocation, timeoutMs) {
  * @param {number} timeoutMs
  * @returns {Promise<boolean>}
  */
-export async function waitForInvocationDeath(invocation, timeoutMs) {
+async function waitForInvocationDeath(invocation, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!invocationAlive(invocation)) return true;
@@ -718,7 +718,7 @@ export async function waitForInvocationDeath(invocation, timeoutMs) {
  * @param {bigint} toTicks
  * @returns {number}
  */
-export function elapsedSeconds(fromTicks, toTicks) {
+function elapsedSeconds(fromTicks, toTicks) {
   return Number(toTicks - fromTicks) / 1e9;
 }
 
@@ -728,17 +728,6 @@ export function assertRunMutable(runDir) {
   const error = /** @type {Error & {code: string}} */ (new Error("incident_frozen: run is frozen as immutable incident evidence"));
   error.code = "incident_frozen";
   throw error;
-}
-
-/**
- * @param {unknown} value
- * @param {number} maxChars
- * @returns {string|null}
- */
-export function boundedChars(value, maxChars) {
-  if (typeof value !== "string" || !value.trim()) return null;
-  const chars = Array.from(value);
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
 }
 
 /**
@@ -857,7 +846,7 @@ export function renderCampaignHandoffSafely(campaign, runsDir, runDir) {
  * @param {"worker"|"judge"} role
  * @returns {RuntimeSnapshot}
  */
-export function routeRuntimeForState(contract, node, state, role) {
+function routeRuntimeForState(contract, node, state, role) {
   const override = state.routing?.currentOverride;
   if (override?.role === role && contract.runtimes[override.runtime]) {
     const runtime = contract.runtimes[override.runtime];
@@ -883,7 +872,7 @@ export function routeRuntimeForState(contract, node, state, role) {
  * @param {string} prompt
  * @returns {{prompt: string, continuationId: string|null, mode: "fresh"|"reuse"|"rotate"}}
  */
-export function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
+function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   const runId = basename(runDir);
   const session = phaseSessionCandidates(contract, node, state, runDir, role).at(-1);
   const runtime = routeRuntimeForState(contract, node, state, role);
@@ -927,7 +916,7 @@ export function phaseInvocationPlan(contract, node, state, runDir, role, prompt)
  * @param {"worker"|"judge"} role
  * @returns {{nodeId: string, invocation: Invocation}[]}
  */
-export function phaseSessionCandidates(contract, node, currentState, runDir, role) {
+function phaseSessionCandidates(contract, node, currentState, runDir, role) {
   /** @type {{nodeId: string, invocation: Invocation}[]} */
   const candidates = [];
   for (const candidate of contract.nodes) {
@@ -954,7 +943,7 @@ export function phaseSessionCandidates(contract, node, currentState, runDir, rol
 }
 
 /** @param {Invocation} invocation @param {ValidatedContract} contract @param {ValidatedNode} node @param {RuntimeSnapshot} runtime @param {NodeSnapshot} state @param {string} runDir @param {"worker"|"judge"} role @param {"fresh"|"reuse"|"rotate"} mode @param {string|null} continuationId */
-export function stampInvocation(invocation, contract, node, runtime, state, runDir, role, mode, continuationId) {
+function stampInvocation(invocation, contract, node, runtime, state, runDir, role, mode, continuationId) {
   invocation.runId = basename(runDir);
   invocation.campaignId = contract.campaignId;
   invocation.nodeId = node.id;
@@ -973,13 +962,13 @@ export function stampInvocation(invocation, contract, node, runtime, state, runD
 }
 
 /** @param {RuntimeSnapshot} runtime @returns {string} */
-export function fingerprintRuntime(runtime) {
+function fingerprintRuntime(runtime) {
   const executable = providerCommand(runtime, "").executable;
   return createHash("sha256").update(stableJson({ runtime, executable })).digest("hex");
 }
 
 /** @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {"worker"|"judge"} role @returns {string} */
-export function phaseHandoffPrompt(contract, node, state, runDir, role) {
+function phaseHandoffPrompt(contract, node, state, runDir, role) {
   const summaries = phaseSessionCandidates(contract, node, state, runDir, role)
     .map(({ nodeId }) => {
       const candidate = contract.nodes.find((item) => item.id === nodeId);
@@ -1013,7 +1002,7 @@ export function phaseHandoffPrompt(contract, node, state, runDir, role) {
  * @param {RuntimeSnapshot} runtime
  * @returns {import("./drivers/index.mjs").ToolPolicy|undefined}
  */
-export function workerToolPolicy(runtime) {
+function workerToolPolicy(runtime) {
   if (runtime.capabilities.toolPolicy !== true) return undefined;
   return { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
 }
@@ -1033,7 +1022,7 @@ export function workerToolPolicy(runtime) {
  * @param {import("./drivers/index.mjs").CommandOptions} [extra]
  * @returns {import("./drivers/index.mjs").CommandOptions}
  */
-export function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, extra = {}) {
+function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, extra = {}) {
   return {
     ...extra,
     continuationId: runtime.capabilities.continuation === true ? phasePlan.continuationId : null,
@@ -1061,7 +1050,7 @@ export function attemptWorkspace(state) {
  * @param {NodeSnapshot} state
  * @returns {{sha: string, attempt: number}|null}
  */
-export function sealPreviousAttempt(contract, node, state) {
+function sealPreviousAttempt(contract, node, state) {
   const path = attemptWorkspace(state);
   if (!path || !state.worktree?.branch || !state.worktree.baseSha) return null;
   const attempt = state.attempt - 1;
@@ -1090,7 +1079,7 @@ export function sealPreviousAttempt(contract, node, state) {
  * @param {LockHandle} lock
  * @returns {string}
  */
-export function ensureAttemptWorkspace(contract, node, state, runDir, lock) {
+function ensureAttemptWorkspace(contract, node, state, runDir, lock) {
   const expectedPath = attemptWorktreePath(runDir, contract.id, node.id, state.attempt);
   if (state.worktree?.path === expectedPath && attemptWorkspace(state)) return expectedPath;
   const previous = sealPreviousAttempt(contract, node, state);
@@ -1239,7 +1228,7 @@ export function startWorker(contract, node, state, runDir, running, prompt, lock
  * @param {string|null} continuationId
  * @param {LockHandle} lock
  */
-export function startResultMaterialization(contract, node, state, runDir, running, sourceInvocation, runtime, continuationId, lock) {
+function startResultMaterialization(contract, node, state, runDir, running, sourceInvocation, runtime, continuationId, lock) {
   const materializationRuntime = runtime.id ? runtimeSnapshot(contract, runtime.id) : null;
   if (!materializationRuntime || materializationRuntime.capabilities.continuation !== true || !continuationId) {
     transition(runDir, state, "failed", {
@@ -1394,7 +1383,7 @@ export async function startJudge(contract, node, state, runDir, running, workerR
  * @param {Job} job
  * @param {LockHandle} lock
  */
-export function persistInvocation(runDir, state, invocation, job, lock) {
+function persistInvocation(runDir, state, invocation, job, lock) {
   state.invocations = [...(state.invocations ?? []), invocation];
   state.updatedAt = invocation.updatedAt;
   writeNode(runDir, state, lock);
@@ -1449,7 +1438,7 @@ export function persistInvocation(runDir, state, invocation, job, lock) {
  * @param {Invocation} invocation
  * @param {LockHandle} lock
  */
-export function persistInvocationUpdate(runDir, state, invocation, lock) {
+function persistInvocationUpdate(runDir, state, invocation, lock) {
   try {
     state.invocations = (state.invocations ?? []).map((item) => item.id === invocation.id ? invocation : item);
     state.updatedAt = invocation.updatedAt;
@@ -1459,14 +1448,14 @@ export function persistInvocationUpdate(runDir, state, invocation, lock) {
   }
 }
 
-export const OPERATIONS_SCHEMA_VERSION = 1;
+const OPERATIONS_SCHEMA_VERSION = 1;
 
 /**
  * @param {string} runDir
  * @param {string} invocationId
  * @returns {string}
  */
-export function operationIntentPath(runDir, invocationId) {
+function operationIntentPath(runDir, invocationId) {
   return join(runDir, "operations", `${invocationId}.intent.json`);
 }
 
@@ -1475,7 +1464,7 @@ export function operationIntentPath(runDir, invocationId) {
  * @param {string} invocationId
  * @returns {string}
  */
-export function operationSettlementPath(runDir, invocationId) {
+function operationSettlementPath(runDir, invocationId) {
   return join(runDir, "operations", `${invocationId}.settlement.json`);
 }
 
@@ -1488,7 +1477,7 @@ export function operationSettlementPath(runDir, invocationId) {
  * @param {Invocation} invocation
  * @param {{nodeId: string, role: "worker"|"judge", attempt: number, runtimeFingerprint: string, prompt: string}} context
  */
-export function persistInvocationIntent(runDir, invocation, context) {
+function persistInvocationIntent(runDir, invocation, context) {
   const promptFingerprint = createHash("sha256").update(context.prompt, "utf8").digest("hex");
   writeJsonAtomic(operationIntentPath(runDir, invocation.id), {
     schemaVersion: OPERATIONS_SCHEMA_VERSION,
@@ -1534,7 +1523,7 @@ export function readOperationSettlement(runDir, invocationId) {
  * @param {string} invocationId
  * @returns {Record<string, unknown>|null}
  */
-export function readOperationIntent(runDir, invocationId) {
+function readOperationIntent(runDir, invocationId) {
   try {
     const record = readJson(operationIntentPath(runDir, invocationId));
     return record.operationId === invocationId ? record : null;
@@ -1548,9 +1537,9 @@ export function readOperationIntent(runDir, invocationId) {
  * replaced by the final envelope outcome, while a resolved outcome is never
  * downgraded by a later controller pass.
  */
-export const UNRESOLVED_OPERATION_STATUSES = new Set(["closed", "unknown_effect"]);
+const UNRESOLVED_OPERATION_STATUSES = new Set(["closed", "unknown_effect"]);
 
-export const RESOLVED_OPERATION_STATUSES = new Set(["done", "failed", "exhausted", "stalled", "canceled", "adopted", "rejudge", "restarted", "safe_replay", "reconciled"]);
+const RESOLVED_OPERATION_STATUSES = new Set(["done", "failed", "exhausted", "stalled", "canceled", "adopted", "rejudge", "restarted", "safe_replay", "reconciled"]);
 
 /**
  * @param {string} runDir
@@ -1568,7 +1557,7 @@ export function operationNeedsRecovery(runDir, invocationId) {
  * @param {unknown[]} existing
  * @returns {Record<string, string>[]}
  */
-export function operationReceipts(invocationOrId, supplied, existing = []) {
+function operationReceipts(invocationOrId, supplied, existing = []) {
   /** @type {Record<string, string>[]} */
   const receipts = [];
   const seen = new Set();
@@ -1648,7 +1637,7 @@ export function providerReceiptsFromInvocationTail(contract, invocation) {
 }
 
 /** @param {unknown} value @returns {unknown|null} */
-export function boundedSettlementResult(value) {
+function boundedSettlementResult(value) {
   if (value === undefined || value === null) return null;
   try {
     const serialized = typeof value === "string" ? value : JSON.stringify(value);
@@ -1739,23 +1728,10 @@ export function hasOperationSettlement(runDir, invocationId) {
 }
 
 /**
- * @param {string} cwd
- * @returns {{gitHead: string|null, dirty: boolean}}
- */
-export function captureWorktreeIdentity(cwd) {
-  const head = spawnSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  const status = spawnSync("git", ["-C", cwd, "status", "--porcelain=v1", "--", ".", ":(exclude).runs"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  return {
-    gitHead: head.status === 0 ? head.stdout.trim() || null : null,
-    dirty: status.status === 0 ? status.stdout.trim().length > 0 : false,
-  };
-}
-
-/**
  * @param {NodeSnapshot} state
  * @returns {string|null}
  */
-export function sourceWorkerRuntime(state) {
+function sourceWorkerRuntime(state) {
   return [...(state.invocations ?? [])].reverse().find((invocation) => invocation.phase === "worker")?.runtimeId
     ?? state.runtime?.id
     ?? null;
@@ -1766,7 +1742,7 @@ export function sourceWorkerRuntime(state) {
  * @param {import("./verification.mjs").WorkspaceScopeBoundary} boundary
  * @returns {BoundedScope}
  */
-export function boundedScope(scope, boundary) {
+function boundedScope(scope, boundary) {
   return {
     boundary,
     changedPaths: scope.changedPaths.slice(0, 64),
@@ -1817,7 +1793,7 @@ export function persistedScopeBoundary(contract, node, state, workspace = contra
  * @param {import("./contract.mjs").TaskPacket} taskPacket
  * @returns {{files: string[], roots: string[]}}
  */
-export function workerScope(taskPacket) {
+function workerScope(taskPacket) {
   return {
     files: taskPacket.writeFiles ?? [],
     roots: taskPacket.writeRoots ?? [],
@@ -1829,7 +1805,7 @@ export function workerScope(taskPacket) {
  * @param {number} maxBytes
  * @returns {string}
  */
-export function boundedUtf8(value, maxBytes) {
+function boundedUtf8(value, maxBytes) {
   const bytes = Buffer.from(String(value ?? ""), "utf8");
   if (bytes.length <= maxBytes) return bytes.toString("utf8");
   const suffix = "…";
@@ -1843,7 +1819,7 @@ export function boundedUtf8(value, maxBytes) {
  * @param {VerificationAttemptResult|null|undefined} result
  * @returns {VerificationAttemptResult}
  */
-export function boundedVerificationAttemptResult(result) {
+function boundedVerificationAttemptResult(result) {
   return {
     passed: Boolean(result?.passed),
     stdout: boundedUtf8(result?.stdout ?? "", 2 * 1024),
@@ -1860,7 +1836,7 @@ export function boundedVerificationAttemptResult(result) {
  * @param {NodeSnapshot} state
  * @returns {import("./contract.mjs").VerificationAttempt[]}
  */
-export function verificationAttemptRecords(state) {
+function verificationAttemptRecords(state) {
   if (!state.verification || !Array.isArray(state.verification.attempts)) {
     state.verification = { passed: false, commands: [], completed: false, attempts: [] };
   }
@@ -1873,7 +1849,7 @@ export function verificationAttemptRecords(state) {
  * @param {LockHandle} lock
  * @param {VerificationAttempt} attempt
  */
-export function persistVerificationAttempt(runDir, state, lock, attempt) {
+function persistVerificationAttempt(runDir, state, lock, attempt) {
   const attempts = verificationAttemptRecords(state);
   const index = attempts.findIndex((item) => item.invocationId === attempt.invocationId);
   if (index >= 0) attempts[index] = { ...attempts[index], ...attempt };
@@ -2022,7 +1998,7 @@ export function checkWorkerScope(contract, runDir, job, lock, options = {}) {
  * @param {string} [label]
  * @returns {boolean}
  */
-export function checkResultMaterializationScope(contract, runDir, job, lock, label = "result materialization") {
+function checkResultMaterializationScope(contract, runDir, job, lock, label = "result materialization") {
   if (job.scopeChecked) return !job.scopeViolation;
   job.scopeChecked = true;
   const state = job.state;
@@ -2059,7 +2035,7 @@ export function checkResultMaterializationScope(contract, runDir, job, lock, lab
  * @param {ValidatedNode} node
  * @returns {boolean}
  */
-export function canReuseResultEvidence(state, node) {
+function canReuseResultEvidence(state, node) {
   if (state.verification?.completed !== true || state.verification.passed !== true) return false;
   return !node.gate.enabled;
 }
@@ -2076,7 +2052,7 @@ export function canReuseResultEvidence(state, node) {
  * @param {{strict?: boolean}} [options]
  * @returns {{ok: true}|{ok: false, code: string, detail: string, unexpectedPaths?: string[], unexpectedPathCount?: number, changedPaths?: string[], changedPathCount?: number}}
  */
-export function evaluatePersistedWorkerScope(contract, node, state, invocation, options = {}) {
+function evaluatePersistedWorkerScope(contract, node, state, invocation, options = {}) {
   const strict = options.strict === true;
   try {
     const baseline = invocation?.snapshotPath
@@ -2207,7 +2183,7 @@ export function checkPersistedWorkerScope(contract, runDir, state, node, invocat
  * @param {NodeSnapshot} state
  * @param {LockHandle} lock
  */
-export function recordScopeFinding(runDir, state, lock) {
+function recordScopeFinding(runDir, state, lock) {
   if (!state.scope?.unexpectedPaths?.length) return;
   state.scopeFindings = scopeFindingFromScope(state.scope);
   writeNode(runDir, state, lock);
@@ -2620,7 +2596,7 @@ export function handleProviderExhaustion(contract, runDir, node, state, role, en
  * @param {LockHandle} lock
  * @param {{role: "worker"|"judge", error: {code: string, message: string}, current: string, plan: ReturnType<typeof planRoute>, schedule: import("./backoff.mjs").Transition, envelope: ProviderEnvelope, status: string, now: number}} options
  */
-export function applyRoute(contract, runDir, state, lock, { role, error, current, plan, schedule, envelope, status, now }) {
+function applyRoute(contract, runDir, state, lock, { role, error, current, plan, schedule, envelope, status, now }) {
   const { routing, override, errorCode } = buildRouting(state, {
     role, error, current, plan, schedule, status, now, usage: envelope.usage, costUsd: envelope.costUsd,
   });
@@ -2874,10 +2850,10 @@ export async function raiseNodeAttention(campaignPath, runDir, state, code) {
   });
 }
 
-export const USAGE_LOG_NAME = "usage.jsonl";
+const USAGE_LOG_NAME = "usage.jsonl";
 
 /** @param {Usage|undefined} usage @returns {boolean} */
-export function hasMeasuredUsage(usage) {
+function hasMeasuredUsage(usage) {
   return Boolean(usage && [usage.inputTokens, usage.outputTokens, usage.cacheReadInputTokens]
     .some((value) => typeof value === "number" && Number.isFinite(value)));
 }
@@ -2952,24 +2928,6 @@ export function appendUsageRecord(runDir, invocation) {
     startedAt: invocation.startedAt ?? null,
     finishedAt: invocation.closedAt ?? null,
   });
-}
-
-/**
- * Idempotently write every persisted invocation of the run into usage.jsonl.
- * Resume calls this after adopting previously recorded node state.
- *
- * @param {string} runDir
- * @param {Map<string, NodeSnapshot>} states
- */
-export function synchronizeRunUsage(runDir, states) {
-  const seen = usageRecordIds(runDir);
-  for (const state of states.values()) {
-    for (const invocation of state.invocations ?? []) {
-      if (seen.has(invocation.id)) continue;
-      appendUsageRecord(runDir, invocation);
-      seen.add(invocation.id);
-    }
-  }
 }
 
 /**
@@ -3069,7 +3027,7 @@ export function hasDoneEvent(runDir, nodeId, attempt) {
  * @param {unknown} result
  * @returns {string|null}
  */
-export function resultSummary(result) {
+function resultSummary(result) {
   if (typeof result === "object" && result !== null && "summary" in result) {
     const summary = /** @type {{summary?: unknown}} */ (result).summary;
     if (typeof summary === "string") return summary;
@@ -3151,7 +3109,7 @@ export function render(runDir, runsDir, contract, states, lock = null) {
   writeStatusArtifacts(runDir, runsDir, contract, states);
 }
 
-export const STATUS_MARK = {
+const STATUS_MARK = {
   pending: "[ ]",
   running: "[>]",
   done: "[+]",
@@ -3169,7 +3127,7 @@ export const STATUS_MARK = {
  * @param {Map<string, NodeSnapshot>} states
  * @returns {string}
  */
-export function renderFinalStatus(runDir, contract, states) {
+function renderFinalStatus(runDir, contract, states) {
   const nodes = /** @type {NodeSnapshot[]} */ (contract.nodes.map((node) => states.get(node.id)).filter((node) => node !== undefined));
   const runMetadata = /** @type {{identityWarnings?: string[]}} */ (readJson(join(runDir, "run.json")) ?? {});
   const identityWarnings = runMetadata.identityWarnings ?? [];
@@ -3212,7 +3170,7 @@ export function renderFinalStatus(runDir, contract, states) {
 }
 
 /** @param {string} value @param {number} width @returns {string} */
-export function fitStatus(value, width) {
+function fitStatus(value, width) {
   const clean = value.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
   if (clean.length <= width) return clean + " ".repeat(width - clean.length);
   return `${clean.slice(0, Math.max(0, width - 2))}..`.padEnd(width, " ");
@@ -3332,7 +3290,7 @@ export function writeFindingsArtifact(runDir, contract, states) {
  * @param {NodeSnapshot} state
  * @returns {{missingContext?: string[]}}
  */
-export function missingContextOf(state) {
+function missingContextOf(state) {
   const result = /** @type {{missingContext?: unknown}|null} */ (state.result);
   if (result && Array.isArray(result.missingContext) && result.missingContext.length) {
     return { missingContext: result.missingContext.map(String) };
@@ -3348,7 +3306,7 @@ export function missingContextOf(state) {
  * @param {NodeSnapshot} state
  * @returns {{unexpectedPaths?: string[]}}
  */
-export function unexpectedPathsOf(state) {
+function unexpectedPathsOf(state) {
   const scope = /** @type {{unexpectedPaths?: unknown}|null|undefined} */ (state.scope);
   if (scope && Array.isArray(scope.unexpectedPaths) && scope.unexpectedPaths.length) {
     return { unexpectedPaths: scope.unexpectedPaths.slice(0, 16).map(String) };
@@ -3364,17 +3322,17 @@ export function unexpectedPathsOf(state) {
  *
  * @param {string} runDir @param {string} nodeId @returns {string} */
 
-export function workerResultPath(runDir, nodeId) {
+function workerResultPath(runDir, nodeId) {
   return join(runDir, "results", `${nodeId}.json`);
 }
 
 /** @param {string} runDir @param {string} nodeId @param {string} workspace @returns {string} */
-export function attemptWorkerResultPath(runDir, nodeId, workspace) {
+function attemptWorkerResultPath(runDir, nodeId, workspace) {
   return join(workspace, ".runs", "results", `${nodeId}.json`);
 }
 
 /** @param {string} workspace @param {string} nodeId */
-export function clearAttemptWorkerResult(workspace, nodeId) {
+function clearAttemptWorkerResult(workspace, nodeId) {
   try { unlinkSync(attemptWorkerResultPath("", nodeId, workspace)); } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
   }
@@ -3397,7 +3355,7 @@ export function materializeAttemptResult(runDir, state, node) {
  * @param {string} nodeId
  * @returns {WorkerResult|null}
  */
-export function readWorkerResultFile(runDir, nodeId) {
+function readWorkerResultFile(runDir, nodeId) {
   const path = workerResultPath(runDir, nodeId);
   if (!existsSync(path)) return null;
   try {
@@ -3408,19 +3366,19 @@ export function readWorkerResultFile(runDir, nodeId) {
 }
 
 /** @param {string} runDir @param {string} nodeId @param {WorkerResult} result */
-export function persistWorkerResultFile(runDir, nodeId, result) {
+function persistWorkerResultFile(runDir, nodeId, result) {
   writeJsonAtomic(workerResultPath(runDir, nodeId), result);
 }
 
 /** @param {string} runDir @param {string} nodeId */
-export function clearWorkerResultFile(runDir, nodeId) {
+function clearWorkerResultFile(runDir, nodeId) {
   try { unlinkSync(workerResultPath(runDir, nodeId)); } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
   }
 }
 
 /** First line of the one-turn result-materialization prompt. */
-export const RESULT_MATERIALIZATION_PROMPT_HEADER = "The implementation is already complete.";
+const RESULT_MATERIALIZATION_PROMPT_HEADER = "The implementation is already complete.";
 
 /**
  * The canonical result text without validation. Presence is authoritative:
@@ -3460,7 +3418,7 @@ export function isResultMaterializationInvocation(invocation) {
  * @param {unknown} providerResult
  * @returns {WorkerResult}
  */
-export function resolveWorkerResult(runDir, node, providerResult) {
+function resolveWorkerResult(runDir, node, providerResult) {
   const fromFile = readWorkerResultFile(runDir, node.id);
   if (fromFile) return fromFile;
   const result = parseWorkerResult(String(extractJson(providerResult) ?? providerResult ?? ""));
@@ -3473,7 +3431,7 @@ export function resolveWorkerResult(runDir, node, providerResult) {
  * @param {string} resultPath
  * @returns {string}
  */
-export function workerProtocolPrompt(prompt, resultPath) {
+function workerProtocolPrompt(prompt, resultPath) {
   return [
     prompt,
     "Controller worker protocol:",
@@ -3489,7 +3447,7 @@ export function workerProtocolPrompt(prompt, resultPath) {
  * @param {number} attempt
  * @returns {PathSet}
  */
-export function logPaths(runDir, nodeId, phase, attempt) {
+function logPaths(runDir, nodeId, phase, attempt) {
   const base = `${nodeId}.${attempt}.${phase}`;
   let stem = base;
   /**
@@ -3510,7 +3468,7 @@ export function logPaths(runDir, nodeId, phase, attempt) {
  * @param {number} [maxBytes]
  * @returns {string}
  */
-export function readBoundedTail(path, maxBytes = 512 * 1024) {
+function readBoundedTail(path, maxBytes = 512 * 1024) {
   try {
     try { return dropPartialLogLine(readFileSync(`${path}.tail`, "utf8")); } catch (tailError) {
       if (errorCode(tailError) !== "ENOENT") throw tailError;
@@ -3535,7 +3493,7 @@ export function readBoundedTail(path, maxBytes = 512 * 1024) {
  * @param {unknown} value
  * @returns {string}
  */
-export function dropPartialLogLine(value) {
+function dropPartialLogLine(value) {
   const newline = String(value).indexOf("\n");
   return newline < 0 ? "" : String(value).slice(newline + 1);
 }
@@ -3548,7 +3506,7 @@ export function dropPartialLogLine(value) {
  * @param {unknown} value
  * @returns {string|null}
  */
-export function parsePersistedWorkerResult(value) {
+function parsePersistedWorkerResult(value) {
   if (value === undefined || value === null) return null;
   try {
     const serialized = typeof value === "string" ? value : JSON.stringify(value);
@@ -3569,7 +3527,7 @@ export function parsePersistedWorkerResult(value) {
  * @param {Record<string, unknown>|null} settlement
  * @returns {string|null}
  */
-export function persistedWorkerResult(runDir, state, invocation, settlement) {
+function persistedWorkerResult(runDir, state, invocation, settlement) {
   const fromFile = canonicalWorkerResultText(runDir, state.id);
   if (fromFile !== null) return fromFile;
   const fromSettlement = parsePersistedWorkerResult(settlement?.result);
@@ -3584,7 +3542,7 @@ export function persistedWorkerResult(runDir, state, invocation, settlement) {
  * @param {Record<string, unknown>|null} settlement
  * @returns {unknown|null}
  */
-export function persistedJudgeResult(state, invocation, settlement) {
+function persistedJudgeResult(state, invocation, settlement) {
   const candidates = [settlement?.result, invocation.status !== "active" ? state.gate : null];
   for (const candidate of candidates) {
     if (candidate === undefined || candidate === null) continue;
@@ -3744,7 +3702,7 @@ export async function recoverOrphan(runDir, contract, node, state, lock) {
 }
 
 /** @param {Invocation} invocation @param {ProviderEnvelope|null} result @param {string} reason @returns {RecoveryOutcome} */
-export function restartRecovery(invocation, result, reason) {
+function restartRecovery(invocation, result, reason) {
   return /** @type {RecoveryOutcome} */ ({
     kind: "restart",
     phase: invocation.phase,
@@ -3787,7 +3745,7 @@ export function recoveryFromOverride(override, invocationId) {
  * @param {ProviderEnvelope|null} [judgeResult]
  * @returns {RecoveryOutcome}
  */
-export function rejudgeOrRestart(state, contract, node, judgeInvocation, judgeResult = null) {
+function rejudgeOrRestart(state, contract, node, judgeInvocation, judgeResult = null) {
   const workerInvocation = [...(state.invocations ?? [])].reverse().find((item) => item.phase === "worker");
   const workerResult = workerInvocation && invocationResult(
     workerInvocation,
@@ -3821,7 +3779,7 @@ export function rejudgeOrRestart(state, contract, node, judgeInvocation, judgeRe
  * @param {ProviderEnvelope} result
  * @returns {RecoveryOutcome}
  */
-export function adoptOrRejudgeJudge(state, contract, node, judgeInvocation, result) {
+function adoptOrRejudgeJudge(state, contract, node, judgeInvocation, result) {
   try {
     parseJudge(result.result ?? "");
     return /** @type {RecoveryOutcome} */ ({
@@ -3898,17 +3856,12 @@ export function stableJson(value) {
  * @param {Usage|undefined} right
  * @returns {Usage}
  */
-export function addUsage(left, right) {
+function addUsage(left, right) {
   return {
     inputTokens: (left?.inputTokens ?? 0) + (right?.inputTokens ?? 0),
     outputTokens: (left?.outputTokens ?? 0) + (right?.outputTokens ?? 0),
     cacheReadInputTokens: (left?.cacheReadInputTokens ?? 0) + (right?.cacheReadInputTokens ?? 0),
   };
-}
-
-/** @param {number|undefined} left @param {number|null|undefined} right @returns {number} */
-export function addCost(left, right) {
-  return (left ?? 0) + (right ?? 0);
 }
 
 /** @returns {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} */

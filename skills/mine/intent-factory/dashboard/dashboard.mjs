@@ -6,9 +6,9 @@ import process from "node:process";
 import { campaignDir, campaignsDir, discoverCampaigns } from "../scripts/campaign.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const STREAM_POLL_MS = 700;
+const STREAM_POLL_MS = 700;
 const STREAM_PING_MS = 15_000;
-export const SNAPSHOT_MAX_BYTES = 200 * 1024;
+const SNAPSHOT_MAX_BYTES = 200 * 1024;
 const LOG_TAIL_MAX_LINES = 200;
 const LOG_TAIL_MAX_BYTES = 24 * 1024;
 const OUTPUT_TAIL_MAX_BYTES = 4 * 1024;

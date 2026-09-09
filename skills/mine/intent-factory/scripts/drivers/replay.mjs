@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { parseVersion } from "./protocol.mjs";
 
 /** Envelope statuses a recording may carry. */
-export const REPLAY_STATUSES = Object.freeze(new Set([
+const REPLAY_STATUSES = Object.freeze(new Set([
   "done",
   "no-op",
   "blocked",
@@ -84,7 +84,7 @@ export default replayDriver;
  * @param {string|null} signal
  * @returns {import("./index.mjs").ProviderEnvelope}
  */
-export function normalizeReplayResult(stdout, exitCode, signal) {
+function normalizeReplayResult(stdout, exitCode, signal) {
   const envelope = parseLastEnvelope(stdout);
   if (envelope) return envelope;
   const reason = signal

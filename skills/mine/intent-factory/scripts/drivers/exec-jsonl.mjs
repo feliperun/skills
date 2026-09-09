@@ -380,29 +380,8 @@ export function liveSessionMetrics(driver, stdout) {
   return parser.metrics();
 }
 
-/**
- * Compose one newly observed transcript window into the running session
- * totals behind a rotation trigger, so a transcript consumed in increments
- * crosses the same thresholds as one read whole: turns and tool calls are
- * additive for every driver; cache-read is a running max for Codex (every
- * turn.completed counter is already cumulative) and additive for
- * claude-style streams until a terminal result event carries the
- * authoritative session total, which replaces the partial sum.
- *
- * @param {string} driver
- * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number, completed?: boolean}|null} previous
- * @param {string} window bounded transcript window of complete lines
- * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
- */
-export function accumulateSessionMetrics(driver, previous, window) {
-  const parser = new SessionMetricsParser(driver, previous ?? undefined);
-  parser.push(window);
-  parser.flush();
-  return parser.metrics();
-}
-
 /** Retention bound for one streamed record: records at or below it parse whole. */
-export const SESSION_RECORD_MAX_BYTES = 64 * 1024;
+const SESSION_RECORD_MAX_BYTES = 64 * 1024;
 
 /** Fragment evidence kept for a record that outgrew the retention bound. */
 const SESSION_FRAGMENT_BYTES = SESSION_RECORD_MAX_BYTES / 2;
@@ -734,7 +713,7 @@ function fragmentContinuationId(driver, fragments) {
  * @param {string} driver
  * @returns {boolean}
  */
-export function isClaudeFamily(driver) {
+function isClaudeFamily(driver) {
   return driver === "claude" || driver === "glm";
 }
 

@@ -29,10 +29,10 @@ import { DISCOVERY_RUNTIME_DEFINITIONS, discoverRuntimes } from "./runtime-disco
 /** @typedef {{name: string, ok: boolean, advisory: boolean, detail: string}} EnvCheck */
 /** @typedef {{schemaVersion: number, ok: boolean, checks: EnvCheck[]}} EnvReport */
 
-export const ENV_PREFLIGHT_SCHEMA_VERSION = 1;
+const ENV_PREFLIGHT_SCHEMA_VERSION = 1;
 
 /** Free space below this leaves no room for logs, capsules, and snapshots. */
-export const DEFAULT_MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
 
 /** Worktree states in which a scope diff is not readable. */
 const GIT_IN_PROGRESS = Object.freeze({
