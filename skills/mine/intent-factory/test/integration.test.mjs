@@ -9,6 +9,7 @@ import { captureSourceIdentity } from "../scripts/contract.mjs";
 import { candidateOnlyFailures } from "../scripts/judge-gate.mjs";
 import {
   candidateRefName,
+  git,
   createAttemptWorktree,
   createCandidateWorktree,
   createRunRef,
@@ -117,4 +118,21 @@ test("candidate-only verification failures name the environment divergence", () 
     [],
   );
   assert.deepEqual(candidateOnlyFailures(null, null), []);
+});
+
+test("a failing git command carries git's own reason into the error", () => {
+  const repo = mkdtempSync(join(tmpdir(), "runner-giterr-"));
+  execFileSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+  assert.throws(
+    () => git(repo, ["rev-parse", "--verify", "refs/heads/does-not-exist"]),
+    (/** @type {Error} */ error) => {
+      assert.match(error.message, /Command failed/u, "keeps the command that failed");
+      assert.match(
+        error.message,
+        /fatal|unknown revision|Needed a single revision/iu,
+        "and says why, instead of dropping git's stderr",
+      );
+      return true;
+    },
+  );
 });

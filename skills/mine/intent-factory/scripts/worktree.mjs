@@ -35,9 +35,39 @@ export function candidateWorktreePath(runDir, runId) {
   return join(worktreeRoot(runDir, runId), ".candidate");
 }
 
+/**
+ * Run git and, when it fails, carry git's own stderr into the error.
+ *
+ * Node's `execFileSync` error says only `Command failed: git -C … commit -qm
+ * …` and drops the reason. That is how an empty-change-set commit exiting 1
+ * was misdiagnosed twice across two campaigns: the surfaced error named the
+ * command, never git's "nothing to commit". Every git call here goes through
+ * this helper so a failure always says why.
+ *
+ * @param {string[]} args @returns {string}
+ */
+function runGit(args) {
+  try {
+    return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (error) {
+    const reason = gitFailureReason(error);
+    if (reason) /** @type {Error} */ (error).message = `${/** @type {Error} */ (error).message.split("\n")[0]}: ${reason}`;
+    throw error;
+  }
+}
+
+/** @param {unknown} error @returns {string} */
+function gitFailureReason(error) {
+  const streams = /** @type {{stderr?: unknown, stdout?: unknown}} */ (error ?? {});
+  return [streams.stderr, streams.stdout]
+    .map((stream) => (typeof stream === "string" ? stream : stream ? String(stream) : ""))
+    .map((text) => text.trim())
+    .find(Boolean) ?? "";
+}
+
 /** @param {string} repo @param {string[]} args @returns {string} */
 export function git(repo, args) {
-  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return runGit(["-C", repo, ...args]);
 }
 
 /** @param {string} repo @param {string} [ref] @returns {string|null} */
@@ -54,7 +84,7 @@ export function createRunRef(repo, runId, head) {
   if (!head) throw Object.assign(new Error("an execution repository must have at least one commit"), { code: "git_head_required" });
   const ref = runRefName(runId);
   if (gitHead(repo, ref)) throw new Error(`run ref already exists: ${ref}`);
-  execFileSync("git", ["-C", repo, "update-ref", ref, head], { stdio: "ignore" });
+  runGit(["-C", repo, "update-ref", ref, head]);
   return ref;
 }
 
@@ -77,9 +107,9 @@ export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt, ba
   if (existingCommit) {
     if (existingBranch !== existingCommit) throw new Error(`attempt worktree identity does not match ${branch}: ${path}`);
   } else if (existingBranch) {
-    execFileSync("git", ["-C", repo, "worktree", "add", path, branch], { stdio: "ignore" });
+    runGit(["-C", repo, "worktree", "add", path, branch]);
   } else {
-    execFileSync("git", ["-C", repo, "worktree", "add", path, "-b", branch, base ?? runRefName(runId)], { stdio: "ignore" });
+    runGit(["-C", repo, "worktree", "add", path, "-b", branch, base ?? runRefName(runId)]);
   }
   prepareWorktreeEnvironment(repo, path);
   return { status: "ready", path, branch, commit: gitHead(path), baseSha: base ?? runRefSha };
@@ -138,17 +168,17 @@ export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
   // already-sealed attempt into a hard failure.
   const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs", ":(exclude)node_modules"]);
   if (dirty) {
-    execFileSync("git", ["-C", path, "add", "-A", "--", "."], { stdio: "ignore" });
+    runGit(["-C", path, "add", "-A", "--", "."]);
     // node_modules is linked into the worktree as a symlink, which `node_modules/`
     // in .gitignore does not match; never let the link into the attempt commit.
-    execFileSync("git", ["-C", path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".runs", "node_modules"], { stdio: "ignore" });
-    execFileSync("git", [
+    runGit(["-C", path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".runs", "node_modules"]);
+    runGit([
       "-C", path,
       "-c", "user.email=runner@example.test",
       "-c", "user.name=intent-factory",
       "-c", "commit.gpgSign=false",
       "commit", "-qm", `intent-factory ${runId} ${nodeId} attempt ${attempt}`,
-    ], { stdio: "ignore" });
+    ]);
   }
   const sha = gitHead(path);
   if (!sha) throw new Error(`attempt worktree has no commit: ${path}`);
@@ -159,7 +189,7 @@ export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
 /** @param {string} repo @param {string} base @param {string} head @returns {boolean} */
 export function gitDiffEmpty(repo, base, head) {
   try {
-    execFileSync("git", ["-C", repo, "diff", "--quiet", base, head], { stdio: "ignore" });
+    runGit(["-C", repo, "diff", "--quiet", base, head]);
     return true;
   } catch {
     return false;
@@ -168,13 +198,13 @@ export function gitDiffEmpty(repo, base, head) {
 
 /** @param {string} repo @param {string} ref @param {string} next @param {string} previous @returns {void} */
 export function updateRefConditional(repo, ref, next, previous) {
-  execFileSync("git", ["-C", repo, "update-ref", ref, next, previous], { stdio: "ignore" });
+  runGit(["-C", repo, "update-ref", ref, next, previous]);
 }
 
 /** @param {string} repo @param {string} ref @returns {void} */
 export function deleteRef(repo, ref) {
   try {
-    execFileSync("git", ["-C", repo, "update-ref", "-d", ref], { stdio: "ignore" });
+    runGit(["-C", repo, "update-ref", "-d", ref]);
   } catch {
     // Deleting an already absent cleanup ref is idempotent.
   }
@@ -187,7 +217,7 @@ export function deleteRef(repo, ref) {
 export function createCandidateWorktree({ repo, runDir, runId, ref = candidateRefName(runId) }) {
   const path = candidateWorktreePath(runDir, runId);
   mkdirSync(dirname(path), { recursive: true });
-  execFileSync("git", ["-C", repo, "worktree", "add", "--detach", path, ref], { stdio: "ignore" });
+  runGit(["-C", repo, "worktree", "add", "--detach", path, ref]);
   prepareWorktreeEnvironment(repo, path);
   return path;
 }
@@ -196,7 +226,7 @@ export function createCandidateWorktree({ repo, runDir, runId, ref = candidateRe
 export function removeWorktree(repo, path) {
   if (!path) return;
   try {
-    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", path], { stdio: "ignore" });
+    runGit(["-C", repo, "worktree", "remove", "--force", path]);
   } catch (error) {
     if (existsSync(path)) rmSync(path, { recursive: true, force: true });
     else if (/** @type {{status?: number}} */ (error)?.status !== 128) throw error;
