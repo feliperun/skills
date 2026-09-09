@@ -199,6 +199,12 @@ export function normalizeProviderAvailability(runtimeOrDriver, response, exitCod
   const message = typeof error?.message === "string" ? error.message : "";
   const text = `${code} ${message}`;
   if (envelope.status === "done" || envelope.status === "no-op") return { available: true, exhaustedUntil: null, reason: "ready" };
+  // A hard balance stop (DeepSeek's 402 "Insufficient Balance") has no reset
+  // instant to report, unlike quota_exhausted, so it must be classified before
+  // that branch even though its text never matches the quota pattern.
+  if (/insufficient balance/iu.test(text) || /\b402\b/u.test(text)) {
+    return { available: false, exhaustedUntil: null, reason: "insufficient_balance" };
+  }
   if (envelope.status === "exhausted" || /quota|rate.?limit|usage limit|limit exhausted|1310/iu.test(text)) {
     return { available: false, exhaustedUntil: resetTimestamp(envelope.exhaustedUntil ?? error?.resetAt ?? message), reason: code || "quota_exhausted" };
   }

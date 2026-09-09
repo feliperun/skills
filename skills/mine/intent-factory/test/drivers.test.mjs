@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   driverCapabilities,
   missingCapabilities,
+  normalizeProviderAvailability,
   normalizeProviderResult,
   probeRuntime,
   providerCommand,
@@ -226,6 +227,25 @@ test("quota exhaustion routes through the declared failover edge (normalizer)", 
   assert.equal(unrelated.status, "failed");
   assert.equal(unrelated.error?.code, "provider_error");
   assert.equal(unrelated.continuationId, "unrelated-thread");
+});
+
+test("DeepSeek's 402 insufficient-balance stop is its own availability reason, distinct from quota and auth", () => {
+  const codexBalance = normalizeProviderResult("codex", [
+    { type: "thread.started", thread_id: "balance-thread" },
+    { type: "turn.failed", error: { message: "402 Insufficient Balance" } },
+  ].map((event) => JSON.stringify(event)).join("\n"), 1, null);
+  assert.equal(codexBalance.status, "failed", "no reset instant makes this an ordinary failure, not exhaustion");
+  const availability = normalizeProviderAvailability("codex", codexBalance);
+  assert.deepEqual(availability, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
+  assert.notEqual(availability.reason, "quota_exhausted");
+  assert.notEqual(availability.reason, "authentication_failed");
+
+  // Wording alone, without the numeric code, still classifies correctly.
+  const wordingOnly = normalizeProviderAvailability("codex", {
+    status: "failed",
+    error: { code: "provider_error", message: "Insufficient Balance" },
+  });
+  assert.deepEqual(wordingOnly, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
 });
 
 test("codex normalizer tolerates a bounded tail starting inside an event line", () => {
