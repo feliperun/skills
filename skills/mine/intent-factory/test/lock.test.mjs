@@ -9,6 +9,7 @@ import { appendJsonl, readJson, writeJsonAtomic } from "../scripts/store.mjs";
 import {
   LockBusyError,
   acquire,
+  bootstrapMatchesChild,
   lockPath,
   lockStale,
   pidAlive,
@@ -400,6 +401,73 @@ test("termination escalates from SIGTERM to SIGKILL for a provider that ignores 
 
 test("portable PID reuse defense rejects a mismatched Linux process start token", { skip: process.platform !== "linux" }, () => {
   assert.equal(invocationAlive({ pid: process.pid, processStartToken: "definitely-not-this-process" }), false);
+});
+
+test("darwin process start token is a stable, non-null fingerprint for a live process", { skip: process.platform !== "darwin" }, () => {
+  const first = processStartToken(process.pid);
+  assert.notEqual(first, null);
+  assert.equal(processStartToken(process.pid), first);
+});
+
+test("darwin process start token differs for a pid recycled by a later-started process (real child)", { skip: process.platform !== "darwin" }, async () => {
+  const first = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const firstPid = first.pid;
+  if (firstPid === undefined) throw new Error("first child pid unavailable");
+  const firstToken = processStartToken(firstPid);
+  assert.notEqual(firstToken, null);
+  first.kill("SIGKILL");
+  await new Promise((resolve) => first.once("exit", resolve));
+  // Force a different start second before the pid (if reused) reappears, so a
+  // real recycle would carry a different lstart token.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const second = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const secondPid = second.pid;
+  if (secondPid === undefined) throw new Error("second child pid unavailable");
+  try {
+    const secondToken = processStartToken(secondPid);
+    assert.notEqual(secondToken, null);
+    if (secondPid === firstPid) {
+      assert.notEqual(secondToken, firstToken, "the kernel reused the pid: the fingerprint must catch it");
+    }
+  } finally {
+    second.kill("SIGKILL");
+    await new Promise((resolve) => second.once("exit", resolve));
+  }
+});
+
+test("two synthetic records with different tokens are a mismatch, not just an unequal-string coincidence", () => {
+  const nonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const bootstrapRecord = { pid: process.pid, nonce, processStartToken: "synthetic-token-a" };
+  assert.equal(bootstrapMatchesChild(bootstrapRecord, process.pid, nonce, "synthetic-token-b"), false, "different synthetic tokens must not match");
+  assert.equal(bootstrapMatchesChild(bootstrapRecord, process.pid, nonce, "synthetic-token-a"), true, "identical synthetic tokens still match");
+
+  // The same distinction, exercised through lockStale via a captured lock
+  // record: a recorded token that disagrees with what the live pid actually
+  // carries now (injected here as a synthetic mismatch, standing in for a
+  // real pid-reuse token change) makes the lock stale even though the pid
+  // itself is alive.
+  const runDir = mkdtempSync(join(tmpdir(), "lock-token-injected-"));
+  writeJsonAtomic(lockPath(runDir), {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartToken: "synthetic-token-a",
+    startedAt: new Date(0).toISOString(),
+    hostname: "old-host",
+  });
+  const recorded = readLock(runDir);
+  assert.notEqual(processStartToken(process.pid), "synthetic-token-a", "the live token must genuinely disagree with the synthetic one");
+  assert.equal(pidAlive(process.pid), true);
+  assert.equal(lockStale(recorded), true, "a live pid with a mismatched recorded token is still stale");
+});
+
+test("process start token is null on platforms other than linux and darwin", () => {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try {
+    assert.equal(processStartToken(process.pid), null);
+  } finally {
+    Object.defineProperty(process, "platform", /** @type {PropertyDescriptor} */ (original));
+  }
 });
 
 test("monitorInvocation reads bounded live evidence and never throws", () => {
