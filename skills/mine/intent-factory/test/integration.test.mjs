@@ -27,6 +27,7 @@ test("run creation source identity includes resolved cwd and task-packet hashes"
 
 test("re-sealing an attempt whose only entry is the node_modules link is a no-op", () => {
   const repo = mkdtempSync(join(tmpdir(), "runner-seal-"));
+  /** @param {...string} args */
   const git = (...args) => execFileSync("git", ["-C", repo, ...args], { stdio: "ignore" });
   git("init", "-q");
   git("config", "user.email", "test@example.test");
