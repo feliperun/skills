@@ -1,6 +1,6 @@
 # campaign intent-factory-lean-20260905 handoff
 
-Updated: 2026-09-08T20:02:09.356Z
+Updated: 2026-09-09T01:03:29.810Z
 
 ## Goal
 
@@ -42,17 +42,20 @@ Ship intent-factory v0.3 lean per docs/intent-factory/TECH-SPEC-2026-09-05-lean.
 
 ## Linked runs
 
-- intent-factory-lean-p3-visibility-20260908: 2 nodes · 1 failed · 1 done
-  - dashboard-v2: failed · deterministic verification failed
-- intent-factory-lean-p4-release-20260908: 3 nodes · 3 canceled
-  - docs-v03: canceled · canceled
-  - metrics-v03: canceled · canceled
-  - runner-split: canceled · canceled
 - intent-factory-lean-p4-release-20260908-take2: 3 nodes · 3 canceled
   - docs-v03: canceled · canceled
   - metrics-v03: canceled · canceled
   - runner-split: canceled · canceled
-- 57 earlier attention-needed run states omitted
-- intent-factory-lean-p2b-process-20260908-take5: 1 nodes · 1 done
-- 2 earlier run summaries omitted
+- intent-factory-lean-p4-release-20260908-take3: 3 nodes · 2 failed · 1 done
+  - docs-v03: failed · You've hit your session limit · resets 8:30pm (America/Sao_Paulo)
+  - metrics-v03: failed · You've hit your session limit · resets 8:30pm (America/Sao_Paulo)
+- 63 earlier attention-needed run states omitted
+- intent-factory-lean-p4-release-20260908-take4: 2 nodes · 2 done
+- 3 earlier run summaries omitted
+
+## Recent user intents
+
+
+## Attempts and outcomes
+
 

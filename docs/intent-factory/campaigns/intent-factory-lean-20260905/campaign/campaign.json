@@ -1,7 +1,7 @@
 {
   "id": "intent-factory-lean-20260905",
   "goal": "Ship intent-factory v0.3 lean per docs/intent-factory/TECH-SPEC-2026-09-05-lean.md: whole-repo worktrees, verification as the gate with advisory review, USD budgets, retry in place, single controller process, direct notifications, redesigned dashboard and status surfaces, docs and code diet; measured against the 0.2.0 campaign baseline",
-  "status": "active",
+  "status": "closed",
   "linkedRunIds": [
     "intent-factory-lean-p0-unblock-20260905",
     "intent-factory-lean-p0-unblock-20260906-take2",
@@ -29,8 +29,11 @@
     "intent-factory-lean-p2b-process-20260908-take5",
     "intent-factory-lean-p3-visibility-20260908",
     "intent-factory-lean-p4-release-20260908",
-    "intent-factory-lean-p4-release-20260908-take2"
+    "intent-factory-lean-p4-release-20260908-take2",
+    "intent-factory-lean-p4-release-20260908-take3",
+    "intent-factory-lean-p4-release-20260908-take4"
   ],
   "createdAt": "2026-09-06T00:06:31.256Z",
-  "updatedAt": "2026-09-08T19:40:06.872Z"
+  "updatedAt": "2026-09-09T01:03:29.810Z",
+  "closedAt": "2026-09-09T01:03:29.810Z"
 }
