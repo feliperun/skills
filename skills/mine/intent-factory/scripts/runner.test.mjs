@@ -11,6 +11,7 @@ import {
   renderStatus,
   validateContract,
 } from "./lib.mjs";
+import { INTENT_FACTORY_VERSION } from "./contract.mjs";
 import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "./render.mjs";
 import {
   cancelRun,
@@ -426,7 +427,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
   const contract = join(directory, "contract.json");
   writeFileSync(contract, `${JSON.stringify({
     schemaVersion: 3,
-    contractVersion: "0.1.0",
+    contractVersion: INTENT_FACTORY_VERSION,
     id: "doctor-run",
     campaignId: "doctor-campaign",
     goal: "doctor",
@@ -3129,7 +3130,7 @@ test("status separates a live running node from an orphaned one", async () => {
 
   writeFileSync(join(runDir, "run.json"), JSON.stringify({
     schemaVersion: 3,
-    contractVersion: "0.1.0",
+    contractVersion: INTENT_FACTORY_VERSION,
     pid: 2_147_483_647,
     startedAt: "2026-01-01T00:00:00.000Z",
     sourceIdentity: { kind: "run", contractId: "orphan-run", campaignId: "test-campaign" },

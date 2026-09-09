@@ -10,7 +10,7 @@ import { replayDriver } from "./replay.mjs";
 export const PROTOCOL_SCHEMA_VERSION = 3;
 
 /** Version of the runner protocol implementation. */
-export const INTENT_FACTORY_VERSION = "0.1.0";
+export const INTENT_FACTORY_VERSION = "0.3.0";
 
 const DRIVERS = new Map([
   ["claude", claudeDriver],

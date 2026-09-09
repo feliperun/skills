@@ -1,6 +1,6 @@
 {
   "name": "@feliperun/skills",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reusable skills for agent work with a small control-plane context.",
   "type": "module",
   "bin": {

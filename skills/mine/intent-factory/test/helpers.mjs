@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
-import { PROTOCOL_SCHEMA_VERSION } from "../scripts/contract.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../scripts/contract.mjs";
 import { createAttemptWorktree } from "../scripts/worktree.mjs";
 
 // The suite must never pop a macOS desktop notification: when
@@ -134,7 +134,7 @@ export async function withFakeAgy(directory, body) {
 export function fixture(overrides = {}) {
   return {
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: "0.1.0",
+    contractVersion: INTENT_FACTORY_VERSION,
     id: "test-run",
     campaignId: "test-campaign",
     goal: "Prove the runner works",

@@ -64,7 +64,7 @@ test("verification rejects legacy shell strings", () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-contract-"));
   writeFileSync(join(cwd, "README.md"), "read\n");
   const contract = {
-    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: "0.1.0", id: "strict-verification", campaignId: "strict",
+    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: INTENT_FACTORY_VERSION, id: "strict-verification", campaignId: "strict",
     goal: "verify", cwd: ".", runtimeDefaults: { worker: "luna", judge: "luna" },
     runtimes: { luna: { driver: "codex", model: "test" } },
     nodes: [{ id: "build", type: "backend", phase: "verification", taskPacket: {
@@ -81,7 +81,7 @@ test("discovery and verification aggregate prompt limits fail before spawn", () 
   const cwd = mkdtempSync(join(tmpdir(), "runner-verification-oversized-"));
   writeFileSync(join(cwd, "README.md"), "read\n");
   const base = {
-    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: "0.1.0", id: "oversized", campaignId: "oversized-campaign", goal: "test", cwd: ".",
+    schemaVersion: PROTOCOL_SCHEMA_VERSION, contractVersion: INTENT_FACTORY_VERSION, id: "oversized", campaignId: "oversized-campaign", goal: "test", cwd: ".",
     runtimeDefaults: { worker: "worker", judge: "worker" }, runtimes: { worker: { driver: "codex", model: "test" } },
   };
   assert.throws(() => validateContract({
