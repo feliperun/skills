@@ -23,6 +23,7 @@ Everything else runs detached.
 | You want | Run |
 | --- | --- |
 | Probe runtimes and host before spending tokens | `preflight <contract.json>`, `doctor [--cwd <dir>]` |
+| Prove each verification command fits its own `timeoutSec` | `preflight <contract.json> --time-verification` |
 | Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
 | Advance that cursor past an event | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |
 | Wake only on actionable change, poll every 30s | `campaign watch <id> --cwd <repo> --wake` |

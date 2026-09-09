@@ -194,6 +194,92 @@ export function blockingChecks(report) {
   return report.checks.filter((check) => !check.ok && !check.advisory);
 }
 
+/** The share of its declared timeout a command may take before it is a warning. */
+const VERIFICATION_DURATION_WARN_RATIO = 0.8;
+
+/**
+ * Every distinct verification command the contract declares, with the
+ * strictest timeout any node gives it and the nodes that share it.
+ *
+ * Commands are keyed by argv and cwd, never merged across different argv, so
+ * one measurement stands in for every node that declares the same command —
+ * a contract that puts `npm test` on three nodes gets timed once.
+ *
+ * @param {ValidatedContract} contract
+ * @returns {{argv: string[], cwd?: string, timeoutSec: number, nodes: string[]}[]}
+ */
+export function declaredVerificationCommands(contract) {
+  /** @type {Map<string, {argv: string[], cwd?: string, timeoutSec: number, nodes: string[]}>} */
+  const commands = new Map();
+  const declarations = [
+    ...contract.nodes.flatMap((node) => (node.taskPacket?.verification ?? []).map((command) => ({ command, node: node.id }))),
+    ...(contract.finalVerification ?? []).map((command) => ({ command, node: "finalVerification" })),
+  ];
+  for (const { command, node } of declarations) {
+    const timeoutSec = command.timeoutSec ?? 120;
+    const key = JSON.stringify([command.argv, command.cwd ?? null]);
+    const existing = commands.get(key);
+    if (existing) {
+      existing.timeoutSec = Math.min(existing.timeoutSec, timeoutSec);
+      if (!existing.nodes.includes(node)) existing.nodes.push(node);
+    } else {
+      commands.set(key, { argv: command.argv, cwd: command.cwd, timeoutSec, nodes: [node] });
+    }
+  }
+  return [...commands.values()];
+}
+
+/**
+ * Run every declared verification command once and report what it actually
+ * costs against the timeout the contract gives it.
+ *
+ * A verification entry is capped at 600s by the schema, and nothing else in
+ * the toolchain measures whether a command fits: a suite that grows past its
+ * declared timeout only announces itself by failing a node that did its work
+ * correctly, after the tokens are spent. Campaign
+ * intent-factory-suite-speed-20260909 lost roughly 49 minutes and two nodes
+ * to exactly that — `npm test` at 644s against a declared 600s.
+ *
+ * A non-zero exit is reported, never failed on: a node may legitimately be
+ * the thing that turns a red command green. Only duration decides `ok`.
+ *
+ * @param {ValidatedContract} contract
+ * @param {{now?: () => number, run?: typeof spawnSync}} [probes] injectable for tests
+ * @returns {EnvCheck[]}
+ */
+export function timeVerificationCommands(contract, probes = {}) {
+  const now = probes.now ?? (() => Date.now());
+  const run = probes.run ?? spawnSync;
+  return declaredVerificationCommands(contract).map((command) => {
+    const label = command.argv.join(" ");
+    const name = `verification timing · ${label}`;
+    const shared = command.nodes.length > 1 ? ` · declared by ${command.nodes.join(", ")}` : "";
+    // Let a slow command overrun its declared timeout so the report can say by
+    // how much; killing it at the declared value would only prove "at least".
+    const ceilingSec = Math.min(Math.max(command.timeoutSec * 2, command.timeoutSec + 120), 1800);
+    const startedAt = now();
+    const result = run(command.argv[0], command.argv.slice(1), {
+      cwd: command.cwd ? resolve(contract.cwd, command.cwd) : contract.cwd,
+      timeout: ceilingSec * 1_000,
+      stdio: "ignore",
+      encoding: "utf8",
+    });
+    const seconds = (now() - startedAt) / 1_000;
+    const measured = `${seconds.toFixed(1)}s measured against ${command.timeoutSec}s declared`;
+    const exit = result.status === null ? `killed by ${result.signal ?? "timeout"}` : `exit ${result.status}`;
+    if (result.error && /** @type {{code?: string}} */ (result.error).code === "ENOENT") {
+      return fail(name, `${command.argv[0]} is not on PATH${shared}`);
+    }
+    if (seconds >= command.timeoutSec) {
+      return fail(name, `${measured}: this command cannot pass its own verification entry${shared} · ${exit}`);
+    }
+    if (seconds >= command.timeoutSec * VERIFICATION_DURATION_WARN_RATIO) {
+      return fail(name, `${measured}: within ${Math.round((1 - VERIFICATION_DURATION_WARN_RATIO) * 100)}% of the cap, so growth will break it${shared} · ${exit}`, true);
+    }
+    return pass(name, `${measured}${shared} · ${exit}`);
+  });
+}
+
 
 /**
  * Collect initial worker/judge runtimes and every runtime reachable through

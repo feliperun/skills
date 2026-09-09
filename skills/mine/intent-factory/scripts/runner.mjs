@@ -23,7 +23,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { probeRuntime, providerCommand } from "./drivers/index.mjs";
-import { doctorCommand, environmentPreflight, reachableRuntimes } from "./env-preflight.mjs";
+import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./env-preflight.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import { validateNodeSnapshot } from "./contract.mjs";
 import {
@@ -264,7 +264,7 @@ function livePreflight(runtime, cwd, timeoutSec) {
       /** @type {ProviderEnvelope} */
       let envelope;
       try {
-        envelope = normalizeProviderResult(safeRuntime, stdout, exitCode, signalName);
+        envelope = normalizeProviderResult(safeRuntime, stdout, exitCode, signalName, { stderr });
       } catch (error) {
         envelope = {
           status: "failed",
@@ -615,7 +615,7 @@ const COMMAND_OPTIONS = {
   run: { detach: { type: "boolean" } },
   resume: { detach: { type: "boolean" }, node: { type: "string" }, reconcile: { type: "string" } },
   cancel: {},
-  preflight: { static: { type: "boolean" }, json: { type: "boolean" } },
+  preflight: { static: { type: "boolean" }, json: { type: "boolean" }, "time-verification": { type: "boolean" } },
   validate: {},
   status: { json: { type: "boolean" } },
   report: { json: { type: "boolean" } },
@@ -734,13 +734,17 @@ async function main(argv) {
       runtimes: reachableRuntimes(contract),
       driverVersions: Object.fromEntries(checks.map((check) => [check.id, check.version])),
     });
-    const ok = environment.ok && checks.every((check) => check.ok);
+    // Opt-in: this actually runs the contract's verification commands, so it
+    // costs whatever they cost. It is the only check that can prove a command
+    // fits the timeout the contract gives it.
+    const timing = values["time-verification"] === true ? timeVerificationCommands(contract) : [];
+    const ok = environment.ok && checks.every((check) => check.ok) && timing.every((check) => check.ok || check.advisory);
     if (values.json === true) {
       process.stdout.write(`${JSON.stringify({
         schemaVersion: 1,
         contractId: contract.id,
         ok,
-        environment: environment.checks,
+        environment: [...environment.checks, ...timing],
         checks: checks.map((check) => ({
           id: check.id,
           driver: check.driver,
@@ -756,7 +760,7 @@ async function main(argv) {
         })),
       })}\n`);
     } else {
-      for (const check of environment.checks) process.stdout.write(`[${check.ok ? "ok" : check.advisory ? "warn" : "fail"}] ${check.name} · ${check.detail}\n`);
+      for (const check of [...environment.checks, ...timing]) process.stdout.write(`[${check.ok ? "ok" : check.advisory ? "warn" : "fail"}] ${check.name} · ${check.detail}\n`);
       for (const check of checks) process.stdout.write(`[${check.ok ? "ok" : "fail"}] ${check.id} · ${check.detail}\n`);
     }
     if (!ok) process.exitCode = 1;
@@ -790,7 +794,7 @@ async function main(argv) {
 
 function usage() {
   process.stderr.write(
-    "usage: runner.mjs <run|validate|preflight> <contract.json> [--detach] | " +
+    "usage: runner.mjs <run|validate> <contract.json> [--detach] | preflight <contract.json> [--static] [--time-verification] [--json] | " +
     "<resume|cancel> <run-dir> [--detach] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract validate <contract.json> | " +

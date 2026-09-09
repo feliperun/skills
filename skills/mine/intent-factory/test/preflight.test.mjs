@@ -14,6 +14,7 @@ import {
   checkWorktree,
   environmentPreflight,
   reachableRuntimes,
+  timeVerificationCommands,
 } from "../scripts/env-preflight.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 
@@ -240,4 +241,51 @@ test("doctor reports the four environment checks", () => {
   }
   const worktree = payload.checks.find((check) => check.name === "worktree");
   assert.equal(worktree?.ok, true, "an advisory worktree finding never fails doctor");
+});
+
+test("verification timing measures each declared command against its own timeout", () => {
+  const contract = /** @type {any} */ ({
+    cwd: process.cwd(),
+    nodes: [
+      { id: "first", taskPacket: { verification: [{ argv: ["slow"], timeoutSec: 600 }] } },
+      // The same command on a second node is timed once, under the strictest timeout.
+      { id: "second", taskPacket: { verification: [{ argv: ["slow"], timeoutSec: 300 }, { argv: ["quick"], timeoutSec: 120 }] } },
+    ],
+  });
+
+  /** @type {string[]} */
+  const invoked = [];
+  let clock = 0;
+  const durations = { slow: 644_000, quick: 2_000 };
+  const checks = timeVerificationCommands(contract, {
+    now: () => clock,
+    run: /** @type {any} */ (/** @param {string} file */ (file) => {
+      invoked.push(file);
+      clock += durations[/** @type {"slow"|"quick"} */ (file)];
+      return { status: 0, signal: null };
+    }),
+  });
+
+  assert.deepEqual(invoked, ["slow", "quick"], "one measurement per distinct command, not per node");
+  const slow = checks.find((check) => check.name.includes("slow"));
+  assert.equal(slow?.ok, false, "644s cannot pass a 300s verification entry");
+  assert.match(slow?.detail ?? "", /644\.0s measured against 300s declared/u);
+  assert.match(slow?.detail ?? "", /declared by first, second/u);
+  const quick = checks.find((check) => check.name.includes("quick"));
+  assert.equal(quick?.ok, true);
+});
+
+test("verification timing warns before a command reaches its cap", () => {
+  const contract = /** @type {any} */ ({
+    cwd: process.cwd(),
+    nodes: [{ id: "only", taskPacket: { verification: [{ argv: ["near"], timeoutSec: 100 }] } }],
+  });
+  let clock = 0;
+  const [check] = timeVerificationCommands(contract, {
+    now: () => clock,
+    run: /** @type {any} */ (() => { clock += 85_000; return { status: 1, signal: null }; }),
+  });
+  assert.equal(check.ok, false);
+  assert.equal(check.advisory, true, "a command close to its cap is a warning, not a blocker");
+  assert.match(check.detail, /exit 1/u, "a red command is reported, never failed on: a node may be what turns it green");
 });

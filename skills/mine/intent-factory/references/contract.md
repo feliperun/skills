@@ -85,9 +85,11 @@ KiB argv bytes per command. `env` declares variable *names* only; values
 never travel in the packet. The legacy `prompt`/`promptFile` fields are
 rejected; a node has `taskPacket` or `taskPacketFile`, never both. Measure a
 candidate command's real duration before naming it in `verification` or a
-worker instruction — a full test suite that has grown past 600s can never fit
-one entry; target the file the change actually touches instead and let the
-orchestrator run the full suite out of band.
+worker instruction — `preflight <contract.json> --time-verification` runs each
+declared command once and fails the contract when it cannot fit the timeout it
+was given. A full test suite that has grown past 600s can never fit one entry;
+target the file the change actually touches instead and let the orchestrator
+run the full suite out of band.
 
 An `autonomous` packet declares `writeRoots` instead of `writeFiles`:
 whole-repo read, write bounded to the listed files/directories. Scope is
