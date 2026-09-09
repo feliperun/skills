@@ -793,7 +793,7 @@ function usage() {
     "usage: runner.mjs <run|validate|preflight> <contract.json> [--detach] | " +
     "<resume|cancel> <run-dir> [--detach] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
-    "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract <prune|validate> ... | " +
+    "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract validate <contract.json> | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|attach|note|resolve|close|show|list> ...\n",
   );
