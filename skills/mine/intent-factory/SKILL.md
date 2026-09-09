@@ -78,7 +78,14 @@ to guess. Usage is recorded per attempt in `usage.jsonl` for reporting only.
 
 **Foreground children.** Worker prompts run builds, watchers, and servers in
 the foreground; only the runner is detached. Keep output bounded
-(`| tail -n 200`).
+(`| tail -n 200`). Never instruct a worker to run a command slower than its
+own tool's foreground timeout, including the full test suite — that is what
+`taskPacket.verification` is for, run by the controller after the worker
+declares done. Measure a verification command's real duration before setting
+its `timeoutSec`; a suite can silently outgrow the 600s per-entry cap as it
+grows, and a worker forced to wait past its own timeout backgrounds the
+command and returns prose instead of a result — a protocol failure, not a
+`done`.
 
 ## Routing and fallback
 

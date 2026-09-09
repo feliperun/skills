@@ -83,7 +83,11 @@ exception to closed scope — otherwise it is closed to the listed files. Each
 repeat? (default 1, max 8), env?}` — at most 32 commands, 64 argv items, 32
 KiB argv bytes per command. `env` declares variable *names* only; values
 never travel in the packet. The legacy `prompt`/`promptFile` fields are
-rejected; a node has `taskPacket` or `taskPacketFile`, never both.
+rejected; a node has `taskPacket` or `taskPacketFile`, never both. Measure a
+candidate command's real duration before naming it in `verification` or a
+worker instruction — a full test suite that has grown past 600s can never fit
+one entry; target the file the change actually touches instead and let the
+orchestrator run the full suite out of band.
 
 An `autonomous` packet declares `writeRoots` instead of `writeFiles`:
 whole-repo read, write bounded to the listed files/directories. Scope is
