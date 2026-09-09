@@ -109,7 +109,7 @@ export async function applyJudgeProtocolFailure(contract, node, state, runDir, r
  * @param {string} campaignPath
  * @param {JudgeVerdict} verdict
  */
-export async function settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, verdict) {
+async function settleAdvisoryReview(contract, node, state, runDir, lock, states, campaignPath, verdict) {
   clearJudgeReask(state);
   state.gate = verdict;
   if (verdict.verdict !== "pass") {

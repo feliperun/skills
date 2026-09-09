@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { validateTaskPacket } from "./task-packet.mjs";
 
-export const RESULT_LIMITS = Object.freeze({
+const RESULT_LIMITS = Object.freeze({
   bytes: 32 * 1024,
   summaryBytes: 4 * 1024,
   arrayItems: 32,

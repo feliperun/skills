@@ -383,7 +383,7 @@ export function failed(code, message, status = classifyFailure(message), continu
  * @param {string} message
  * @returns {"canceled"|"blocked"|"exhausted"|"failed"}
  */
-export function classifyFailure(message) {
+function classifyFailure(message) {
   const text = String(message);
   if (/cancel(?:ed|led)|aborted/iu.test(text)) return "canceled";
   if (/permission|approval|sandbox/iu.test(text)) return "blocked";

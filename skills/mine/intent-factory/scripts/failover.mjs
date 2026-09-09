@@ -29,7 +29,7 @@ import { nextSameTierRuntime } from "./runtime-discovery.mjs";
  * @param {ValidatedContract} contract
  * @returns {string[]}
  */
-export function rankedRuntimeIds(contract) {
+function rankedRuntimeIds(contract) {
   return Object.entries(contract.runtimes)
     .map(([id, runtime], order) => ({ id, order, rank: runtime.costRank, unranked: runtime.costRank === undefined ? 1 : 0 }))
     .sort((left, right) => left.unranked - right.unranked

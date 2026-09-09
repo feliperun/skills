@@ -487,7 +487,7 @@ function sameSnapshotEntries(before, after) {
 }
 
 /** @param {string} root @param {string[]} paths @returns {string[]} */
-export function expandScopePaths(root, paths) {
+function expandScopePaths(root, paths) {
   return [...new Set(paths.flatMap((path) => {
     const resolvedPath = resolveScopePath(root, path);
     return resolvedPath === path ? [path] : [path, resolvedPath];
@@ -694,7 +694,7 @@ export function validateVerificationCommands(commands, label = "verification") {
  * @param {string} label
  * @returns {VerificationCommand}
  */
-export function validateVerificationCommand(command, label = "verification command") {
+function validateVerificationCommand(command, label = "verification command") {
   if (!command || typeof command !== "object" || Array.isArray(command)) throw new TypeError(`${label} must be an argv command object`);
   const record = /** @type {Record<string, unknown>} */ (command);
   const allowed = new Set(["argv", "cwd", "timeoutSec", "repeat", "env"]);

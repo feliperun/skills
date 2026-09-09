@@ -31,12 +31,12 @@ const TERMINAL = new Set(["accepted", "failed", "conflict"]);
 /** @typedef {{status: string, candidateSha?: string|null, conflictingPaths?: string[], candidateEvidence?: CandidateEvidence}} IntegrationResult */
 
 /** @param {string} runDir @returns {string} */
-export function integrationJournalPath(runDir) {
+function integrationJournalPath(runDir) {
   return join(runDir, JOURNAL);
 }
 
 /** @param {string} nodeId @param {number} attempt @returns {string} */
-export function integrationKey(nodeId, attempt) {
+function integrationKey(nodeId, attempt) {
   return `${nodeId}:${attempt}`;
 }
 
@@ -61,7 +61,7 @@ export function readIntegrationJournal(runDir) {
 }
 
 /** @param {string} runDir @returns {IntegrationRecord[]} */
-export function latestIntegrationTransactions(runDir) {
+function latestIntegrationTransactions(runDir) {
   /** @type {Map<string, IntegrationRecord>} */
   const latest = new Map();
   for (const record of readIntegrationJournal(runDir)) {

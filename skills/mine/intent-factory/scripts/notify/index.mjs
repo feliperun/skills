@@ -17,12 +17,12 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMacosNotifier } from "./os-macos.mjs";
 
-export const NOTIFY_BIN_ENV = "INTENT_FACTORY_NOTIFY_BIN";
-export const MACOS_TRANSPORT = "os-macos";
+const NOTIFY_BIN_ENV = "INTENT_FACTORY_NOTIFY_BIN";
+const MACOS_TRANSPORT = "os-macos";
 export const NOTIFY_LOG_FILE = "notify.jsonl";
 export const MAX_ATTEMPTS = 3;
 /** Wait, in ms, before attempt 2 and attempt 3 of a failed delivery. */
-export const DEFAULT_BACKOFF_MS = [5_000, 30_000];
+const DEFAULT_BACKOFF_MS = [5_000, 30_000];
 
 const SUMMARY_CHARS = 200;
 
@@ -100,7 +100,7 @@ function truncate(value) {
  * @param {{bin?: string, spawn?: typeof defaultSpawn, timeoutMs?: number}} [options]
  * @returns {Promise<DeliveryResult>}
  */
-export function deliverNotification(event, options = {}) {
+function deliverNotification(event, options = {}) {
   const bin = options.bin ?? process.env[NOTIFY_BIN_ENV];
   if (!bin) return Promise.resolve({ ok: false, noTransport: true });
   if (bin === MACOS_TRANSPORT) {

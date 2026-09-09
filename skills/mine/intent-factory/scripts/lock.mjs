@@ -18,7 +18,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { fsyncDirectory } from "./store.mjs";
 
-export const LOCK_FILE = "controller.lock";
+const LOCK_FILE = "controller.lock";
 const TAKEOVER_ATTEMPTS = 20;
 
 export class LockBusyError extends Error {

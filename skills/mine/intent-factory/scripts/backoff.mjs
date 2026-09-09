@@ -38,7 +38,7 @@ export const NON_FAILOVER_CODES = new Set([
 export const NETWORK_MAX_ATTEMPTS = 3;
 
 /** First network wait, doubled per attempt. */
-export const NETWORK_BACKOFF_BASE_MS = 1_000;
+const NETWORK_BACKOFF_BASE_MS = 1_000;
 
 /** No single network wait exceeds two minutes, however many attempts remain. */
 export const NETWORK_BACKOFF_CAP_MS = 120_000;
@@ -89,7 +89,7 @@ const NETWORK_PATTERNS = [
  * reply (52) and receive (56) codes, sysexits EX_TEMPFAIL (75), and the
  * timeout(1) kill code (124) are unambiguous.
  */
-export const TRANSIENT_EXIT_CODES = new Set([7, 28, 35, 52, 56, 75, 124]);
+const TRANSIENT_EXIT_CODES = new Set([7, 28, 35, 52, 56, 75, 124]);
 
 /**
  * Is this failure one the node imposed on itself rather than one the network
@@ -147,13 +147,13 @@ export function backoffDelayMs(attempt, random = Math.random) {
  * message, and the message is not persisted. Tagging the code keeps the
  * provider's answer visible and makes the attempt countable.
  */
-export const NETWORK_BACKOFF_CODE = "network_backoff";
+const NETWORK_BACKOFF_CODE = "network_backoff";
 
 /**
  * @param {string} code provider error code for a wait being recorded
  * @returns {string} the errorCode to persist in the routing history
  */
-export function networkBackoffErrorCode(code) {
+function networkBackoffErrorCode(code) {
   return `${NETWORK_BACKOFF_CODE}:${code}`;
 }
 

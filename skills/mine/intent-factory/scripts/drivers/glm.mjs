@@ -3,13 +3,13 @@ import { hookSettings } from "../tool-policy-hook.mjs";
 import { claudePreambleArgs } from "./claude.mjs";
 
 /** Default Z.ai Anthropic-compatible endpoint serving GLM models. */
-export const GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic";
+const GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic";
 
 /** Default environment variable holding the Z.ai API token. */
-export const GLM_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
+const GLM_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
 
 /** GLM model that serves the CLI's internal small-model (haiku) calls. */
-export const GLM_DEFAULT_SMALL_MODEL = "glm-5.3-flash";
+const GLM_DEFAULT_SMALL_MODEL = "glm-5.3-flash";
 
 /**
  * GLM driver: drives a Claude-Code-compatible CLI pinned to the Z.ai
