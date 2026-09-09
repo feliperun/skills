@@ -248,6 +248,47 @@ test("DeepSeek's 402 insufficient-balance stop is its own availability reason, d
   assert.deepEqual(wordingOnly, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
 });
 
+test("Anthropic's soft session-limit stop is exhausted with a reset, distinct from a hard resetless stop", () => {
+  // Field defect #13: a phase-4 take hit an Anthropic session limit whose
+  // error text reads exactly like a hard quota stop; only the reset instant
+  // it carries proves it is retryable-after-reset rather than terminal.
+  const anthropicSoftLimit = [
+    {
+      type: "assistant",
+      is_api_error_message: true,
+      message: { content: [{ type: "text", text: "Claude AI usage limit reached. Your limit will reset at 2026-09-08 20:30:00" }] },
+    },
+    {
+      type: "result",
+      result: "Claude AI usage limit reached. Your limit will reset at 2026-09-08 20:30:00",
+      is_error: true,
+      terminal_reason: "api_error",
+      session_id: "soft-limit-session",
+      usage: { input_tokens: 4, output_tokens: 1 },
+    },
+  ].map((event) => JSON.stringify(event)).join("\n");
+  const envelope = normalizeProviderResult("claude", anthropicSoftLimit, 1, null);
+  assert.equal(envelope.status, "exhausted", "a soft session limit is exhaustion, not a terminal failure");
+  assert.equal(envelope.error?.code, "quota_exhausted");
+  assert.match(envelope.error?.message ?? "", /2026-09-08 20:30:00/u);
+  assert.equal(envelope.continuationId, "soft-limit-session");
+
+  const softLimit = normalizeProviderAvailability("claude", envelope);
+  assert.equal(softLimit.available, false);
+  assert.equal(softLimit.reason, "quota_exhausted");
+  assert.equal(softLimit.exhaustedUntil, "2026-09-08T20:30:00.000Z", "the reset instant is parsed from the error text, proving this is retryable-after-reset");
+
+  // The prior node's DeepSeek fixture is the hard, resetless counterpart: both
+  // are unavailable, but only the soft limit reports a reset to wait out.
+  const hardStop = normalizeProviderAvailability("codex", {
+    status: "failed",
+    error: { code: "provider_error", message: "402 Insufficient Balance" },
+  });
+  assert.equal(hardStop.reason, "insufficient_balance");
+  assert.equal(hardStop.exhaustedUntil, null, "a hard balance stop has no reset instant to report");
+  assert.notEqual(softLimit.exhaustedUntil, hardStop.exhaustedUntil);
+});
+
 test("codex normalizer tolerates a bounded tail starting inside an event line", () => {
   const partial = `rted","command":"/bin/zsh -lc 'cat file'"}`;
   const events = [
