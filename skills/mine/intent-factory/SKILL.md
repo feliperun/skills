@@ -13,10 +13,8 @@ actionable verdicts into the session.
 
 | You need | Read |
 | --- | --- |
-| Contract, packets, results, driver protocol, states, resume | [contract.md](references/contract.md) |
-| Attempt worktrees, integration, recovery, controller lock, status.json, notify | [operations.md](references/operations.md) |
-| Workflow steps, runtime catalogue, adapter capabilities, gates | [routing.md](references/routing.md) |
-| Session save/resume protocol | [session-memory.md](references/session-memory.md) |
+| Contract shape, packets, driver protocol, runtimes, gates, worker results, resume | [contract.md](references/contract.md) |
+| Worktrees, integration, controller lock, status.json, notify, dashboard, campaigns | [operations.md](references/operations.md) |
 
 ## Session commands
 

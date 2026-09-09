@@ -1,160 +1,163 @@
 # Intent Factory operations
 
-## Isolated attempts
+## Attempt worktrees
 
-An execution repository must be a Git work tree with at least one commit.
-When a run starts, the controller records its source identity and creates:
-
-```text
-refs/intent-factory/<run-id>/run
-.runs/worktrees/<run-id>/<node-id>.<attempt>
-if/<run-id>/<node-id>/<attempt>
-```
-
-The run ref is the only integration head. Each attempt branch starts there,
-and the node snapshot records its path, branch, base SHA, and current commit.
-Provider commands, snapshots, verification, progress monitoring, capsule
-capture, and judge inspection receive the attempt path as their cwd. The run
-directory remains the home for state, logs, journals, and control artifacts.
+An execution repository is a git work tree with at least one commit. A run
+creates the integration head `refs/intent-factory/<run-id>/run` at the
+recorded source `gitHead`. Every worker attempt gets a linked worktree at
+`.runs/worktrees/<run-id>/<node-id>.<attempt>` on branch
+`if/<run-id>/<node-id>/<attempt>`, cut from that ref. The node snapshot
+records `worktree.path`, `.branch`, `.baseSha`, and the sealed `.commit`.
+Provider processes, scope snapshots, controller verification, and judges all
+use that path; `contract.cwd` stays the home of run/control artifacts. When
+the repository root has an installed `node_modules`, every attempt worktree
+links it in as a symlink, never a copy.
 
 A retried attempt never discards the previous one's edits: the controller
-seals the previous attempt's worktree first, and when that seal carries a
-diff, the next attempt's branch and worktree are cut from that sealed sha
-instead of the run ref tip, with `worktree.previousAttempt` recording which
-attempt it continues. A previous attempt that sealed empty falls back to the
-run ref tip, as before. When the repository root has an installed
-`node_modules`, every attempt worktree links it in as a symlink, never a
-copy.
+seals the previous attempt's worktree first, and when that seal has a diff,
+the next attempt is cut from that sealed sha (`worktree.previousAttempt`
+records which) instead of the run ref tip; an empty seal falls back to the
+run ref tip.
 
-The worker-result prompt points at the attempt-local `.runs/results` sidecar.
-After the worker closes, the controller copies that JSON into the canonical
-run-directory result path. The sidecar is excluded from attempt commits.
-
-## Concurrency
-
-`contract.maxParallel` bounds how many nodes run at once. Each tick the
-scheduler dispatches every `pending` node whose dependencies are `done`, up to
-the free slot count (`maxParallel` minus nodes currently running), each into
-its own attempt worktree and branch. Integration stays serialized regardless
-of `maxParallel`: only one candidate is built, verified, and considered for
-the run ref at a time, so a second node that finishes while the first is
-integrating waits its turn and its candidate is rebuilt on the accepted head.
+`contract.maxParallel` bounds concurrent nodes; each tick the scheduler
+dispatches every `pending` node whose dependencies are `done`, up to the free
+slot count, each into its own worktree. Integration stays serialized
+regardless of `maxParallel`.
 
 ## Integration transaction
 
-The controller serializes integration. It seals any uncommitted attempt edits
-with a commit message containing the run, node, and attempt. A clean or
-already-committed attempt is valid; its journal record carries `empty: true`
-when it has no diff from its base.
+The controller serializes integration. It seals any uncommitted attempt
+edits with a commit naming the run/node/attempt (`empty: true` in the
+journal when there is no diff), appends a `prepared` record to
+`integration.jsonl` (node, attempt, attempt sha, previous run-ref tip,
+candidate sha, verification evidence) before creating anything, and builds
+the candidate — fast-forward or merge — on
+`refs/intent-factory/<run-id>/candidate` /
+`.runs/worktrees/<run-id>/.candidate`. Node `verification` runs once there. A
+pass advances the run ref with a conditional `update-ref` and makes one node
+state write to `done` with `integratedHead`. A failed candidate removes the
+candidate ref/worktree, leaves the run ref untouched, and keeps the attempt
+worktree. A conflict marks the node `attention` with the conflicting paths
+and cleans the scratch worktree.
 
-The controller appends a `prepared` integration record before creating the
-candidate ref or scratch worktree. The record identifies the node and attempt,
-attempt SHA, previous run-ref tip, candidate SHA, and attempt verification
-evidence. The candidate is a fast-forward of the run ref when possible, or a
-merge candidate otherwise, at:
-
-```text
-refs/intent-factory/<run-id>/candidate
-.runs/worktrees/<run-id>/.candidate
-```
-
-The node verification runs once in that candidate worktree. A passing result
-advances the run ref with `git update-ref <ref> <candidate> <previous>` and
-then makes one node state write to `done` with `integratedHead`. A failed
-candidate removes the candidate ref and scratch worktree, leaves the run ref
-untouched, and retains the attempt worktree. A merge conflict records its
-paths, marks the node for attention, cleans the scratch worktree, and retains
-the attempt.
-
-## Recovery
-
-Resume uses `integration.jsonl` to identify the unfinished transaction. It does
-not infer verified work from ancestry. Preparation failures clean and rebuild
-the candidate deterministically; a verified transaction reuses its recorded
-candidate evidence. Recovery handles the conditional ref move, the done-state
-write, worktree removal, and terminal event as separate idempotent effects.
-This includes a candidate whose SHA equals the previous run-ref tip. A resume
-that re-dispatches a failed, stalled, exhausted, or canceled node retries it
-in place through the same continuation rule as any other retry: the next
-attempt is cut from the previous attempt's sealed sha, not a fresh worktree
-from the run ref.
+Resume replays `integration.jsonl`, never ancestry, to identify the one
+unfinished transaction and complete it idempotently (including an accepted
+no-change candidate). A resume that re-dispatches a failed/stalled/
+exhausted/canceled node cuts the next attempt from the previous attempt's
+sealed sha, the same continuation rule as any other retry.
 
 ## Controller lock and takeover
 
-One controller drives a run at a time, holding `<run-dir>/controller.lock`:
-`{pid, processStartToken, startedAt, hostname}`. Acquisition is an exclusive
-create; there is no TTL and nothing to renew, so a lock stays valid for as
-long as its holder is alive, however long that takes. A contender that finds
-the file held reads it and treats it as stale only when it can prove the
-holder dead — the recorded pid is gone, or its process start token no longer
-matches the live process at that pid (the pid was recycled). Anything short
-of that proof is `controller_active`, and the contender exits without
-touching the run: two controllers must never dispatch the same node.
+One controller drives a run, holding `<run-dir>/controller.lock`: `{pid,
+processStartToken, startedAt, hostname}`. Acquisition is an exclusive
+create; there is no TTL. A contender treats the lock as stale only once it
+can prove the holder dead — the pid is gone, or its process start token no
+longer matches (pid recycled); anything short of that is `controller_active`
+and the contender exits untouched.
 
-Takeover is a capture-and-verify sequence, not a delete-and-write: the
-contender renames the lock file aside (one atomic step, so a live successor
-that installed in the gap is never destroyed), re-checks that the captured
-record is still stale, and only then discards it and installs its own record.
-If the captured record turns out to be live after all — a second contender
-raced it and won — the capture is handed straight back under its original
-name and this contender's attempt fails.
-
-Worker, judge and verification children run detached in their own process
-group, so a dead controller's dispatches keep running orphaned unless
-something reaps them. Before `resume` dispatches anything new, its recovery
-pass walks every node that was `running`: past-deadline or otherwise unusable
-invocations are terminated by process group (`SIGTERM`, then `SIGKILL`) —
-the same termination `cancel` uses — and only once that pass completes does
-the scheduler loop start handing out new work. A live invocation still inside
-its deadline is adopted instead of killed: the pass waits for it and reads
-its completed result rather than throwing away work a `resume` merely
-happened to interrupt.
-
-`cancel <run-dir>` takes the same path deliberately: it signals a live
-controller to death first, so by the time it calls the same takeover its own
-lock acquisition is never waiting on an expiry — the lock is already stale
-the instant the pid is gone.
+Takeover renames the lock file aside, re-checks the captured record is still
+stale, then discards it and installs its own; if the captured record turns
+out live (a race), the capture is handed back under its original name.
+Worker/judge/verification children run detached in their own process group,
+so before dispatching anything new, `resume`'s recovery pass terminates
+(`SIGTERM` then `SIGKILL`, same as `cancel`) every invocation recorded for a
+`running` node — unless it is still inside its deadline, in which case it is
+adopted and its result read instead of thrown away. `cancel <run-dir>`
+signals a live controller to death first, so its own takeover never waits on
+an expiry.
 
 ## Runtime discovery
 
-`doctor --discover [--json]` performs mutation-free driver discovery and
-reports `{available, exhaustedUntil, reason}` per runtime. Missing CLIs are
-`not_found`; authentication failures have no reset; quota responses retain
-their reset time, including Z.ai code 1310. Omitted assignments are composed
-once and persisted in `routing.assignments`; exhaustion re-tiers only within
-the current tier and otherwise leaves the node in attention with
-`runtime_tier_exhausted`.
+`doctor --discover [--json]` performs mutation-free driver discovery,
+reporting `{available, exhaustedUntil, reason}` per runtime (missing CLI →
+`not_found`; auth failure has no reset; quota keeps its reset, including
+Z.ai code 1310). Omitted `runtimes`/`runtimeDefaults` are composed once and
+persisted in `routing.assignments`; exhaustion re-tiers within the current
+tier only, otherwise the node parks `attention` with
+`runtime_tier_exhausted`. See [contract.md](contract.md) for the failover
+edge and vendor rules.
 
 ## Status
 
-`<run-dir>/status.json` (the same payload `status --json` prints) and
-`.runs/status.json` (a bounded pointer to the active run) are written
-atomically every controller tick and at run terminal — the progress surface
-now that there is no heartbeat. The per-run file carries `schemaVersion`,
-`run`, `contractId`, `campaignId`, `goal`, `usage`, `controller` (state, pid,
-since), `summary`, and one entry per node (`id`, `status`, `phase`, `runtime`,
-`attempt`, `revisions`, `note`, `errorCode`, `blockedBy`, …). The `.runs`
-pointer is smaller — `schemaVersion`, `runId`, `campaignId`, `state`,
-`checkpoints`, `activeNode`, `runtime`, `attention`, `generatedAt` (unix
-seconds) — bounded to 1 KiB for a cheap ambient read; `statusline/claude-code.sh`
-reads it directly.
+`<run-dir>/status.json` (`status --json`'s payload: `schemaVersion`, `run`,
+`contractId`, `campaignId`, `goal`, `usage`, `controller` state, `summary`,
+and one `nodes[]` entry per node — id, status, phase, runtime, continuation
+mode, attempt, revisions, usage, cost, verdict, note, `scopeFindings`,
+`errorCode`, `blockedBy`) and `.runs/status.json` (a ≤1 KiB pointer:
+`schemaVersion`, `runId`, `campaignId`, `state`, `checkpoints`, `activeNode`,
+`runtime`, `elapsedSec`, `costUsd`, `needsYou`, `attention`, `generatedAt`
+unix seconds) are written atomically every controller tick and at run
+terminal. `status <run-dir>` renders, in order: Needs you (attention nodes
+and orphans), Now (active node, elapsed, cost, or idle), Nodes (one row per
+node), Cost (run totals). `statusline/claude-code.sh` reads the pointer
+directly for an ambient one-line prompt segment.
+
+## Dashboard
+
+`node dashboard/dashboard.mjs [--port 4173] [--cwd <repo>]` serves a
+read-only page on `127.0.0.1:4173`, one column, SSE-refreshed, over
+`status.json`, node JSON, `events.jsonl`, `usage.jsonl`, `notify.jsonl`, and
+`HANDOFF.md` only — it never writes campaign state. Sections: a campaign
+picker; **Now** (active run/node/cost or idle); **Needs you** (one line per
+attention item with the resolving command); **Runs** table for the selected
+campaign; a **Run drawer** on row click with per-node tabs (log tail,
+verification, diff, findings, prompt); **Handoff** (the campaign's
+`HANDOFF.md`). The snapshot is bounded to 200 KiB, shrinking the open
+drawer's log/verification tails, then its prompt, then the handoff text.
 
 ## Notify
 
-On `node.terminal`, `run.terminal` and `attention` the controller renders a
+On `node.terminal`, `run.terminal`, and `attention` the controller renders a
 one-line message from counters and identifiers only (node id, run id, state,
 attempt, error code, done/total — never model text), calls the executable
 named by `INTENT_FACTORY_NOTIFY_BIN` with that event as JSON on stdin, and
 appends a receipt (`delivered`, `failed`, or `no_transport`, with the
-timestamp) to `<run-dir>/notify.jsonl`. Exit code 0 is the only success
-signal; anything else is `failed` and retried on a later controller tick, up
-to three attempts total with backoff (`INTENT_FACTORY_NOTIFY_BACKOFF_MS`
-overrides the default). With `INTENT_FACTORY_NOTIFY_BIN` unset nothing is
-spawned and the receipt is `no_transport` — there is no implicit desktop
-fallback. Progress never notifies. Setting
-`INTENT_FACTORY_NOTIFY_BIN=os-macos` is the one explicit opt-in to the bundled
-`osascript` adapter; every other value is treated as an executable path.
-Resuming a run never re-sends a notification already recorded for the same
-node, attempt, and outcome: the durable `notify.jsonl` is the only thing that
-survives the controller process boundary, so it is what a fresh resume checks
-before enqueuing.
+timestamp) to `<run-dir>/notify.jsonl`. Exit 0 is the only success signal;
+anything else retries on a later tick, up to three attempts with backoff
+(`INTENT_FACTORY_NOTIFY_BACKOFF_MS` overrides it). With
+`INTENT_FACTORY_NOTIFY_BIN` unset nothing is spawned and the receipt is
+`no_transport`. `INTENT_FACTORY_NOTIFY_BIN=os-macos` opts into the bundled
+`osascript` adapter; any other value is an executable path. A resume never
+re-sends a notification already recorded in `notify.jsonl` for the same
+node, attempt, and outcome.
+
+## Campaigns
+
+Every contract requires `campaignId`; campaign state lives at
+`.runs/campaigns/<campaign-id>/` (`campaign.json`, `journal.jsonl`,
+`HANDOFF.md`) and can link multiple runs.
+
+```bash
+node scripts/runner.mjs campaign list [--cwd <dir>]
+node scripts/runner.mjs campaign init <id> --cwd <dir> --goal "Goal"
+node scripts/runner.mjs campaign attach <id> --cwd <dir> --tool codex --session-id <s> \
+  --transcript <path> --format jsonl [--cursor <c>]
+node scripts/runner.mjs campaign note <id> --cwd <dir> --session-id <s> \
+  --kind <intent|decision|supersede|constraint|outcome|next|open-question|retrospective> --text <t>
+node scripts/runner.mjs campaign resolve <id> --cwd <dir> --session-id <s> --question-id <q> --text <a>
+node scripts/runner.mjs campaign sync <id> --cwd <dir> --session-id <s>
+node scripts/runner.mjs campaign ack <id> --cwd <dir> --session-id <s> --event-id <e>
+node scripts/runner.mjs campaign watch <id> --cwd <dir> --wake
+node scripts/runner.mjs campaign close <id> --cwd <dir>
+node scripts/runner.mjs campaign show <id> --cwd <dir>
+```
+
+`sync` is the user-pull read: campaign header, the newest linked run's
+`status.json` summary, and unseen journal events (≤8000 bytes) after the
+session's durable cursor, without moving it. `ack` is the only cursor
+writer, keyed by the journal's own event id. `watch --wake` polls every
+linked run's `status.json` every 30s and prints one line per actionable
+change (a run gone terminal, a node in attention, a stale controller lock,
+or twenty idle minutes), exiting once the campaign is closed. `close`
+refuses until a `retrospective` note exists; a closed campaign rejects
+further attach/note/resolve writes but stays inspectable via `show`/`list`.
+The campaign also mirrors its active state into a managed
+`<!-- intent-factory-active:start -->` block at the bottom of the target
+repo's `AGENTS.md` (read-only for any agent; the runner rewrites it at run
+start/end, resume, and cancel) — the signal that active work exists before
+an unrelated session's first prompt.
+
+`HANDOFF.md` is an atomic, ≤16 KiB projection of recent intents, decisions,
+constraints, outcomes, next action, and open questions, refreshed on
+initialization, run registration, state transitions, `status`, and terminal
+completion; `journal.jsonl` is the append-only, fsynced full narrative.
