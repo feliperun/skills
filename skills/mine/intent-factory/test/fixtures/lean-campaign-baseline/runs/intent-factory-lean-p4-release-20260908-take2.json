@@ -1,0 +1,65 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T19:40:08.378Z",
+      "node": "runner-split",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T20:01:22.394Z",
+      "node": "runner-split",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T20:01:22.418Z",
+      "node": "docs-v03",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T20:01:22.432Z",
+      "node": "metrics-v03",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "docs-v03",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 0,
+      "id": "metrics-v03",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "runner-split",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [
+    {
+      "at": "2026-09-08T20:01:22.643Z",
+      "attempt": 1,
+      "dedupeKey": "run.terminal:intent-factory-lean-p4-release-20260908-take2:attention",
+      "status": "delivered"
+    }
+  ],
+  "usage": []
+}

@@ -1,0 +1,30 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T16:31:21.212Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T16:31:42.717Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "continue-from-sealed-attempt",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

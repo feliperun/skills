@@ -1,0 +1,42 @@
+{
+  "campaign": {
+    "goal": "Ship intent-factory v0.3 lean per docs/intent-factory/TECH-SPEC-2026-09-05-lean.md",
+    "id": "intent-factory-lean-20260905",
+    "linkedRunIds": [
+      "intent-factory-lean-p0-unblock-20260905",
+      "intent-factory-lean-p0-unblock-20260906-take2",
+      "intent-factory-lean-p0-unblock-20260906-take3",
+      "intent-factory-lean-p0-unblock-20260906-take4",
+      "intent-factory-lean-p0-unblock-20260907-take5",
+      "intent-factory-lean-p0-unblock-20260907-take6",
+      "intent-factory-lean-p0-unblock-20260907-take6-continuation",
+      "intent-factory-lean-p1-isolation-20260907",
+      "intent-factory-lean-p1b-routing-20260907",
+      "intent-factory-lean-p1c-routing-20260907",
+      "intent-factory-lean-p1d-recovery-20260907",
+      "intent-factory-lean-p1e-runtime-discovery-20260907",
+      "intent-factory-lean-20260905-repair-3e23ffeb00026850fd76",
+      "intent-factory-lean-p1f-suite-fix-20260908",
+      "intent-factory-lean-p1f-suite-fix-20260908-take2",
+      "intent-factory-lean-p1f-suite-fix-20260908-take3",
+      "intent-factory-lean-p2a-diet-20260908",
+      "intent-factory-lean-p2a-diet-20260908-take2",
+      "intent-factory-lean-p2a-diet-20260908-take3",
+      "intent-factory-lean-p2b-process-20260908",
+      "intent-factory-lean-p2b-process-20260908-take2",
+      "intent-factory-lean-p2b-process-20260908-take3",
+      "intent-factory-lean-p2b-process-20260908-take4",
+      "intent-factory-lean-p2b-process-20260908-take5",
+      "intent-factory-lean-p3-visibility-20260908",
+      "intent-factory-lean-p4-release-20260908",
+      "intent-factory-lean-p4-release-20260908-take2",
+      "intent-factory-lean-p4-release-20260908-take3",
+      "intent-factory-lean-p4-release-20260908-take4"
+    ],
+    "status": "active"
+  },
+  "distilledFrom": {
+    "campaignId": "intent-factory-lean-20260905",
+    "source": ".runs/campaigns/intent-factory-lean-20260905 (read-only snapshot, 2026-09-08)"
+  }
+}

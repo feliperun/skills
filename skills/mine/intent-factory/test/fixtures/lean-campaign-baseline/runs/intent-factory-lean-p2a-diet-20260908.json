@@ -1,0 +1,30 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T08:17:19.452Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "deepseek-pro",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T09:08:34.153Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "deepseek-pro",
+      "to": "failed",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "budget-removal-schema3",
+      "revisions": 0,
+      "status": "failed"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

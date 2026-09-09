@@ -1,0 +1,90 @@
+{
+  "events": [
+    {
+      "at": "2026-09-06T12:49:33.224Z",
+      "node": "scope-advisory",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-06T12:54:25.118Z",
+      "node": "scope-advisory",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-06T12:55:27.480Z",
+      "node": "scope-advisory",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-06T12:58:40.074Z",
+      "node": "scope-advisory",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-06T13:02:04.015Z",
+      "node": "scope-advisory",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-06T13:02:24.464Z",
+      "node": "scope-advisory",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "exhausted",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-06T13:02:24.491Z",
+      "node": "review-modes",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-06T13:02:24.511Z",
+      "node": "retry-in-place",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "retry-in-place",
+      "revisions": 0,
+      "status": "blocked"
+    },
+    {
+      "attempt": 0,
+      "id": "review-modes",
+      "revisions": 0,
+      "status": "blocked"
+    },
+    {
+      "attempt": 2,
+      "id": "scope-advisory",
+      "revisions": 1,
+      "status": "exhausted"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

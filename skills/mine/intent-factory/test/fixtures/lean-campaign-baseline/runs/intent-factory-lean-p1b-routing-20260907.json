@@ -1,0 +1,235 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T16:49:35.234Z",
+      "node": "worktrees-typecheck-fix",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:01:14.103Z",
+      "node": "worktrees-typecheck-fix",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:02:44.948Z",
+      "node": "worktrees-typecheck-fix",
+      "phase": "complete",
+      "runtime": "sol",
+      "to": "done",
+      "verdict": "pass"
+    },
+    {
+      "at": "2026-09-07T17:02:45.418Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:02:45.418Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:03:21.282Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:03:21.333Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:05:00.223Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:05:00.713Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:06:00.924Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T17:06:00.946Z",
+      "node": "runtime-discovery",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:26:37.762Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:26:37.785Z",
+      "node": "runtime-discovery",
+      "phase": "worker",
+      "runtime": null,
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:26:38.813Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:26:38.813Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:33:30.902Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:33:30.942Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:36:09.051Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:36:09.554Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:38:52.960Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:46:31.875Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:46:31.912Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:48:06.918Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T18:48:07.417Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T19:00:19.004Z",
+      "node": "parallel-and-fallback",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T19:00:19.025Z",
+      "node": "runtime-discovery",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 5,
+      "id": "parallel-and-fallback",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 0,
+      "id": "runtime-discovery",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "worktrees-typecheck-fix",
+      "review": "blocking",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

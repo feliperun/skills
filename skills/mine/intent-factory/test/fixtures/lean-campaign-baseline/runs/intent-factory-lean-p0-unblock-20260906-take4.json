@@ -1,0 +1,130 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T02:57:44.358Z",
+      "node": "scope-advisory",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T03:16:02.053Z",
+      "node": "scope-advisory",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T03:18:36.672Z",
+      "node": "scope-advisory",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T03:28:44.027Z",
+      "node": "scope-advisory",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T03:29:53.913Z",
+      "node": "scope-advisory",
+      "phase": "complete",
+      "runtime": "sol",
+      "to": "done",
+      "verdict": "pass"
+    },
+    {
+      "at": "2026-09-07T03:29:54.693Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:29:56.052Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "exhausted",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:29:56.076Z",
+      "node": "retry-in-place",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:31:27.125Z",
+      "node": "review-modes",
+      "phase": "waiting",
+      "runtime": "glm",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:31:27.156Z",
+      "node": "retry-in-place",
+      "phase": "waiting",
+      "runtime": null,
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:31:28.479Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:46:36.945Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "stalled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T04:46:36.967Z",
+      "node": "retry-in-place",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "retry-in-place",
+      "revisions": 0,
+      "status": "blocked"
+    },
+    {
+      "attempt": 2,
+      "id": "review-modes",
+      "revisions": 0,
+      "status": "stalled"
+    },
+    {
+      "attempt": 2,
+      "id": "scope-advisory",
+      "revisions": 1,
+      "status": "done"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

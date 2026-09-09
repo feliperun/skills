@@ -1,0 +1,52 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T16:32:26.283Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T17:49:48.876Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "complete",
+      "runtime": "sonnet",
+      "to": "done",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "continue-from-sealed-attempt",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [
+    {
+      "at": "2026-09-08T17:49:49.164Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p2b-process-20260908-take5:continue-from-sealed-attempt:done:1:0",
+      "status": "no_transport"
+    },
+    {
+      "at": "2026-09-08T17:49:49.185Z",
+      "attempt": 1,
+      "dedupeKey": "run.terminal:intent-factory-lean-p2b-process-20260908-take5:done",
+      "status": "no_transport"
+    }
+  ],
+  "usage": [
+    {
+      "cacheReadInputTokens": 11763391,
+      "costProvenance": "provider",
+      "costUsd": 3.6907231999999994,
+      "inputTokens": 188600,
+      "outputTokens": 58028,
+      "runtimeId": "sonnet"
+    }
+  ]
+}

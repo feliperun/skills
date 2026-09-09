@@ -1,0 +1,44 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T04:47:41.678Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T05:40:26.362Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "stalled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T05:40:26.385Z",
+      "node": "retry-in-place",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "retry-in-place",
+      "revisions": 0,
+      "status": "blocked"
+    },
+    {
+      "attempt": 1,
+      "id": "review-modes",
+      "revisions": 0,
+      "status": "stalled"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

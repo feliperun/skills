@@ -1,0 +1,75 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T12:28:29.320Z",
+      "node": "controller-lock",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:08:08.329Z",
+      "node": "controller-lock",
+      "phase": "complete",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:08:09.160Z",
+      "node": "status-and-notify",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:15:11.018Z",
+      "node": "status-and-notify",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:15:11.043Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "continue-from-sealed-attempt",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "controller-lock",
+      "revisions": 0,
+      "status": "failed"
+    },
+    {
+      "attempt": 1,
+      "id": "status-and-notify",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [],
+  "usage": [
+    {
+      "cacheReadInputTokens": 121080062,
+      "costProvenance": "provider",
+      "costUsd": 28.2122974,
+      "inputTokens": 495756,
+      "outputTokens": 201103,
+      "runtimeId": "sonnet"
+    }
+  ]
+}

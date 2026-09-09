@@ -1,0 +1,70 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T09:14:22.986Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T09:20:11.142Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:00:04.312Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:00:04.350Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:01:34.636Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:01:35.963Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:16:15.707Z",
+      "node": "budget-removal-schema3",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 2,
+      "id": "budget-removal-schema3",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

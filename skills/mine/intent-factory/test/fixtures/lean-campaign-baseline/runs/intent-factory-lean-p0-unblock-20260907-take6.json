@@ -1,0 +1,76 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T05:43:58.394Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T06:47:40.241Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T07:15:37.647Z",
+      "node": "review-modes",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T07:37:23.460Z",
+      "node": "review-modes",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T07:37:23.482Z",
+      "node": "retry-in-place",
+      "phase": "budget",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T08:04:57.749Z",
+      "node": "review-modes",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T08:05:52.920Z",
+      "node": "review-modes",
+      "phase": "complete",
+      "runtime": "sol",
+      "to": "done",
+      "verdict": "pass"
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "retry-in-place",
+      "revisions": 0,
+      "status": "blocked"
+    },
+    {
+      "attempt": 3,
+      "id": "review-modes",
+      "revisions": 2,
+      "status": "done"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

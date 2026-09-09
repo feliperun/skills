@@ -1,0 +1,79 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T21:15:41.650Z",
+      "node": "phase-1-recovery",
+      "phase": "worker",
+      "runtime": "flash",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T21:16:46.834Z",
+      "node": "phase-1-recovery",
+      "phase": "canceled",
+      "runtime": "flash",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T21:17:23.883Z",
+      "node": "phase-1-recovery",
+      "phase": "worker",
+      "runtime": "flash",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T21:17:25.311Z",
+      "node": "phase-1-recovery",
+      "phase": "worker",
+      "runtime": "flash",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T21:17:25.655Z",
+      "node": "phase-1-recovery",
+      "phase": "worker",
+      "runtime": "flash",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T22:31:38.737Z",
+      "node": "phase-1-recovery",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T22:34:52.342Z",
+      "node": "phase-1-recovery",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T22:34:52.833Z",
+      "node": "phase-1-recovery",
+      "phase": "complete",
+      "runtime": "sol",
+      "to": "failed",
+      "verdict": "fail"
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 2,
+      "id": "phase-1-recovery",
+      "review": "advisory",
+      "revisions": 0,
+      "status": "failed"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

@@ -1,0 +1,61 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T14:46:55.055Z",
+      "node": "status-and-notify",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T16:11:07.102Z",
+      "node": "status-and-notify",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "blocked",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-08T16:11:08.176Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T16:19:35.232Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "continue-from-sealed-attempt",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "status-and-notify",
+      "revisions": 0,
+      "status": "blocked"
+    }
+  ],
+  "notify": [],
+  "usage": [
+    {
+      "cacheReadInputTokens": 148429967,
+      "costProvenance": "provider",
+      "costUsd": 34.69212640000001,
+      "inputTokens": 636293,
+      "outputTokens": 245819,
+      "runtimeId": "sonnet"
+    }
+  ]
+}

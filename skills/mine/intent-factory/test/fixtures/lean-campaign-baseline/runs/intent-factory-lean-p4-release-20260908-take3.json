@@ -1,0 +1,141 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T20:12:07.309Z",
+      "node": "runner-split",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T22:09:43.763Z",
+      "node": "runner-split",
+      "phase": "judge",
+      "runtime": "deepseek-pro",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T22:35:38.266Z",
+      "node": "runner-split",
+      "phase": "complete",
+      "runtime": "deepseek-pro",
+      "to": "done",
+      "verdict": "pass"
+    },
+    {
+      "at": "2026-09-08T22:35:39.413Z",
+      "node": "docs-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T22:35:40.169Z",
+      "node": "metrics-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T22:35:45.595Z",
+      "node": "docs-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T22:35:45.803Z",
+      "node": "metrics-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "docs-v03",
+      "revisions": 0,
+      "status": "failed"
+    },
+    {
+      "attempt": 1,
+      "id": "metrics-v03",
+      "revisions": 0,
+      "status": "failed"
+    },
+    {
+      "attempt": 1,
+      "id": "runner-split",
+      "review": "advisory",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [
+    {
+      "at": "2026-09-08T22:35:40.347Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p4-release-20260908-take3:runner-split:done:1:0",
+      "status": "delivered"
+    },
+    {
+      "at": "2026-09-08T22:35:45.961Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p4-release-20260908-take3:docs-v03:failed:1:0",
+      "status": "delivered"
+    },
+    {
+      "at": "2026-09-08T22:35:46.048Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p4-release-20260908-take3:metrics-v03:failed:1:0",
+      "status": "delivered"
+    },
+    {
+      "at": "2026-09-08T22:35:46.154Z",
+      "attempt": 1,
+      "dedupeKey": "run.terminal:intent-factory-lean-p4-release-20260908-take3:attention",
+      "status": "delivered"
+    }
+  ],
+  "usage": [
+    {
+      "cacheReadInputTokens": 43488553,
+      "costProvenance": "provider",
+      "costUsd": 11.752020600000007,
+      "inputTokens": 326322,
+      "outputTokens": 174674,
+      "runtimeId": "sonnet"
+    },
+    {
+      "cacheReadInputTokens": 2821888,
+      "costProvenance": "unknown",
+      "costUsd": null,
+      "inputTokens": 52102,
+      "outputTokens": 41856,
+      "runtimeId": "deepseek-pro"
+    },
+    {
+      "cacheReadInputTokens": 0,
+      "costProvenance": "unknown",
+      "costUsd": null,
+      "inputTokens": 0,
+      "outputTokens": null,
+      "runtimeId": "sonnet"
+    },
+    {
+      "cacheReadInputTokens": 0,
+      "costProvenance": "unknown",
+      "costUsd": null,
+      "inputTokens": 0,
+      "outputTokens": null,
+      "runtimeId": "sonnet"
+    }
+  ]
+}

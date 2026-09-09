@@ -1,0 +1,70 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T04:06:46.670Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T04:08:41.272Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T05:06:23.644Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T05:06:23.678Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T05:08:00.433Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T05:08:01.653Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T05:22:55.047Z",
+      "node": "suite-fix-phase1",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 2,
+      "id": "suite-fix-phase1",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

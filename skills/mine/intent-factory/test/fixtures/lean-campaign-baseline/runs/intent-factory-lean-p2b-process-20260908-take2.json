@@ -1,0 +1,44 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T14:45:49.486Z",
+      "node": "status-and-notify",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:46:15.045Z",
+      "node": "status-and-notify",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T14:46:15.068Z",
+      "node": "continue-from-sealed-attempt",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "continue-from-sealed-attempt",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "status-and-notify",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

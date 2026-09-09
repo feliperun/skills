@@ -1,0 +1,36 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T23:43:10.917Z",
+      "node": "docs-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T23:43:11.725Z",
+      "node": "metrics-v03",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "docs-v03",
+      "revisions": 0,
+      "status": "running"
+    },
+    {
+      "attempt": 1,
+      "id": "metrics-v03",
+      "revisions": 0,
+      "status": "running"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

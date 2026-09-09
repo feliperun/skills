@@ -1,0 +1,77 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T15:04:44.732Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T15:04:45.014Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T16:13:39.427Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T16:13:39.863Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T16:22:56.526Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T16:22:56.551Z",
+      "node": "parallel-and-fallback",
+      "phase": "budget",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T16:22:58.123Z",
+      "node": "attempt-worktrees",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "exhausted",
+      "verdict": "fail"
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 3,
+      "id": "attempt-worktrees",
+      "review": "blocking",
+      "revisions": 2,
+      "status": "exhausted"
+    },
+    {
+      "attempt": 0,
+      "id": "parallel-and-fallback",
+      "revisions": 0,
+      "status": "blocked"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

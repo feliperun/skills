@@ -1,0 +1,124 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T18:06:05.113Z",
+      "node": "dashboard-v2",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T18:06:05.897Z",
+      "node": "status-surfaces",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T18:32:06.543Z",
+      "node": "dashboard-v2",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-08T19:15:57.987Z",
+      "node": "status-surfaces",
+      "phase": "complete",
+      "runtime": "sonnet",
+      "to": "done",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "dashboard-v2",
+      "revisions": 0,
+      "status": "failed"
+    },
+    {
+      "attempt": 1,
+      "id": "status-surfaces",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [
+    {
+      "at": "2026-09-08T18:32:06.748Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:dashboard-v2:failed:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T18:32:11.852Z",
+      "attempt": 2,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:dashboard-v2:failed:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T18:32:42.020Z",
+      "attempt": 3,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:dashboard-v2:failed:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:15:58.358Z",
+      "attempt": 1,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:status-surfaces:done:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:15:58.462Z",
+      "attempt": 1,
+      "dedupeKey": "run.terminal:intent-factory-lean-p3-visibility-20260908:attention",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:16:03.630Z",
+      "attempt": 2,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:status-surfaces:done:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:16:03.717Z",
+      "attempt": 2,
+      "dedupeKey": "run.terminal:intent-factory-lean-p3-visibility-20260908:attention",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:16:33.817Z",
+      "attempt": 3,
+      "dedupeKey": "node.terminal:intent-factory-lean-p3-visibility-20260908:status-surfaces:done:1:0",
+      "status": "failed"
+    },
+    {
+      "at": "2026-09-08T19:16:33.909Z",
+      "attempt": 3,
+      "dedupeKey": "run.terminal:intent-factory-lean-p3-visibility-20260908:attention",
+      "status": "failed"
+    }
+  ],
+  "usage": [
+    {
+      "cacheReadInputTokens": 21647530,
+      "costProvenance": "provider",
+      "costUsd": 6.495231999999998,
+      "inputTokens": 280028,
+      "outputTokens": 104289,
+      "runtimeId": "sonnet"
+    },
+    {
+      "cacheReadInputTokens": 16653578,
+      "costProvenance": "provider",
+      "costUsd": 5.042247599999998,
+      "inputTokens": 200544,
+      "outputTokens": 90668,
+      "runtimeId": "sonnet"
+    }
+  ]
+}

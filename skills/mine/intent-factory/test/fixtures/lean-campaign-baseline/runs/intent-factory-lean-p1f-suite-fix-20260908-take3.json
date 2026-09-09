@@ -1,0 +1,38 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T06:35:45.174Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T06:36:54.903Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T07:55:55.413Z",
+      "node": "suite-fix-phase1",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "suite-fix-phase1",
+      "revisions": 0,
+      "status": "failed"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

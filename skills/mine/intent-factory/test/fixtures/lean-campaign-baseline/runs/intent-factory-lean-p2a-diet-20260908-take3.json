@@ -1,0 +1,38 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T10:30:37.122Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T10:41:12.638Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T12:10:30.941Z",
+      "node": "budget-removal-schema3",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": "fail"
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "budget-removal-schema3",
+      "revisions": 0,
+      "status": "failed"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

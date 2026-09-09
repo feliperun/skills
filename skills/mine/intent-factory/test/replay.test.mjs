@@ -935,8 +935,8 @@ test("D24: a three-node replayed contract without judgment items closes with zer
   assert.equal(readFileSync(`${replayed.workerRecording}.cursor`, "utf8"), "3\n", "one worker envelope per node");
   assert.equal(existsSync(`${replayed.judgeRecording}.cursor`), false, "the judge recording was never opened");
   assert.equal(existsSync(`${replayed.judgeRecording}.invocations.jsonl`), false, "no judge invocation was recorded");
-  const metrics = campaignMetrics(replayed.campaignPath, replayed.runsDir);
-  assert.deepEqual(metrics.judgeInvocationRate, { value: 0, direction: "down", count: 3 }, "three closed checkpoints, zero judge dispatches");
+  const events = readJsonlRecords(join(replayed.outcome.runDir, "events.jsonl"));
+  assert.deepEqual(events.filter((event) => event.phase === "judge"), [], "three closed checkpoints, zero judge dispatches");
 });
 
 test("D25: a gate rejection citing no Definition of Done item is invalid", async () => {
@@ -992,9 +992,9 @@ test("D27: a complete replayed campaign notifies once per terminal node plus onc
   assert.deepEqual(new Set(notifications.map((record) => record.type)), new Set(["node.terminal", "run.terminal"]), "a clean run never raises attention");
   const metrics = campaignMetrics(replayed.campaignPath, replayed.runsDir);
   assert.deepEqual(
-    metrics.sessionWakeCount,
-    { value: notifications.length, direction: "down", count: notifications.length },
-    "every notified event is a session wake now that progress is never notified",
+    metrics.notifyReceiptRate,
+    { value: 1, direction: "up", count: notifications.length },
+    "every notified event settled (delivered) on its first attempt",
   );
 });
 
@@ -1068,17 +1068,11 @@ test("preflight --json measures the worker preamble per runtime", async () => {
     assert.equal(typeof check.usage?.inputTokens, "number", `${check.id} reports a measured preamble`);
   }
   // The live probe never consumes the recording, so the measurement costs the
-  // eval set nothing and stays deterministic.
+  // eval set nothing and stays deterministic. `metrics` no longer reads
+  // `preflight.json` (TECH-SPEC lean section 6 sources are usage.jsonl, node
+  // state, notify.jsonl, events.jsonl and the journal), so this checks only
+  // the preflight command's own reporting.
   assert.equal(readFileSync(`${replayed.workerRecording}.cursor`, "utf8"), "1\n");
-
-  writeFileSync(join(replayed.outcome.runDir, "preflight.json"), `${JSON.stringify(payload)}\n`);
-  const sources = readMetricsSources(replayed.campaignPath, { runsDir: replayed.runsDir });
-  assert.equal(sources.preflight.length, 1, "the recorded preflight payload is a metrics source");
-  assert.deepEqual(
-    projectMetrics(sources).workerPreambleTokens,
-    { value: { "replay-worker": 0 }, direction: "down", count: 1 },
-    "the indicator is the per-runtime measurement preflight reported",
-  );
 });
 
 test("sealAttempt seals a worktree that holds the ignored .runs result sidecar", () => {

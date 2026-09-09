@@ -1,0 +1,65 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T19:39:15.548Z",
+      "node": "runner-split",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T19:39:54.005Z",
+      "node": "runner-split",
+      "phase": "canceled",
+      "runtime": "sonnet",
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T19:39:54.030Z",
+      "node": "docs-v03",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T19:39:54.043Z",
+      "node": "metrics-v03",
+      "phase": "canceled",
+      "runtime": null,
+      "to": "canceled",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 0,
+      "id": "docs-v03",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 0,
+      "id": "metrics-v03",
+      "revisions": 0,
+      "status": "canceled"
+    },
+    {
+      "attempt": 1,
+      "id": "runner-split",
+      "revisions": 0,
+      "status": "canceled"
+    }
+  ],
+  "notify": [
+    {
+      "at": "2026-09-08T19:39:54.238Z",
+      "attempt": 1,
+      "dedupeKey": "run.terminal:intent-factory-lean-p4-release-20260908:attention",
+      "status": "delivered"
+    }
+  ],
+  "usage": []
+}

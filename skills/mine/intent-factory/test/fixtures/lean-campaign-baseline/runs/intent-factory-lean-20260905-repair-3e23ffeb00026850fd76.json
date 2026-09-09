@@ -1,0 +1,38 @@
+{
+  "events": [
+    {
+      "at": "2026-09-08T02:59:08.047Z",
+      "node": "repair-3e23ffeb00026850",
+      "phase": "waiting",
+      "runtime": null,
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T02:59:09.666Z",
+      "node": "repair-3e23ffeb00026850",
+      "phase": "worker",
+      "runtime": "luna",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-08T03:08:01.874Z",
+      "node": "repair-3e23ffeb00026850",
+      "phase": "complete",
+      "runtime": "luna",
+      "to": "done",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 1,
+      "id": "repair-3e23ffeb00026850",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

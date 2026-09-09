@@ -1,0 +1,60 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T19:00:43.742Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T19:06:24.228Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T19:29:42.462Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T19:33:35.596Z",
+      "node": "parallel-and-fallback",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "failed",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T19:33:35.619Z",
+      "node": "runtime-discovery",
+      "phase": "dependency",
+      "runtime": null,
+      "to": "blocked",
+      "verdict": null
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 2,
+      "id": "parallel-and-fallback",
+      "revisions": 1,
+      "status": "failed"
+    },
+    {
+      "attempt": 0,
+      "id": "runtime-discovery",
+      "revisions": 0,
+      "status": "blocked"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}

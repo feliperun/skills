@@ -1,183 +1,117 @@
 /**
- * Metrics projector (TECH-SPEC section 8.4). One pure function over the
- * recorded sources of a campaign — the run `events.jsonl`, the per-run
- * `usage.jsonl` and `notify.jsonl`, and the campaign journal — returning
- * every release-1 indicator in one object, so effectiveness
- * (`firstPassGateRate`, `ambientCoverage`) and efficiency
- * (`takesPerClosedCheckpoint`) are always reported together and never one
- * without the other.
+ * Metrics projector (TECH-SPEC lean section 6). One pure function over a
+ * campaign's own recorded artefacts — every linked run's persisted node
+ * snapshots, `events.jsonl`, `usage.jsonl` and `notify.jsonl` — returning
+ * exactly the indicators section 6 measures at close. Nothing here estimates
+ * a token count or reads a heartbeat: every value comes from a record the
+ * platform already wrote for another reason (a node snapshot, a transition,
+ * a priced invocation, a delivery receipt).
  *
  * `projectMetrics` takes already-parsed records and never a filesystem path,
  * which keeps every indicator testable without fixtures on disk. Each
  * indicator carries its value, the direction that counts as better, and the
- * number of records the value was computed from. An indicator with no
- * supporting record is `null`, never `0`: a missing measurement and a measured
- * zero are different facts.
+ * number of records it was computed from. An indicator with no supporting
+ * record is `null`, never `0`: a missing measurement and a measured zero are
+ * different facts.
  *
- * A campaign is measured in two units and they are not interchangeable: a
- * *take* is one operator dispatch at a checkpoint, which is one linked run the
- * controller did not generate as a repair (`deriveTakeRuns`), while a *worker
- * dispatch* is one transition into `running` inside such a run. The report
- * prints the take and repair counts in its header and every indicator's own
- * record count beside its value, so the two are never read as one number.
+ * A *logical node* is a contract node id within one run (TECH-SPEC section
+ * 6): the same id in two different runs is two logical nodes, because a
+ * fresh run re-authors the work rather than resuming it. A *checkpoint* is
+ * coarser — the node id alone, deduplicated across every linked run — and is
+ * what `linkedRunsPerClosedCheckpoint` divides the run count by: normally the
+ * same node closes in the one run that carries it, and the ratio drifts above
+ * 1 only when a whole run had to be re-authored after a failure that
+ * `resume` could not repair.
  *
  * The second half of this module is the `runner.mjs metrics` command: reading
- * a campaign's artefacts and parsing the command's flags live here so the
- * router stays one line per subcommand, while `metrics-report.mjs` decides how
- * the projection is printed.
- *
- * The liveness subset (`silentStallRateOf`, in `metrics-evals.mjs`) is
- * measured from the campaign journal's legacy `liveness` entries only: the
- * heartbeat mechanism that used to write them is gone, so a new campaign
- * carries none and the indicator reports no record. The preamble, session
- * (now over `notify.jsonl`) and usage measurements come from
- * `metrics-evals.mjs` and the recorded usage records, which own what each of
- * those indicators is measured from.
+ * a campaign's linked runs and parsing the command's flags live here, while
+ * `metrics-report.mjs` decides how the projection is printed.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { campaignDir, readCampaign, readJournal } from "./campaign.mjs";
-import {
-  coverageOf,
-  countNonterminalFacts,
-  jsonObjectOf,
-  livenessFactsOf,
-  livenessGapsOf,
-  notifyUsageOf,
-  percentile95,
-  preambleTokensByRuntime,
-  PREFLIGHT_FILE,
-  round4,
-  silentStallRateOf,
-  timestampMs,
-} from "./metrics-evals.mjs";
+import { campaignDir, readCampaign } from "./campaign.mjs";
+import { jsonObjectOf, round4, timestampMs } from "./metrics-evals.mjs";
+import { MAX_ATTEMPTS as NOTIFY_MAX_ATTEMPTS } from "./notify/index.mjs";
 import { renderMetricsJson, renderMetricsReport } from "./metrics-report.mjs";
 
-/** Legacy per-campaign origin record of a run the old supervisor dispatched; read only for backward compatibility with a campaign that still has one. */
-const CAMPAIGN_STATE_FILE = "control-state.json";
-/** Governance staleness window (seconds), matching the removed heartbeat mechanism's default. */
-const GOVERNANCE_STALE_SEC = 2400;
-
-/** Heartbeat age, in seconds, below which a reader is considered covered (Addendum 01 section 8). */
-export const HEARTBEAT_FRESH_SEC = 60;
-/** Bytes-to-tokens estimate used when the caller supplies none. */
-export const DEFAULT_TOKENIZER_ESTIMATE = { bytes: 4, tokens: 1 };
-
-const CLOSED_STATUSES = new Set(["done", "no-op"]);
-const SETTLED_STATUSES = new Set(["done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled", "cancelled"]);
-const BLOCKED_CONTEXT_CODE = "context_missing";
-const UNKNOWN_LANE = "unknown";
+/** Node statuses that are not terminal: everything else settles a logical node. */
+const OPEN_STATUSES = new Set(["pending", "running"]);
+/** Terminal statuses that count as the node's work having landed. */
+const DONE_STATUSES = new Set(["done", "no-op"]);
+/** Gate review that blocks the node on a failing verdict (TECH-SPEC lean, rule 2). */
+const BLOCKING_REVIEW = "blocking";
+/** A receipt this settled: delivered, no transport bound, or the retry budget spent. */
+const SETTLED_NOTIFY_STATUSES = new Set(["delivered", "no_transport"]);
+/** Target latency for a terminal/attention event to carry a settled receipt (TECH-SPEC section 6). */
+const NOTIFY_TARGET_SEC = 60;
+const SECONDS_PER_HOUR = 3600;
+/** A usage record with no provider-reported cost is `unknown` provenance (`appendUsageRecord`). */
+const UNKNOWN_COST_PROVENANCE = "unknown";
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {"down"|"up"|"informative"} Direction */
 /** @typedef {{value: number|null, direction: Direction, count: number}} Indicator */
+/** @typedef {Indicator & {unknownCount: number}} CostIndicator */
 /** @typedef {{value: Record<string, number>|null, direction: Direction, count: number}} GroupedIndicator */
-/** @typedef {{atMs: number, index: number, event: JsonObject}} NodeEvent */
+/** @typedef {{atMs: number, index: number, event: JsonObject}} RunEvent */
+/** @typedef {{runId: string, id: string, status: string, attempt?: number|null, revisions?: number|null, review?: string|null}} RunNode */
 
 /**
  * @typedef {{
  *   events?: unknown[],
- *   takeRunIds?: string[]|null,
  *   usageRecords?: unknown[],
  *   notifications?: unknown[],
- *   journal?: unknown[],
- *   preflight?: unknown[],
+ *   nodes?: RunNode[],
  *   now?: number,
- *   staleSec?: number,
- *   freshSec?: number,
- *   tokenizerEstimate?: {bytes: number, tokens: number},
  * }} MetricsInput
  */
 
 /**
  * @typedef {{
- *   wallClockPerClosedCheckpoint: Indicator,
- *   takesPerClosedCheckpoint: Indicator,
- *   firstPassGateRate: GroupedIndicator,
- *   judgeInvocationRate: Indicator,
- *   blockedContextRate: Indicator,
- *   providerFailoverRate: Indicator,
- *   lostTakeRate: Indicator,
- *   sessionContextGrowth: Indicator,
- *   sessionWakeCount: Indicator,
- *   heartbeatStalenessP95: Indicator,
- *   ambientCoverage: Indicator,
- *   silentStallRate: Indicator,
- *   workerPreambleTokens: GroupedIndicator,
- *   notifyLatencyP95: Indicator,
+ *   nodesDoneRate: Indicator,
+ *   linkedRunsPerClosedCheckpoint: Indicator,
+ *   runsPerCampaign: Indicator,
+ *   wallClockSec: Indicator,
  *   usageTokensByKind: GroupedIndicator,
- *   usageCostUsd: Indicator,
+ *   usageTokensByKindByRuntime: GroupedIndicator,
+ *   usageCostUsd: CostIndicator,
+ *   blockingJudgeFirstPassRate: GroupedIndicator,
+ *   notifyReceiptRate: Indicator,
+ *   silentStallRate: Indicator,
  * }} CampaignMetrics
  */
 
 /**
- * Project every release-1 indicator from one campaign's recorded artefacts.
- * Pure and deterministic: identical records yield identical output, rates and
- * percentiles round to 4 decimals, and durations are seconds.
- *
- * Denominators are the campaign's own units. A *closed checkpoint* is a node
- * that reached `done` or `no-op`. A *take* is one operator dispatch at a
- * checkpoint — one linked campaign run that the controller did not generate as
- * a repair — so it is counted from `takeRunIds`, which `deriveTakeRuns` reads
- * off `campaign.json` and `control-state.json`. Transition events cannot yield
- * it: a run redispatches its worker after a rotation or a failure, so the
- * events hold the finer unit, the *worker dispatch* (a transition into
- * `running` whose phase is not the judge). Without `takeRunIds` the take count
- * is unmeasured and its indicator is null, never the dispatch count standing
- * in for it. `providerFailoverRate` and `lostTakeRate` stay per dispatch,
- * because a failover hop and a worker attempt that bought nothing both happen
- * inside a take; each reports its dispatch count as its record count.
+ * Project every section-6 indicator from one campaign's recorded artefacts.
+ * Pure and deterministic: identical records yield identical output, rates
+ * round to 4 decimals, and durations are seconds.
  *
  * @param {MetricsInput} [input]
  * @returns {CampaignMetrics}
  */
-export function projectMetrics({
-  events = [],
-  takeRunIds = null,
-  usageRecords = [],
-  notifications = [],
-  journal = [],
-  preflight = [],
-  now = Date.now(),
-  staleSec = GOVERNANCE_STALE_SEC,
-  freshSec = HEARTBEAT_FRESH_SEC,
-  tokenizerEstimate = DEFAULT_TOKENIZER_ESTIMATE,
-} = {}) {
+export function projectMetrics({ events = [], usageRecords = [], notifications = [], nodes = [], now = Date.now() } = {}) {
   void now;
-  const byNode = eventsByNode(events);
-  const lifecycle = lifecycleOf(byNode);
+  const eventList = events.map(jsonObjectOf).filter((event) => event !== null);
+  const nodesDone = nodesDoneRateOf(nodes);
+  const runs = runsPerCampaignOf(nodes, eventList);
+  const closedCheckpoints = closedCheckpointsOf(nodes);
+  const span = eventSpanOf(eventList);
   const usage = usageTotalsOf(usageRecords);
-  const span = eventSpanOf(events);
-  const gates = firstPassGateRateByLane(byNode);
-  const livenessFacts = livenessFactsOf(journal);
-  const gaps = livenessGapsOf(livenessFacts);
-  const session = notifyUsageOf(notifications, tokenizerEstimate);
-  const closed = lifecycle.closed;
-  const takes = Array.isArray(takeRunIds) ? takeRunIds.length : null;
-  const preamble = preambleTokensByRuntime(preflight);
+  const gates = blockingJudgeFirstPassRateOf(nodes, eventList);
+  const notify = notifyReceiptRateOf(notifications);
+  const stalls = silentStallRateOf(nodes, eventList);
   return {
-    wallClockPerClosedCheckpoint: measured("down", span.count, closed === 0 || span.seconds === null ? null : span.seconds / closed),
-    takesPerClosedCheckpoint: measured("down", takes ?? 0, takes === null || closed === 0 ? null : takes / closed),
-    firstPassGateRate: grouped("up", gates.count, gates.value),
-    judgeInvocationRate: measured("down", closed, closed === 0 ? null : lifecycle.judgeDispatches / closed),
-    blockedContextRate: measured("down", lifecycle.settled, lifecycle.settled === 0 ? null : lifecycle.blockedContext / lifecycle.settled),
-    providerFailoverRate: measured("informative", lifecycle.dispatches, lifecycle.dispatches === 0 ? null : lifecycle.failoverHops / lifecycle.dispatches),
-    lostTakeRate: measured("down", lifecycle.dispatches, lifecycle.dispatches === 0 ? null : lifecycle.lostDispatches / lifecycle.dispatches),
-    sessionContextGrowth: measured("down", session.count, session.tokens),
-    sessionWakeCount: measured("down", session.count, session.wakes),
-    heartbeatStalenessP95: measured("down", gaps.length, percentile95(gaps)),
-    ambientCoverage: measured("up", gaps.length, coverageOf(gaps, freshSec)),
-    // Hard target zero (Addendum 02): a measured zero means every liveness gap
-    // was covered, so it survives only while there are facts to measure. No
-    // liveness facts are recorded any more (the heartbeat mechanism that
-    // wrote them is gone), so this stays measured only against a legacy
-    // journal's old entries and drifts toward "no record" for every new run.
-    silentStallRate: measured("down", countNonterminalFacts(livenessFacts), silentStallRateOf(livenessFacts, staleSec)),
-    workerPreambleTokens: grouped("down", preamble.count, preamble.value),
-    notifyLatencyP95: measured("down", session.latencies.length, percentile95(session.latencies)),
+    nodesDoneRate: measured("up", nodesDone.terminal, nodesDone.terminal === 0 ? null : nodesDone.done / nodesDone.terminal),
+    linkedRunsPerClosedCheckpoint: measured("down", closedCheckpoints, closedCheckpoints === 0 ? null : runs / closedCheckpoints),
+    runsPerCampaign: measured("down", runs, runs === 0 ? null : runs),
+    wallClockSec: measured("down", span.count, span.seconds),
     usageTokensByKind: grouped("informative", usage.tokenCount, usage.tokensByKind),
-    usageCostUsd: measured("down", usage.costCount, usage.costCount === 0 ? null : usage.costUsd),
+    usageTokensByKindByRuntime: grouped("informative", usage.tokenCount, usage.tokensByKindByRuntime),
+    usageCostUsd: { ...measured("down", usage.costCount, usage.costCount === 0 ? null : usage.costUsd), unknownCount: usage.unknownCount },
+    blockingJudgeFirstPassRate: grouped("up", gates.count, gates.value),
+    notifyReceiptRate: measured("up", notify.count, notify.count === 0 ? null : notify.satisfied / notify.count),
+    silentStallRate: measured("down", stalls.activeIntervals, stalls.activeHours === 0 ? null : stalls.stalled / stalls.activeHours),
   };
 }
 
@@ -209,121 +143,61 @@ function grouped(direction, count, value) {
 }
 
 /**
- * Group the events that name a node, ordered by timestamp with the recorded
- * order breaking ties, so a take can be paired with the event that ends it.
+ * Logical nodes done at any attempt, over logical nodes that reached a
+ * terminal state. A node still `pending` or `running` at close is censored:
+ * it counts toward neither side (TECH-SPEC section 6 denominators).
  *
- * @param {unknown[]} events
- * @returns {Map<string, NodeEvent[]>}
+ * @param {RunNode[]} nodes
+ * @returns {{done: number, terminal: number}}
  */
-function eventsByNode(events) {
-  /** @type {Map<string, NodeEvent[]>} */
-  const byNode = new Map();
-  events.forEach((raw, index) => {
-    const event = jsonObjectOf(raw);
-    if (event === null || typeof event.node !== "string") return;
-    const list = byNode.get(event.node) ?? [];
-    list.push({ atMs: timestampMs(event.at), index, event });
-    byNode.set(event.node, list);
-  });
-  for (const list of byNode.values()) list.sort((left, right) => orderOf(left) - orderOf(right) || left.index - right.index);
-  return byNode;
-}
-
-/** @param {NodeEvent} entry @returns {number} */
-function orderOf(entry) {
-  return Number.isFinite(entry.atMs) ? entry.atMs : 0;
-}
-
-/**
- * Count the campaign's lifecycle units from the transition events: closed and
- * settled checkpoints, worker and judge takes, the takes that bought nothing
- * and the provider failover hops.
- *
- * A take is lost when the event that ends it carries an error code and did not
- * settle the node — the invocation was spent and produced no result. A take
- * still open at the end of the recording is unknown, never lost.
- *
- * @param {Map<string, NodeEvent[]>} byNode
- * @returns {{closed: number, settled: number, blockedContext: number, dispatches: number, judgeDispatches: number, lostDispatches: number, failoverHops: number}}
- */
-function lifecycleOf(byNode) {
-  /** @type {Set<string>} */
-  const closed = new Set();
-  /** @type {Set<string>} */
-  const settled = new Set();
-  /** @type {Set<string>} */
-  const blockedContext = new Set();
-  let dispatches = 0;
-  let judgeDispatches = 0;
-  let lostDispatches = 0;
-  let failoverHops = 0;
-  for (const [node, entries] of byNode) {
-    for (let index = 0; index < entries.length; index += 1) {
-      const event = entries[index].event;
-      if (event.to === "running") {
-        if (event.phase === "judge") judgeDispatches += 1;
-        else {
-          dispatches += 1;
-          if (isLostDispatch(entries[index + 1])) lostDispatches += 1;
-        }
-      }
-      if (isFailoverHop(event)) failoverHops += 1;
-      if (typeof event.to === "string" && CLOSED_STATUSES.has(event.to)) closed.add(node);
-      if (typeof event.to === "string" && SETTLED_STATUSES.has(event.to)) settled.add(node);
-      if (event.to === "blocked" && event.error === BLOCKED_CONTEXT_CODE) blockedContext.add(node);
-    }
+function nodesDoneRateOf(nodes) {
+  let done = 0;
+  let terminal = 0;
+  for (const node of nodes) {
+    if (OPEN_STATUSES.has(node.status)) continue;
+    terminal += 1;
+    if (DONE_STATUSES.has(node.status)) done += 1;
   }
-  return {
-    closed: closed.size,
-    settled: settled.size,
-    blockedContext: blockedContext.size,
-    dispatches,
-    judgeDispatches,
-    lostDispatches,
-    failoverHops,
-  };
+  return { done, terminal };
 }
 
 /**
- * @param {NodeEvent|undefined} next
- * @returns {boolean}
- */
-function isLostDispatch(next) {
-  if (next === undefined) return false;
-  const { event } = next;
-  if (typeof event.error !== "string" || event.error === "") return false;
-  return !(typeof event.to === "string" && CLOSED_STATUSES.has(event.to));
-}
-
-/**
- * A provider failover hop is a routed transition whose override sends the node
- * to a runtime other than the one it was on; a retry or backoff on the same
- * runtime is not a hop (ADR-0022).
+ * Distinct checkpoints (node ids, deduplicated across every linked run) that
+ * closed at least once.
  *
- * @param {JsonObject} event
- * @returns {boolean}
+ * @param {RunNode[]} nodes
+ * @returns {number}
  */
-function isFailoverHop(event) {
-  const override = jsonObjectOf(event.override);
-  if (override === null || typeof override.nextRuntime !== "string") return false;
-  const current = typeof event.currentRuntime === "string" ? event.currentRuntime : event.runtime;
-  return typeof current === "string" && override.nextRuntime !== current;
+function closedCheckpointsOf(nodes) {
+  const closed = new Set();
+  for (const node of nodes) if (DONE_STATUSES.has(node.status)) closed.add(node.id);
+  return closed.size;
+}
+
+/**
+ * @param {RunNode[]} nodes
+ * @param {JsonObject[]} events
+ * @returns {number}
+ */
+function runsPerCampaignOf(nodes, events) {
+  const runIds = new Set();
+  for (const node of nodes) runIds.add(node.runId);
+  for (const event of events) if (typeof event.runId === "string") runIds.add(event.runId);
+  return runIds.size;
 }
 
 /**
  * Wall-clock span of the recording, in seconds, with the number of timestamped
  * events it was measured from. A single event spans nothing measurable.
  *
- * @param {unknown[]} events
+ * @param {JsonObject[]} events
  * @returns {{seconds: number|null, count: number}}
  */
 function eventSpanOf(events) {
   let earliest = Number.POSITIVE_INFINITY;
   let latest = Number.NEGATIVE_INFINITY;
   let count = 0;
-  for (const raw of events) {
-    const event = jsonObjectOf(raw);
-    if (event === null) continue;
+  for (const event of events) {
     const atMs = timestampMs(event.at);
     if (!Number.isFinite(atMs)) continue;
     count += 1;
@@ -334,58 +208,73 @@ function eventSpanOf(events) {
 }
 
 /**
- * Tokens by kind and total cost across the run usage records. A record
- * contributes exactly what it recorded: uncached input, cache-read input and
- * output tokens are independent totals, and cost sums only records whose
- * provider reported a value. Usage is reporting only — no control path reads
- * these records to gate work.
+ * Tokens by kind and total cost across every linked run's usage records, both
+ * as a campaign total and broken out per runtime (TECH-SPEC section 6). A
+ * record contributes exactly what it recorded: uncached input, cache-read
+ * input and output tokens are independent totals. Cost sums only records
+ * whose provenance is not `unknown` (`appendUsageRecord` sets `unknown`
+ * exactly when the provider reported no cost); every other record's
+ * invocation is counted separately rather than folded into a measured zero.
  *
  * @param {unknown[]} usageRecords
- * @returns {{tokensByKind: Record<string, number>, tokenCount: number, costUsd: number|null, costCount: number}}
+ * @returns {{tokensByKind: Record<string, number>, tokensByKindByRuntime: Record<string, number>, tokenCount: number, costUsd: number|null, costCount: number, unknownCount: number}}
  */
 function usageTotalsOf(usageRecords) {
   const tokensByKind = { inputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0 };
+  /** @type {Record<string, number>} */
+  const tokensByKindByRuntime = {};
   let tokenCount = 0;
   let costUsd = 0;
   let costCount = 0;
+  let unknownCount = 0;
+  const kinds = /** @type {("inputTokens"|"cacheReadInputTokens"|"outputTokens")[]} */ (["inputTokens", "cacheReadInputTokens", "outputTokens"]);
   for (const raw of usageRecords) {
     const record = jsonObjectOf(raw);
     if (record === null) continue;
-    let measured = false;
-    for (const key of /** @type {("inputTokens"|"cacheReadInputTokens"|"outputTokens")[]} */ (["inputTokens", "cacheReadInputTokens", "outputTokens"])) {
-      const value = numberOf(record[key], 0);
-      if (typeof record[key] === "number" && Number.isFinite(record[key])) {
-        tokensByKind[key] += value;
-        measured = true;
-      }
+    let measuredAny = false;
+    const runtime = typeof record.runtimeId === "string" && record.runtimeId !== "" ? record.runtimeId : null;
+    for (const kind of kinds) {
+      if (typeof record[kind] !== "number" || !Number.isFinite(record[kind])) continue;
+      const value = /** @type {number} */ (record[kind]);
+      tokensByKind[kind] += value;
+      if (runtime !== null) tokensByKindByRuntime[`${runtime}.${kind}`] = (tokensByKindByRuntime[`${runtime}.${kind}`] ?? 0) + value;
+      measuredAny = true;
     }
-    if (measured) tokenCount += 1;
-    const cost = typeof record.costUsd === "number" && Number.isFinite(record.costUsd) ? record.costUsd : null;
-    if (cost !== null) {
-      costUsd += cost;
+    if (measuredAny) tokenCount += 1;
+    if (typeof record.costUsd === "number" && Number.isFinite(record.costUsd) && record.costProvenance !== UNKNOWN_COST_PROVENANCE) {
+      costUsd += record.costUsd;
       costCount += 1;
+    } else {
+      unknownCount += 1;
     }
   }
-  return { tokensByKind, tokenCount, costUsd: costCount === 0 ? null : costUsd, costCount };
+  return { tokensByKind, tokensByKindByRuntime, tokenCount, costUsd: costCount === 0 ? null : costUsd, costCount, unknownCount };
 }
 
 /**
- * Fraction of gated checkpoints whose first recorded verdict passed, per lane.
- * The lane is the node's per-runtime phase label, falling back to the runtime
- * that produced the verdict (TECH-SPEC section 10.1).
+ * Fraction of blocking-gated checkpoints whose first recorded verdict passed,
+ * per lane (the judge runtime that produced it). A node under `advisory` or
+ * `none` review never blocks the campaign on a fail, so it is not what this
+ * indicator measures (TECH-SPEC section 6, "Blocking judge first-pass rate").
  *
- * @param {Map<string, NodeEvent[]>} byNode
+ * @param {RunNode[]} nodes
+ * @param {JsonObject[]} events
  * @returns {{value: Record<string, number>, count: number}}
  */
-function firstPassGateRateByLane(byNode) {
+function blockingJudgeFirstPassRateOf(nodes, events) {
+  /** @type {Map<string, string|null>} */
+  const reviewByKey = new Map();
+  for (const node of nodes) reviewByKey.set(`${node.runId}:${node.id}`, node.review ?? null);
+  const byKey = groupEventsByRunNode(events);
   /** @type {Map<string, {gated: number, passed: number}>} */
   const lanes = new Map();
   let gated = 0;
-  for (const entries of byNode.values()) {
+  for (const [key, entries] of byKey) {
+    if (reviewByKey.get(key) !== BLOCKING_REVIEW) continue;
     const first = entries.find(({ event }) => typeof event.verdict === "string");
     if (first === undefined) continue;
     gated += 1;
-    const lane = laneOf(first.event);
+    const lane = typeof first.event.runtime === "string" && first.event.runtime !== "" ? first.event.runtime : "unknown";
     const tally = lanes.get(lane) ?? { gated: 0, passed: 0 };
     tally.gated += 1;
     if (first.event.verdict === "pass") tally.passed += 1;
@@ -400,20 +289,109 @@ function firstPassGateRateByLane(byNode) {
   return { value, count: gated };
 }
 
-/** @param {JsonObject} event @returns {string} */
-function laneOf(event) {
-  if (typeof event.planPhase === "string" && event.planPhase !== "") return event.planPhase;
-  if (typeof event.runtime === "string" && event.runtime !== "") return event.runtime;
-  return UNKNOWN_LANE;
+/**
+ * Fraction of notified events (grouped by `dedupeKey`, one per logical
+ * terminal/attention transition) that reached a settled receipt — delivered,
+ * no transport bound, or failed after the bounded retry budget — within
+ * `NOTIFY_TARGET_SEC` of the first attempt (TECH-SPEC section 6).
+ *
+ * @param {unknown[]} notifications
+ * @returns {{satisfied: number, count: number}}
+ */
+function notifyReceiptRateOf(notifications) {
+  /** @type {Map<string, JsonObject[]>} */
+  const byKey = new Map();
+  for (const raw of notifications) {
+    const record = jsonObjectOf(raw);
+    if (record === null || typeof record.dedupeKey !== "string" || record.dedupeKey === "") continue;
+    const list = byKey.get(record.dedupeKey) ?? [];
+    list.push(record);
+    byKey.set(record.dedupeKey, list);
+  }
+  let satisfied = 0;
+  let count = 0;
+  for (const receipts of byKey.values()) {
+    const first = receipts.find((receipt) => receipt.attempt === 1);
+    if (first === undefined) continue;
+    count += 1;
+    const firstAtMs = timestampMs(first.at);
+    const settled = receipts.find((receipt) => isSettledReceipt(receipt));
+    if (settled === undefined) continue;
+    const settledAtMs = timestampMs(settled.at);
+    if (!Number.isFinite(firstAtMs) || !Number.isFinite(settledAtMs)) continue;
+    const deltaSec = (settledAtMs - firstAtMs) / 1000;
+    if (deltaSec >= 0 && deltaSec <= NOTIFY_TARGET_SEC) satisfied += 1;
+  }
+  return { satisfied, count };
 }
 
 /**
- * @param {unknown} value
- * @param {number} fallback
- * @returns {number}
+ * @param {JsonObject} receipt
+ * @returns {boolean}
  */
-function numberOf(value, fallback) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+function isSettledReceipt(receipt) {
+  if (typeof receipt.status !== "string") return false;
+  if (SETTLED_NOTIFY_STATUSES.has(receipt.status)) return true;
+  return receipt.status === "failed" && receipt.attempt === NOTIFY_MAX_ATTEMPTS;
+}
+
+/**
+ * Silent stalls (logical nodes the controller killed for provider silence)
+ * per active run-hour. Active time is the sum of every closed `running`
+ * interval recorded in `events.jsonl`; a `stalled` status is the controller's
+ * own record that a running interval went silent past its timeout, so this
+ * needs no heartbeat of its own (TECH-SPEC section 6, hard target zero).
+ *
+ * @param {RunNode[]} nodes
+ * @param {JsonObject[]} events
+ * @returns {{stalled: number, activeHours: number, activeIntervals: number}}
+ */
+function silentStallRateOf(nodes, events) {
+  const stalled = nodes.filter((node) => node.status === "stalled").length;
+  const byKey = groupEventsByRunNode(events);
+  let activeSeconds = 0;
+  let activeIntervals = 0;
+  for (const entries of byKey.values()) {
+    for (let index = 0; index < entries.length; index += 1) {
+      const event = entries[index].event;
+      if (event.to !== "running") continue;
+      const next = entries[index + 1];
+      if (next === undefined) continue;
+      const startMs = entries[index].atMs;
+      const endMs = next.atMs;
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) continue;
+      activeSeconds += (endMs - startMs) / 1000;
+      activeIntervals += 1;
+    }
+  }
+  return { stalled, activeHours: activeSeconds / SECONDS_PER_HOUR, activeIntervals };
+}
+
+/**
+ * Group transition events by run and node, ordered by timestamp with the
+ * recorded order breaking ties, so a running interval can be paired with the
+ * event that ends it.
+ *
+ * @param {JsonObject[]} events
+ * @returns {Map<string, RunEvent[]>}
+ */
+function groupEventsByRunNode(events) {
+  /** @type {Map<string, RunEvent[]>} */
+  const byKey = new Map();
+  events.forEach((event, index) => {
+    if (typeof event.node !== "string") return;
+    const key = `${typeof event.runId === "string" ? event.runId : ""}:${event.node}`;
+    const list = byKey.get(key) ?? [];
+    list.push({ atMs: timestampMs(event.at), index, event });
+    byKey.set(key, list);
+  });
+  for (const list of byKey.values()) list.sort((left, right) => orderOf(left) - orderOf(right) || left.index - right.index);
+  return byKey;
+}
+
+/** @param {RunEvent} entry @returns {number} */
+function orderOf(entry) {
+  return Number.isFinite(entry.atMs) ? entry.atMs : 0;
 }
 
 /** Flags of `runner.mjs metrics`, declared here so the router only names them. */
@@ -424,62 +402,25 @@ const RUNS_DIR_NAME = ".runs";
 const RUN_EVENTS_FILE = "events.jsonl";
 const USAGE_LOG_FILE = "usage.jsonl";
 const NOTIFY_LOG_FILE = "notify.jsonl";
-/** Recorded origin of a run the controller generated to recover a partial effect. */
-const REPAIR_KIND = "repair";
+const NODES_DIR_NAME = "nodes";
 
 /**
  * @typedef {{
  *   campaignId: string,
  *   runIds: string[],
- *   takeRunIds: string[],
- *   repairRunIds: string[],
  *   events: unknown[],
  *   usageRecords: unknown[],
  *   notifications: unknown[],
- *   journal: unknown[],
- *   preflight: unknown[],
+ *   nodes: RunNode[],
  * }} MetricsSources
  */
 
 /**
- * Split a campaign's linked runs into takes and repairs. A take is an operator
- * dispatch at a checkpoint; a repair is controller-generated recovery of a
- * partial effect, so it is not one. The rule is mechanical and reads only
- * recorded facts: `control-state.json` records the origin of every run the
- * supervisor itself dispatched, a linked run whose recorded kind is `repair`
- * is a repair, and a linked run the supervisor never recorded was launched by
- * the operator and counts. Repairs are reported alongside takes, never folded
- * into them: the two are different facts about the same campaign.
- *
- * @param {string[]} linkedRunIds
- * @param {unknown} controlState `control-state.json`, or null when unrecorded.
- * @returns {{takeRunIds: string[], repairRunIds: string[]}}
- */
-export function deriveTakeRuns(linkedRunIds, controlState) {
-  const recorded = jsonObjectOf(controlState)?.runs;
-  const runs = Array.isArray(recorded) ? recorded : [];
-  /** @type {Set<string>} */
-  const repairs = new Set();
-  for (const run of runs) {
-    const entry = jsonObjectOf(run);
-    if (entry?.kind === REPAIR_KIND && typeof entry.id === "string") repairs.add(entry.id);
-  }
-  return {
-    takeRunIds: linkedRunIds.filter((runId) => !repairs.has(runId)),
-    repairRunIds: linkedRunIds.filter((runId) => repairs.has(runId)),
-  };
-}
-
-/**
- * Read the recorded sources of one campaign: the transition events and
- * recorded `preflight --json` payload of every linked run, plus the per-run
- * `usage.jsonl` and `notify.jsonl` records and the journal. A missing
+ * Read the recorded sources of one campaign: every linked run's persisted
+ * node snapshots, transition events (tagged with the run id, since a node id
+ * is only unique within one run), `usage.jsonl` and `notify.jsonl`. A missing
  * artefact reads as empty, which the projector reports as a missing
- * measurement and never as a measured zero — a run whose phase start
- * recorded no `preflight.json` leaves the preamble to whatever its dispatches
- * recorded. `control-state.json` no longer exists for a new campaign (the
- * supervisor that wrote it is gone); it is read only for backward
- * compatibility with a campaign still carrying one from before.
+ * measurement and never as a measured zero.
  *
  * @param {string} campaignPath
  * @param {{runsDir?: string}} [options]
@@ -493,25 +434,48 @@ export function readMetricsSources(campaignPath, { runsDir = join(campaignPath, 
   const usageRecords = [];
   /** @type {unknown[]} */
   const notifications = [];
-  /** @type {unknown[]} */
-  const preflight = [];
+  /** @type {RunNode[]} */
+  const nodes = [];
   for (const runId of campaign.linkedRunIds) {
-    for (const record of readJsonlRecords(join(runsDir, runId, RUN_EVENTS_FILE))) events.push(record);
+    for (const record of readJsonlRecords(join(runsDir, runId, RUN_EVENTS_FILE))) events.push({ ...jsonObjectOf(record), runId });
     for (const record of readJsonlRecords(join(runsDir, runId, USAGE_LOG_FILE))) usageRecords.push(record);
     for (const record of readJsonlRecords(join(runsDir, runId, NOTIFY_LOG_FILE))) notifications.push(record);
-    const payload = readJsonFile(join(runsDir, runId, PREFLIGHT_FILE));
-    if (payload !== null) preflight.push(payload);
+    for (const node of readRunNodes(join(runsDir, runId, NODES_DIR_NAME))) nodes.push({ ...node, runId });
   }
-  return {
-    campaignId: campaign.id,
-    runIds: [...campaign.linkedRunIds],
-    ...deriveTakeRuns([...campaign.linkedRunIds], readJsonFile(join(campaignPath, CAMPAIGN_STATE_FILE))),
-    events,
-    usageRecords,
-    notifications,
-    journal: readJournal(campaignPath),
-    preflight,
-  };
+  return { campaignId: campaign.id, runIds: [...campaign.linkedRunIds], events, usageRecords, notifications, nodes };
+}
+
+/**
+ * Persisted node snapshots of one run, reduced to the fields metrics reads.
+ * Reading is tolerant of a run directory with no `nodes/` yet (freshly
+ * dispatched) and of a snapshot that fails to parse (never blocks a report on
+ * a torn write).
+ *
+ * @param {string} nodesDir
+ * @returns {Omit<RunNode, "runId">[]}
+ */
+function readRunNodes(nodesDir) {
+  if (!existsSync(nodesDir)) return [];
+  /** @type {Omit<RunNode, "runId">[]} */
+  const nodes = [];
+  for (const name of readdirSync(nodesDir)) {
+    if (!name.endsWith(".json")) continue;
+    let record;
+    try {
+      record = jsonObjectOf(JSON.parse(readFileSync(join(nodesDir, name), "utf8")));
+    } catch {
+      continue;
+    }
+    if (record === null || typeof record.id !== "string" || typeof record.status !== "string") continue;
+    nodes.push({
+      id: record.id,
+      status: record.status,
+      attempt: typeof record.attempt === "number" ? record.attempt : null,
+      revisions: typeof record.revisions === "number" ? record.revisions : null,
+      review: typeof record.review === "string" ? record.review : null,
+    });
+  }
+  return nodes;
 }
 
 /**
@@ -550,9 +514,4 @@ function readJsonlRecords(path) {
     records.push(JSON.parse(lines[index]));
   }
   return records;
-}
-
-/** @param {string} path @returns {unknown} */
-function readJsonFile(path) {
-  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
 }

@@ -1,0 +1,116 @@
+{
+  "events": [
+    {
+      "at": "2026-09-07T08:34:53.542Z",
+      "node": "phase0-suite-fix",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T09:02:32.596Z",
+      "node": "phase0-suite-fix",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T09:24:59.476Z",
+      "node": "phase0-suite-fix",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T10:45:19.300Z",
+      "node": "phase0-suite-fix",
+      "phase": "judge",
+      "runtime": "sol",
+      "to": "running",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T11:23:22.821Z",
+      "node": "phase0-suite-fix",
+      "phase": "complete",
+      "runtime": "sol",
+      "to": "done",
+      "verdict": "fail"
+    },
+    {
+      "at": "2026-09-07T11:23:23.957Z",
+      "node": "retry-in-place",
+      "phase": "worker",
+      "runtime": "glm",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T12:55:50.681Z",
+      "node": "retry-in-place",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T12:55:50.681Z",
+      "node": "retry-in-place",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "pending",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T12:55:50.988Z",
+      "node": "retry-in-place",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T13:02:14.947Z",
+      "node": "retry-in-place",
+      "phase": "worker",
+      "runtime": "sonnet",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T13:48:27.529Z",
+      "node": "retry-in-place",
+      "phase": "judge",
+      "runtime": "opus",
+      "to": "running",
+      "verdict": null
+    },
+    {
+      "at": "2026-09-07T13:53:49.231Z",
+      "node": "retry-in-place",
+      "phase": "complete",
+      "runtime": "opus",
+      "to": "done",
+      "verdict": "fail"
+    }
+  ],
+  "nodes": [
+    {
+      "attempt": 2,
+      "id": "phase0-suite-fix",
+      "revisions": 1,
+      "status": "done"
+    },
+    {
+      "attempt": 2,
+      "id": "retry-in-place",
+      "revisions": 0,
+      "status": "done"
+    }
+  ],
+  "notify": [],
+  "usage": []
+}
