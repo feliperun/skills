@@ -35,16 +35,18 @@ import {
   writeJsonAtomic,
   writeTextAtomic,
 } from "./store.mjs";
-import { acquire as acquireLock, processStartToken, readLock } from "./lock.mjs";
+import {
+  acquire as acquireLock,
+  bootstrapFailureMatchesChild,
+  bootstrapMatchesChild,
+  processStartToken,
+  readLock,
+  sameProcessStartToken,
+  validBootstrapNonce,
+} from "./lock.mjs";
 import { renderRunHandoff } from "./campaign.mjs";
 import { campaignCli } from "./campaign-cli.mjs";
 import { contractCli, validateContractFile } from "./contract-cli.mjs";
-import {
-  bootstrapFailureMatchesChild,
-  bootstrapMatchesChild,
-  sameProcessStartToken,
-  validBootstrapNonce,
-} from "./lease-liveness.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./metrics.mjs";
 import { cancelRun, readRunNodes, resumeRun, runContract } from "./scheduler.mjs";
 import {
