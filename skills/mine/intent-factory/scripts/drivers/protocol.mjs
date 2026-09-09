@@ -56,17 +56,37 @@ export function toml(value) {
   return JSON.stringify(value);
 }
 
+
+/**
+ * A stream that ended without its completion event says nothing about why.
+ * When the process also wrote to stderr — a config parse error, a missing
+ * binary, an auth refusal — that text is the whole diagnosis, and dropping it
+ * turns a contract bug into what looks like a provider outage: a codex custom
+ * provider declared without `name` dies at config load, and reporting only
+ * "Codex emitted no turn.completed event" cost two preflight rounds before
+ * anyone read git-less stderr by hand.
+ *
+ * @param {string} message
+ * @param {import("./index.mjs").NormalizeOptions} [options]
+ * @returns {string}
+ */
+function withStartupReason(message, options = {}) {
+  const reason = typeof options.stderr === "string" ? options.stderr.trim() : "";
+  return reason ? `${message}: ${boundedMessage(reason, 512)}` : message;
+}
+
 /**
  * @param {string} stdout
  * @param {number|null} exitCode
  * @param {string|null} signal
+ * @param {import("./index.mjs").NormalizeOptions} [options]
  * @returns {import("./index.mjs").ProviderEnvelope}
  */
-export function normalizeClaudeResult(stdout, exitCode, signal) {
+export function normalizeClaudeResult(stdout, exitCode, signal, options = {}) {
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
   const events = parseJsonLines(stdout, "claude");
   const resultEvent = events.findLast((event) => event.type === "result");
-  if (!resultEvent) return failed("incomplete_stream", "Claude emitted no result event");
+  if (!resultEvent) return failed("incomplete_stream", withStartupReason("Claude emitted no result event", options));
   const result = typeof resultEvent.result === "string" ? resultEvent.result : null;
   // A provider-reported quota stop is exhaustion: the declared failover edge
   // must fire instead of settling the node as an ordinary provider failure.
@@ -105,7 +125,7 @@ export function normalizeAgyResult(stdout, exitCode, signal, options = {}) {
   const events = parseJsonLines(stdout, "agy");
   const resultEvent = events.findLast((event) => event.event === "result")?.result;
   if (!resultEvent || typeof resultEvent !== "object" || Array.isArray(resultEvent)) {
-    return failed("incomplete_stream", "agy emitted no result event");
+    return failed("incomplete_stream", withStartupReason("agy emitted no result event", options));
   }
   const record = /** @type {Record<string, unknown>} */ (resultEvent);
   const response = typeof record.response === "string" ? record.response : null;
@@ -260,7 +280,7 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
       usage,
     );
   }
-  if (!completed) return failed("incomplete_stream", "Codex emitted no turn.completed event", undefined, continuationId);
+  if (!completed) return failed("incomplete_stream", withStartupReason("Codex emitted no turn.completed event", options), undefined, continuationId);
   const text = eventItem(message)?.text;
   const textResult = typeof text === "string" ? text : null;
   // A finished turn with a final message is accepted work regardless of the

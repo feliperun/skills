@@ -2631,7 +2631,10 @@ export function recordInvocationUsage(job, options = {}) {
   try {
     boundedStdout = readBoundedTail(job.paths.stdout);
     const boundedStderr = readBoundedTail(job.paths.stderr, 512 * 1024);
-    envelope = normalizeProviderResult(job.runtime, boundedStdout, job.exitCode, job.signal, { preferStructured: job.phase === "judge" });
+    envelope = normalizeProviderResult(job.runtime, boundedStdout, job.exitCode, job.signal, {
+      preferStructured: job.phase === "judge",
+      stderr: boundedStderr,
+    });
   } catch (error) {
     envelope = {
       status: "failed",

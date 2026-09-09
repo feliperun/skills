@@ -66,7 +66,7 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, toolPolicy?: ToolPolicy}} CommandOptions */
 
-/** @typedef {{preferStructured?: boolean, exitCode?: number|null, signal?: string|null}} NormalizeOptions */
+/** @typedef {{preferStructured?: boolean, exitCode?: number|null, signal?: string|null, stderr?: string}} NormalizeOptions */
 
 /**
  * One provider adapter: capabilities plus executable, version, command, and

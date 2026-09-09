@@ -21,7 +21,7 @@ import {
   normalizeExecJsonlResult,
   truncateToolOutput,
 } from "../scripts/drivers/exec-jsonl.mjs";
-import { parseVersion } from "../scripts/drivers/protocol.mjs";
+import { normalizeCodexResult, parseVersion } from "../scripts/drivers/protocol.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
 import { DEFAULT_CLAUDE_TOOLS } from "../scripts/drivers/claude.mjs";
 import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/drivers/codex.mjs";
@@ -1094,4 +1094,21 @@ test("the repository hook behind the providerCommand settings mechanically rejec
     null,
     "a result within the bound is emitted unchanged",
   );
+});
+
+test("a stream with no completion event reports the process's own startup error", () => {
+  // Exactly the shape a codex custom provider takes when its config is
+  // rejected: it dies before emitting any event and explains itself on stderr.
+  const configError = 'Error loading config.toml: model_providers.deepseek: provider name must not be empty';
+  const withStderr = normalizeCodexResult("", 1, null, { stderr: `${configError}\n` });
+  assert.equal(withStderr.status, "failed");
+  assert.equal(withStderr.error?.code, "incomplete_stream");
+  assert.match(
+    withStderr.error?.message ?? "",
+    /provider name must not be empty/u,
+    "the diagnosis travels instead of only 'no turn.completed event'",
+  );
+
+  const withoutStderr = normalizeCodexResult("", 1, null, {});
+  assert.equal(withoutStderr.error?.message, "Codex emitted no turn.completed event");
 });
