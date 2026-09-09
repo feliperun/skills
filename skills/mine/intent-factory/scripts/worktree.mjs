@@ -81,21 +81,27 @@ export function createAttemptWorktree({ repo, runDir, runId, nodeId, attempt, ba
   } else {
     execFileSync("git", ["-C", repo, "worktree", "add", path, "-b", branch, base ?? runRefName(runId)], { stdio: "ignore" });
   }
-  linkNodeModules(repo, path);
+  prepareWorktreeEnvironment(repo, path);
   return { status: "ready", path, branch, commit: gitHead(path), baseSha: base ?? runRefSha };
 }
 
 /**
- * Link the repository's installed `node_modules` into a fresh attempt
- * worktree as a symlink — never copied — so repository-level tooling that
- * needs installed binaries (commitlint through the commit-msg hook,
- * `npm run typecheck`) works inside the attempt without an install. A no-op
- * when the repository has nothing installed, or the worktree already has an
- * entry at that path.
+ * Give a fresh worktree the environment repository tooling needs: the
+ * installed `node_modules`, linked as a symlink and never copied, so
+ * commitlint through the commit-msg hook and `npm run typecheck` work without
+ * an install. A no-op when the repository has nothing installed, or the
+ * worktree already has an entry at that path.
+ *
+ * Every worktree a run creates goes through here — attempts and the
+ * integration candidate alike. That is the point of the single function: the
+ * candidate re-runs the verification the attempt just passed, so any
+ * environment the attempt had and the candidate lacked turns a correct node
+ * into a failed one, and the failure names the node rather than the missing
+ * install.
  *
  * @param {string} repo @param {string} path @returns {void}
  */
-function linkNodeModules(repo, path) {
+function prepareWorktreeEnvironment(repo, path) {
   const source = join(repo, "node_modules");
   if (!existsSync(source)) return;
   const target = join(path, "node_modules");
@@ -123,11 +129,13 @@ export function sealAttempt({ repo, path, baseSha, runId, nodeId, attempt }) {
   // ignores `.runs/` (every real worker writes it), so stage everything and
   // unstage the sidecar afterwards; that also covers a repository that does
   // not ignore it.
-  // The probe must exclude exactly what the staging step below unstages.
-  // `node_modules/` in .gitignore does not match the symlink of the same name,
-  // so a re-sealed attempt whose only entry is that link would look dirty here,
-  // stage it, unstage it, and then commit an empty change set — which exits 1
-  // and turns every retry of an already-sealed attempt into a hard failure.
+  //
+  // The probe below must therefore exclude exactly what the staging step
+  // unstages, `node_modules` included: `node_modules/` in .gitignore does not
+  // match the symlink of the same name, so a re-sealed attempt whose only
+  // entry is that link would look dirty, stage it, unstage it, and commit an
+  // empty change set — which exits 1 and turns every retry of an
+  // already-sealed attempt into a hard failure.
   const dirty = git(path, ["status", "--porcelain=v1", "--", ".", ":(exclude).runs", ":(exclude)node_modules"]);
   if (dirty) {
     execFileSync("git", ["-C", path, "add", "-A", "--", "."], { stdio: "ignore" });
@@ -180,11 +188,7 @@ export function createCandidateWorktree({ repo, runDir, runId, ref = candidateRe
   const path = candidateWorktreePath(runDir, runId);
   mkdirSync(dirname(path), { recursive: true });
   execFileSync("git", ["-C", repo, "worktree", "add", "--detach", path, ref], { stdio: "ignore" });
-  // The candidate runs the same node verification the attempt just passed, so
-  // it needs the same installed binaries. Without this link a suite that shells
-  // out to a devDependency passes in the attempt and fails at integration, and
-  // the failure reads as the node's own defect rather than a missing install.
-  linkNodeModules(repo, path);
+  prepareWorktreeEnvironment(repo, path);
   return path;
 }
 

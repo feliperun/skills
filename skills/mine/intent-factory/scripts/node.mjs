@@ -25,6 +25,7 @@ import {
 } from "./lib.mjs";
 import {
   deterministicGate,
+  candidateOnlyFailures,
   judgeReaskOutstanding,
   judgeReaskReason,
   judgeRequired,
@@ -2726,9 +2727,12 @@ export async function settleDone(contract, node, state, runDir, lock, states, ca
     onVerificationFailure: async (transaction) => {
       const verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope);
       verdict.summary = "integrated candidate verification failed";
+      const divergent = candidateOnlyFailures(state.verification, transaction.candidateEvidence);
       verdict.findings = [...(verdict.findings ?? []), {
         severity: "critical",
-        description: "the sealed candidate did not pass the node verification in its integration worktree",
+        description: divergent.length
+          ? `the integration worktree failed a verification the attempt passed (${boundedUtf8(divergent.join("; "), 512)}): the two worktrees disagree about the environment, not about the work`
+          : "the sealed candidate did not pass the node verification in its integration worktree",
         evidence: boundedUtf8(JSON.stringify(transaction.candidateEvidence ?? {}), 4 * 1024),
       }];
       applyRejection(contract, node, state, runDir, null, lock, states, campaignPath, verdict, {

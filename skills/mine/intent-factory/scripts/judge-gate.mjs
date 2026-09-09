@@ -253,6 +253,35 @@ export function verificationFailureVerdict(state) {
 }
 
 /**
+ * The commands the integration candidate failed that the attempt had passed.
+ *
+ * A non-empty list means the two worktrees disagree about the environment
+ * rather than about the work: the same commit ran the same command twice with
+ * different outcomes. Without naming that, the failure reads as a defect in
+ * the node's own changes — which is how a missing `node_modules` link in the
+ * candidate once cost a campaign four attempts on already-correct work.
+ * Commands are matched by position, never by comparing joined argv, since a
+ * joined argv loses argument boundaries.
+ *
+ * @param {unknown} attempt the attempt's recorded verification
+ * @param {unknown} candidate the candidate's recorded verification
+ * @returns {string[]}
+ */
+export function candidateOnlyFailures(attempt, candidate) {
+  const attemptCommands = verificationCommands(attempt);
+  return verificationCommands(candidate)
+    .map((command, index) => ({ command, counterpart: attemptCommands[index] }))
+    .filter((pair) => pair.command.passed === false && pair.counterpart?.passed === true)
+    .map((pair) => (pair.command.argv ?? []).join(" "));
+}
+
+/** @param {unknown} evidence @returns {Array<{argv?: string[], passed?: boolean}>} */
+function verificationCommands(evidence) {
+  const commands = /** @type {{commands?: unknown}} */ (evidence ?? {}).commands;
+  return Array.isArray(commands) ? commands : [];
+}
+
+/**
  * A gate-failing judge verdict on a node with judgment items is a protocol
  * failure when none of its findings cites any judgment item id.
  *
