@@ -795,7 +795,7 @@ function usage() {
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract validate <contract.json> | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
-    "campaign <init|attach|note|resolve|close|show|list> ...\n",
+    "campaign <init|watch|attach|note|resolve|close|show|list|sync|ack> ...\n",
   );
   process.exitCode = 2;
 }
