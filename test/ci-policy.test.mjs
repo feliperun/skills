@@ -75,7 +75,17 @@ test("ci.yml runs the required matrix on push to main and pull_request", () => {
   assert.match(ci, /pull_request:/);
   assert.deepEqual(matrixList(ci, "os"), ["ubuntu-latest", "macos-latest"]);
   assert.deepEqual(matrixList(ci, "node"), ["22", "24"]);
-  assert.deepEqual(runSteps(ci), ["npm ci", "npm run check", "npm run typecheck", "npm test"]);
+  // The deterministic eval class and its discriminator check are part of the
+  // required matrix: a suite that only proves the cases pass, without proving
+  // they can fail, is half a proof (TECH-SPEC-2026-09-09 C1.1, c1.7).
+  assert.deepEqual(runSteps(ci), [
+    "npm ci",
+    "npm run check",
+    "npm run typecheck",
+    "npm test",
+    "node evals/run.mjs --class deterministic --assert-no-model",
+    "node evals/run.mjs --verify-discriminating",
+  ]);
 });
 
 test("pr-policy.yml is scoped to main pull requests and merge groups", () => {
