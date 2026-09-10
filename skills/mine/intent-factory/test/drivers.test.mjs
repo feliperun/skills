@@ -35,8 +35,8 @@ test("all provider adapters report explicit capabilities and transport", () => {
     { driver: "claude", model: "m" },
     { driver: "agy", model: "m" },
     { driver: "glm", model: "m" },
-    { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
     { driver: "zcode", model: "m" },
+    { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ];
   const expected = [
@@ -1160,7 +1160,7 @@ test("a stream with no completion event reports the process's own startup error"
   );
 
   const withoutStderr = normalizeCodexResult("", 1, null, {});
-  assert.equal(withoutStderr.error.message, "Codex emitted no turn.completed event");
+  assert.equal(withoutStderr.error?.message, "Codex emitted no turn.completed event");
 });
 
 test("builds zcode commands pinned to the Z.ai endpoint", () => {
@@ -1241,9 +1241,10 @@ test("zcode tool policy is refused honestly and the judge schema travels in the 
   const bare = providerCommand({ driver: "zcode", model: "glm-5.3" }, "work");
   assert.equal(bare.args.at(-2), "--prompt");
   assert.equal(bare.args.at(-1), "work", "no offered schema leaves the prompt untouched");
-  assert.deepEqual(command.args.slice(-2), ["--prompt", command.args.at(-1)]);
-  assert.match(command.args.at(-1), /^work/u, "the prompt stays the prefix");
-  assert.ok(command.args.at(-1).includes(JSON.stringify(JUDGE_SCHEMA)), "the schema text rides inside the prompt");
+  const prompt = command.args.at(-1) ?? "";
+  assert.deepEqual(command.args.slice(-2), ["--prompt", prompt]);
+  assert.match(prompt, /^work/u, "the prompt stays the prefix");
+  assert.ok(prompt.includes(JSON.stringify(JUDGE_SCHEMA)), "the schema text rides inside the prompt");
 });
 
 test("normalizes the ZCode result object with cache-aware usage", () => {

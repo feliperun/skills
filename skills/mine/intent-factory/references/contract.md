@@ -153,7 +153,9 @@ worker's declared fallback chain (rejecting a cycle in that chain outright)
 — all statically knowable from the contract alone. The symmetric case, a
 judge fallback landing on the vendor of the worker runtime that actually ran,
 cannot be checked statically (it depends on which worker runtime ran this
-attempt) and is instead refused at execution; see Failover below. Two models of one family are not automatically independent reviewers: pairing them (a GLM 5.3-flash worker judged by GLM 5.3) requires distinct `vendor` strings on the two runtimes, the same pattern the measurement campaign used for `anthropic`/`anthropic-opus`. That declaration is a claim about review independence, not a formality — make it only when the two runtimes really are different reviewers.
+attempt) and is instead refused at execution; see Failover below. Two models of one family (a GLM 5.3-flash worker judged by GLM 5.3) pair only by
+declaring distinct `vendor` strings — a claim about review independence, not a
+formality.
 
 - `claude`: `permissionMode` (default `acceptEdits`; a node that runs
   commands needs `bypassPermissions`, since headless `acceptEdits` denies
