@@ -4,10 +4,15 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 const ENVELOPE_STATUSES = new Set(["done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
 const LINE_KEYS = new Set(["envelope", "files", "delayMs", "exitCode", "stdoutRaw"]);
-const ENVELOPE_KEYS = new Set(["status", "result", "continuationId", "usage", "costUsd", "error"]);
+// exhaustedUntil, like error.resetAt below, is optional on a real provider
+// envelope — most statuses never carry either — so it sits outside the
+// required set even though it is a recognized field.
+const ENVELOPE_REQUIRED_KEYS = new Set(["status", "result", "continuationId", "usage", "costUsd", "error"]);
+const ENVELOPE_OPTIONAL_KEYS = new Set(["exhaustedUntil"]);
+const ENVELOPE_KEYS = new Set([...ENVELOPE_REQUIRED_KEYS, ...ENVELOPE_OPTIONAL_KEYS]);
 const USAGE_KEYS = new Set(["inputTokens", "outputTokens", "cacheReadInputTokens"]);
 const FILE_KEYS = new Set(["path", "content"]);
-const ERROR_KEYS = new Set(["code", "message"]);
+const ERROR_KEYS = new Set(["code", "message", "resetAt"]);
 const METADATA_ROOTS = new Set([".git", ".runs", "node_modules", ".claude", ".codex"]);
 const PREFLIGHT_TOKEN = "INTENT_FACTORY_PREFLIGHT_OK";
 
@@ -145,8 +150,14 @@ function parseEnvelope(value, lineIndex) {
   for (const key of Object.keys(envelope)) {
     if (!ENVELOPE_KEYS.has(key)) failSchema(lineIndex, `envelope has unknown field ${key}`);
   }
-  for (const key of ENVELOPE_KEYS) {
+  for (const key of ENVELOPE_REQUIRED_KEYS) {
     if (!Object.hasOwn(envelope, key)) failSchema(lineIndex, `envelope is missing ${key}`);
+  }
+  if (Object.hasOwn(envelope, "exhaustedUntil")) {
+    const exhaustedUntil = envelope.exhaustedUntil;
+    if (exhaustedUntil !== null && typeof exhaustedUntil !== "string") {
+      failSchema(lineIndex, "envelope.exhaustedUntil must be a string or null");
+    }
   }
   const status = envelope.status;
   if (typeof status !== "string" || !ENVELOPE_STATUSES.has(status)) {
@@ -212,6 +223,12 @@ function parseError(value, lineIndex) {
   }
   if (typeof error.code !== "string" || error.code.length === 0 || typeof error.message !== "string") {
     failSchema(lineIndex, "envelope.error must carry a non-empty code and a string message");
+  }
+  if (Object.hasOwn(error, "resetAt")) {
+    const resetAt = error.resetAt;
+    if (resetAt !== null && typeof resetAt !== "string") {
+      failSchema(lineIndex, "envelope.error.resetAt must be a string or null");
+    }
   }
 }
 

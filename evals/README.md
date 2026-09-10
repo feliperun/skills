@@ -43,6 +43,17 @@ and has:
   `replay` driver (see `skills/mine/intent-factory/scripts/drivers/replay.mjs`
   and `replay-bin.mjs` for the exact envelope schema).
 
+A recorded envelope's `error.resetAt` and top-level `exhaustedUntil` are both
+optional, and both may carry a relative placeholder — the string
+`"+<milliseconds>"` — instead of an absolute timestamp. The harness resolves
+it to a real ISO timestamp, measured from the moment the case is
+materialized, before the recording is copied into the workspace; the
+`replay` driver itself never sees the placeholder, only the resolved literal
+string, exactly the shape a real driver would produce. Use this for a case
+whose scenario turns on a reset landing inside a window measured from
+whenever the suite happens to run (see D04's `primary.jsonl`); an absolute
+timestamp works too when the exact instant does not matter to the case.
+
 ### `case.json`
 
 ```jsonc
@@ -109,6 +120,7 @@ disk, versioned or otherwise.
 | `removeSetupStep` | `indices` (non-empty array of step indices) | drops those steps before running the case |
 | `patchContractField` | `path` (non-empty array of object keys / array indices), and either `value` or `remove: true` | sets, or deletes, one field of the materialized contract before the run |
 | `patchRecordingErrorCode` | `runtime` (a key in the case's `recordings`), `code`, `index` (optional, defaults to `0`) | rewrites `envelope.error.code` on one line of that runtime's recording before it is copied into the workspace |
+| `patchRecordingEnvelopeField` | `runtime` (a key in the case's `recordings`), `path` (non-empty array of keys relative to that line's `envelope`), `index` (optional, defaults to `0`), and either `value` or `remove: true` | sets, or deletes, one field of one recorded envelope (e.g. `["error", "resetAt"]`) before it is copied into the workspace |
 
 Pick a mutation that, once applied, necessarily changes the run's outcome —
 not merely one that happens to touch something that exists. If a declared
@@ -122,8 +134,9 @@ with no step left to execute fails because nothing ran at all, not because of
 whatever the case claims to prove, which would let `--verify-discriminating`
 pass on a case that proves nothing. A case whose `setup` is a single `run`
 step (the default for an omitted `setup`) can never use `removeSetupStep` for
-this reason; reach for `patchContractField` or `patchRecordingErrorCode`
-instead, varying exactly the one value the case's `proves` claim turns on.
+this reason; reach for `patchContractField`, `patchRecordingErrorCode`, or
+`patchRecordingEnvelopeField` instead, varying exactly the one value the
+case's `proves` claim turns on.
 
 ### `expected.json`
 

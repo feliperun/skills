@@ -200,13 +200,91 @@ function patchRecordingErrorCode(content, { index, code }) {
 }
 
 /**
+ * Set or remove one field inside a single recorded envelope, addressed by a
+ * path relative to that envelope (e.g. `["error", "resetAt"]`).
+ *
+ * @param {string} content
+ * @param {{index: number, path: (string|number)[], value?: unknown, remove?: boolean}} recordingPatch
+ * @returns {string}
+ */
+function patchRecordingEnvelopeField(content, { index, path, value, remove }) {
+  const lines = content.split("\n").filter((line) => line.length > 0);
+  if (!Number.isInteger(index) || index < 0 || index >= lines.length) {
+    throw new Error(`discriminator "patchRecordingEnvelopeField" index ${index} is out of range for ${lines.length} recorded envelope(s)`);
+  }
+  const patched = lines.map((line, lineIndex) => {
+    if (lineIndex !== index) return line;
+    const record = JSON.parse(line);
+    let target = record.envelope;
+    if (!target || typeof target !== "object") throw new Error(`discriminator "patchRecordingEnvelopeField" line ${index} has no envelope to patch`);
+    for (const key of path.slice(0, -1)) {
+      target = /** @type {Record<string, unknown>} */ (target)[key];
+      if (!target || typeof target !== "object") {
+        throw new Error(`discriminator "patchRecordingEnvelopeField" path ${JSON.stringify(path)} does not resolve inside line ${index}'s envelope`);
+      }
+    }
+    const lastKey = /** @type {string|number} */ (path[path.length - 1]);
+    if (remove) delete /** @type {Record<string, unknown>} */ (target)[lastKey];
+    else /** @type {Record<string, unknown>} */ (target)[lastKey] = value;
+    return JSON.stringify(record);
+  });
+  return `${patched.join("\n")}\n`;
+}
+
+/**
+ * A recorded envelope's `error.resetAt` or top-level `exhaustedUntil` may
+ * carry a relative placeholder — the string `"+<milliseconds>"` — instead of
+ * an absolute timestamp, since a fixture checked into git cannot know what
+ * "soon" means relative to whenever the suite actually runs. Resolved once,
+ * at materialization time, into a real ISO timestamp measured from now; every
+ * other value (an absolute timestamp, or the field's absence) passes through
+ * untouched. The replay driver itself never sees the placeholder, only the
+ * resolved literal string — exactly the shape a real driver would produce.
+ *
+ * @param {string} content
+ * @returns {string}
+ */
+function resolveRelativeTimestamps(content) {
+  const lines = content.split("\n").filter((line) => line.length > 0);
+  const resolved = lines.map((line) => {
+    const record = JSON.parse(line);
+    const envelope = record.envelope;
+    if (!envelope || typeof envelope !== "object") return line;
+    let changed = false;
+    if (envelope.error && typeof envelope.error === "object" && typeof envelope.error.resetAt === "string") {
+      const resolvedAt = resolveRelativeTimestamp(envelope.error.resetAt);
+      if (resolvedAt !== envelope.error.resetAt) {
+        envelope.error = { ...envelope.error, resetAt: resolvedAt };
+        changed = true;
+      }
+    }
+    if (typeof envelope.exhaustedUntil === "string") {
+      const resolvedUntil = resolveRelativeTimestamp(envelope.exhaustedUntil);
+      if (resolvedUntil !== envelope.exhaustedUntil) {
+        envelope.exhaustedUntil = resolvedUntil;
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify({ ...record, envelope }) : line;
+  });
+  return `${resolved.join("\n")}\n`;
+}
+
+/** @param {string} value @returns {string} */
+function resolveRelativeTimestamp(value) {
+  const match = /^\+(\d+)$/u.exec(value);
+  if (!match) return value;
+  return new Date(Date.now() + Number(match[1])).toISOString();
+}
+
+/**
  * Materialize one case's contract into a fresh temporary git repository, with
  * every recording copied in and every declared runtime's
  * `config["replay.recording"]` pointed at that copy.
  *
  * @param {string} caseDir
  * @param {Record<string, unknown>} spec
- * @param {{contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: {runtime: string, index: number, code: string}|null}} [patch]
+ * @param {{contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: ({runtime: string, index: number, code: string}|{runtime: string, index: number, path: (string|number)[], value?: unknown, remove?: boolean})|null}} [patch]
  * @returns {{workDir: string, contractPath: string, runDir: string, contract: Record<string, unknown>}}
  */
 function materializeCase(caseDir, spec, patch = {}) {
@@ -224,11 +302,13 @@ function materializeCase(caseDir, spec, patch = {}) {
     const source = join(caseDir, filename);
     if (!existsSync(source)) throw new Error(`case ${spec.id} declares recording ${filename} for runtime ${runtimeId}, but the file does not exist`);
     const dest = join(recordingsDir, filename);
+    let content = resolveRelativeTimestamps(readFileSync(source, "utf8"));
     if (patch.recordingPatch && patch.recordingPatch.runtime === runtimeId) {
-      writeFileSync(dest, patchRecordingErrorCode(readFileSync(source, "utf8"), patch.recordingPatch));
-    } else {
-      copyFileSync(source, dest);
+      content = "code" in patch.recordingPatch
+        ? patchRecordingErrorCode(content, patch.recordingPatch)
+        : patchRecordingEnvelopeField(content, patch.recordingPatch);
     }
+    writeFileSync(dest, content);
     const runtime = contract.runtimes?.[runtimeId];
     if (!runtime) throw new Error(`case ${spec.id} declares a recording for unknown runtime ${runtimeId}`);
     contract.runtimes[runtimeId] = { ...runtime, config: { ...(runtime.config ?? {}), "replay.recording": dest } };
@@ -474,7 +554,7 @@ function normalizedSteps(spec) {
  *
  * @param {Record<string, unknown>} spec
  * @param {Record<string, unknown>|undefined} discriminator
- * @returns {{steps: Record<string, unknown>[], contractPatch: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch: {runtime: string, index: number, code: string}|null}}
+ * @returns {{steps: Record<string, unknown>[], contractPatch: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch: ({runtime: string, index: number, code: string}|{runtime: string, index: number, path: (string|number)[], value?: unknown, remove?: boolean})|null}}
  */
 function applyDiscriminator(spec, discriminator) {
   const caseId = /** @type {string} */ (spec.id);
@@ -519,12 +599,23 @@ function applyDiscriminator(spec, discriminator) {
     return { steps, contractPatch: null, recordingPatch: { runtime, index, code } };
   }
 
+  if (discriminator.type === "patchRecordingEnvelopeField") {
+    const runtime = discriminator.runtime;
+    const path = /** @type {(string|number)[]} */ (discriminator.path);
+    if (typeof runtime !== "string" || !runtime) throw new Error(`discriminator "patchRecordingEnvelopeField" needs a "runtime"`);
+    if (!Array.isArray(path) || path.length === 0) throw new Error(`discriminator "patchRecordingEnvelopeField" needs a non-empty "path" array`);
+    const remove = discriminator.remove === true;
+    if (!remove && !("value" in discriminator)) throw new Error(`discriminator "patchRecordingEnvelopeField" needs a "value" (or "remove": true)`);
+    const index = typeof discriminator.index === "number" ? discriminator.index : 0;
+    return { steps, contractPatch: null, recordingPatch: { runtime, index, path, value: discriminator.value, remove } };
+  }
+
   throw new Error(`unknown discriminator type: ${discriminator.type}`);
 }
 
 /**
  * @param {{caseDir: string, spec: Record<string, unknown>, expected: Record<string, unknown>}} loaded
- * @param {{assertNoModel: boolean, stepsOverride?: Record<string, unknown>[], patch?: {contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: {runtime: string, index: number, code: string}|null}}} options
+ * @param {{assertNoModel: boolean, stepsOverride?: Record<string, unknown>[], patch?: {contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: ({runtime: string, index: number, code: string}|{runtime: string, index: number, path: (string|number)[], value?: unknown, remove?: boolean})|null}}} options
  * @returns {Promise<{id: string, title: string, proves: string, ok: boolean, failures: string[]}>}
  */
 async function runCase({ caseDir, spec, expected }, options) {

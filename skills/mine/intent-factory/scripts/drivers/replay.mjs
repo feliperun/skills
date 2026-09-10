@@ -75,9 +75,12 @@ export default replayDriver;
 
 /**
  * Parse the last non-empty stdout line as an already-normalized provider
- * envelope. Canonical fields are kept and unknown fields are dropped; anything
- * else (prose, an empty stream, a non-zero exit with no envelope) normalizes
- * to a `failed` envelope with error code `invalid_output`. Never throws.
+ * envelope. Canonical fields are kept — including the optional
+ * `error.resetAt` and `exhaustedUntil`, in exactly the shape
+ * `ProviderEnvelope` declares for a real driver — and unknown fields are
+ * dropped; anything else (prose, an empty stream, a non-zero exit with no
+ * envelope) normalizes to a `failed` envelope with error code
+ * `invalid_output`. Never throws.
  *
  * @param {string} stdout
  * @param {number|null} exitCode
@@ -156,6 +159,8 @@ function canonicalEnvelope(value) {
   if (costUsd !== null && (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd < 0)) return null;
   const error = canonicalError(envelope.error);
   if (error === undefined) return null;
+  const exhaustedUntil = envelope.exhaustedUntil;
+  if (exhaustedUntil !== undefined && exhaustedUntil !== null && typeof exhaustedUntil !== "string") return null;
   return {
     status: /** @type {"done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled"} */ (status),
     result,
@@ -163,6 +168,7 @@ function canonicalEnvelope(value) {
     usage,
     costUsd,
     error,
+    ...(exhaustedUntil !== undefined ? { exhaustedUntil } : {}),
   };
 }
 
@@ -186,14 +192,16 @@ function canonicalUsage(value) {
 
 /**
  * @param {unknown} value
- * @returns {{code: string, message: string}|null|undefined}
+ * @returns {{code: string, message: string, resetAt?: string|null}|null|undefined}
  */
 function canonicalError(value) {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const error = /** @type {Record<string, unknown>} */ (value);
   if (typeof error.code !== "string" || error.code.length === 0 || typeof error.message !== "string") return undefined;
-  return { code: error.code, message: error.message };
+  const resetAt = error.resetAt;
+  if (resetAt !== undefined && resetAt !== null && typeof resetAt !== "string") return undefined;
+  return { code: error.code, message: error.message, ...(resetAt !== undefined ? { resetAt } : {}) };
 }
 
 /**

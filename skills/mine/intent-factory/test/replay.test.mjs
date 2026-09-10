@@ -196,6 +196,43 @@ test("consumes recording lines strictly in order through the cursor sidecar", as
   assert.ok(Array.isArray(invocations[0].args));
 });
 
+test("recording lines may carry error.resetAt and exhaustedUntil, optionally, and reject the wrong type", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "replay-reset-schema-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-reset-schema-rec-"));
+
+  const withBoth = writeRecording(recordingDir, [{
+    envelope: envelope({
+      status: "exhausted",
+      result: null,
+      error: { code: "quota_exhausted", message: "m", resetAt: "2026-09-10T12:00:00.000Z" },
+      exhaustedUntil: "2026-09-10T12:00:00.000Z",
+    }),
+  }], "with-both.jsonl");
+  const both = await runBin({ args: ["--recording", withBoth], cwd: workspace, input: "p" });
+  assert.equal(both.code, 0, both.stderr);
+  const bothEnvelope = /** @type {{error: {resetAt: unknown}, exhaustedUntil: unknown}} */ (parseEnvelopeLine(both.stdout));
+  assert.equal(bothEnvelope.error.resetAt, "2026-09-10T12:00:00.000Z");
+  assert.equal(bothEnvelope.exhaustedUntil, "2026-09-10T12:00:00.000Z");
+
+  const withoutEither = writeRecording(recordingDir, [{ envelope: envelope() }], "without-either.jsonl");
+  const neither = await runBin({ args: ["--recording", withoutEither], cwd: workspace, input: "p" });
+  assert.equal(neither.code, 0, neither.stderr);
+
+  const badResetAt = writeRecording(recordingDir, [{
+    envelope: envelope({ error: { code: "quota_exhausted", message: "m", resetAt: 123 } }),
+  }], "bad-reset-at.jsonl");
+  const badReset = await runBin({ args: ["--recording", badResetAt], cwd: workspace, input: "p" });
+  assert.equal(badReset.code, 2);
+  assert.match(badReset.stderr, /error\.resetAt must be a string or null/u);
+
+  const badExhaustedUntil = writeRecording(recordingDir, [{
+    envelope: envelope({ exhaustedUntil: 123 }),
+  }], "bad-exhausted-until.jsonl");
+  const badExhausted = await runBin({ args: ["--recording", badExhaustedUntil], cwd: workspace, input: "p" });
+  assert.equal(badExhausted.code, 2);
+  assert.match(badExhausted.stderr, /exhaustedUntil must be a string or null/u);
+});
+
 test("applies recorded file writes relative to its cwd", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "replay-writes-"));
   const recordingDir = mkdtempSync(join(tmpdir(), "replay-writes-rec-"));
@@ -266,6 +303,39 @@ test("normalize drops unknown fields and never throws on malformed stdout", () =
   assert.equal(normalizeProviderResult("replay", "", 3, null).error?.message, "replay exited with code 3");
   assert.equal(normalizeProviderResult("replay", "", null, "SIGTERM").error?.message, "provider ended after SIGTERM");
   assert.doesNotThrow(() => normalizeProviderResult("replay", "x".repeat(10_000), 0, null));
+});
+
+test("normalize keeps error.resetAt and exhaustedUntil in exactly the ProviderEnvelope shape, and still drops unknown fields alongside them", () => {
+  const withReset = envelope({
+    status: "exhausted",
+    result: null,
+    error: { code: "quota_exhausted", message: "quota resets shortly", resetAt: "2026-09-10T12:00:00.000Z" },
+    exhaustedUntil: "2026-09-10T12:00:00.000Z",
+  });
+  assert.deepEqual(normalizeProviderResult("replay", JSON.stringify(withReset), 0, null), withReset);
+
+  // A recorded envelope that carries neither field must not grow them: the
+  // canonical shape declares both optional, and normalize must not invent an
+  // `undefined`-valued key no real driver would ever emit.
+  const withoutReset = envelope({ status: "failed", result: null, error: { code: "provider_exhausted", message: "no reset announced" } });
+  assert.deepEqual(normalizeProviderResult("replay", JSON.stringify(withoutReset), 0, null), withoutReset);
+  assert.ok(!Object.hasOwn(normalizeProviderResult("replay", JSON.stringify(withoutReset), 0, null), "exhaustedUntil"));
+  assert.ok(!Object.hasOwn(/** @type {object} */ (normalizeProviderResult("replay", JSON.stringify(withoutReset), 0, null).error), "resetAt"));
+
+  // An explicit null is a real, distinct value on the canonical shape (a
+  // provider that carries the field but has nothing to announce), and must
+  // survive normalization rather than being dropped like a truly unknown key.
+  const explicitNulls = envelope({ error: { code: "provider_exhausted", message: "no reset announced", resetAt: null }, exhaustedUntil: null });
+  const normalizedNulls = normalizeProviderResult("replay", JSON.stringify(explicitNulls), 0, null);
+  assert.equal(normalizedNulls.exhaustedUntil, null);
+  assert.equal(normalizedNulls.error?.resetAt, null);
+
+  // Fields with the wrong type are exactly as invalid as a malformed core
+  // field: the whole envelope fails closed rather than silently coercing.
+  const badResetAt = { ...envelope(), error: { code: "quota_exhausted", message: "m", resetAt: 12345 } };
+  assert.equal(normalizeProviderResult("replay", JSON.stringify(badResetAt), 0, null).error?.code, "invalid_output");
+  const badExhaustedUntil = { ...envelope(), exhaustedUntil: 12345 };
+  assert.equal(normalizeProviderResult("replay", JSON.stringify(badExhaustedUntil), 0, null).error?.code, "invalid_output");
 });
 
 test("live meters treat replay like exec-jsonl: zeros until the terminal envelope", () => {
@@ -465,6 +535,47 @@ test("a worker exhaustion fails over its declared one-hop fallback, and the atte
   assert.equal(state?.routing?.history?.[0]?.nextRuntime, "backup", "the attempt records the one-hop fallback it took");
   assert.equal(state?.routing?.history?.[0]?.hop, 1);
   assert.equal(state?.routing?.history?.[0]?.errorCode, "quota_exhausted");
+});
+
+test("a quota exhaustion carrying a scheduled reset resumes the same runtime instead of failing over", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-quota-reset-"));
+  const recordingDir = mkdtempSync(join(tmpdir(), "replay-quota-reset-rec-"));
+  // Comfortably inside the node's deadline (2_400s by default), and generous
+  // enough that the first worker invocation's own process spawn cannot eat
+  // into it: classifyTransition reads resetAt only once the first envelope
+  // comes back, and it must still be in the future at that moment for the
+  // reset branch (rather than an immediate failover) to fire.
+  const resetAt = new Date(Date.now() + 3_000).toISOString();
+  const primaryRecording = writeRecording(recordingDir, [
+    { envelope: envelope({ status: "exhausted", result: null, error: { code: "quota_exhausted", message: "quota resets shortly", resetAt } }) },
+    { envelope: envelope({ result: JSON.stringify(workerResult("build complete after the reset")) }) },
+  ], "primary.jsonl");
+  const backupRecording = writeRecording(recordingDir, [{
+    envelope: envelope({ result: JSON.stringify(workerResult("backup complete")) }),
+  }], "backup.jsonl");
+  const path = writeContract(directory, fixture({
+    id: "replay-quota-reset-run",
+    pollIntervalMs: 10,
+    runtimeDefaults: { worker: "primary", judge: "primary" },
+    runtimes: {
+      primary: { driver: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
+      backup: { driver: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
+  }));
+  const result = await runContract(path);
+  const state = result.states.get("build");
+  assert.equal(state?.status, "done", state?.error?.message);
+  assert.deepEqual(
+    (state?.invocations ?? []).map((invocation) => invocation.runtimeId),
+    ["primary", "primary"],
+    "the announced reset waits out the same runtime rather than spending the declared fallback",
+  );
+  assert.equal(state?.routing?.history?.length, 1);
+  assert.equal(state?.routing?.history?.[0]?.nextRuntime, "primary");
+  assert.equal(state?.routing?.history?.[0]?.hop, 0, "a reset stays on the current runtime and costs no failover hop");
+  assert.equal(state?.routing?.history?.[0]?.errorCode, "quota_exhausted");
+  assert.equal(existsSync(`${backupRecording}.cursor`), false, "the fallback runtime was never invoked");
 });
 
 test("a judge fallback to a runtime of a different vendor than the worker that ran is admissible", async () => {

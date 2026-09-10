@@ -1,0 +1,41 @@
+{
+  "id": "D04",
+  "title": "a quota error with a scheduled reset resumes the same runtime instead of failing over",
+  "proves": "a worker exhaustion envelope with error code quota_exhausted and a resetAt strictly inside the node's own deadline classifies as a scheduled reset (quotaResetSchedule in backoff.mjs finds resetAt in the future and before the deadline), so classifyTransition returns kind:\"reset\" rather than \"failover\": planRoute keeps the current runtime and charges no failover hop, the node waits out the backoff and is re-dispatched on the same runtime, and it finishes on the invocation the recording queued next — proving the run resumed the attempt instead of spending the runtime's declared fallback. The replay driver's own canonicalError now preserves resetAt exactly as a real provider envelope would carry it (see replay.mjs's canonicalError), which is what makes this branch reachable through replay at all; the recorded resetAt below is the relative placeholder \"+3000\" (three seconds from whenever the case is materialized), resolved to a real timestamp by the eval harness before the replay driver ever sees it.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d04-run",
+    "campaignId": "d04-campaign",
+    "goal": "prove a quota error with a scheduled reset resumes the same runtime instead of failing over",
+    "runtimeDefaults": { "worker": "replay-primary" },
+    "runtimes": {
+      "replay-primary": { "driver": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
+      "replay-backup": { "driver": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} }
+    },
+    "pollIntervalMs": 10,
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-primary": "primary.jsonl"
+  },
+  "discriminator": { "type": "patchRecordingEnvelopeField", "runtime": "replay-primary", "index": 0, "path": ["error", "resetAt"], "remove": true }
+}
