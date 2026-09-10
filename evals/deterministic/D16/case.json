@@ -41,5 +41,6 @@
     { "type": "mkdirp", "path": "node_modules/marker-package" },
     { "type": "writeFile", "path": "node_modules/marker-package/index.js", "content": "module.exports = {};\n" },
     { "type": "run" }
-  ]
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [1] }
 }

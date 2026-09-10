@@ -8,7 +8,7 @@ recorded envelope instead of calling a real provider CLI.
 ## Usage
 
 ```
-node evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--json]
+node evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--verify-discriminating] [--json]
 ```
 
 - `--class deterministic` runs every case under `evals/deterministic/`.
@@ -19,6 +19,13 @@ node evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--js
   `INTENT_FACTORY_AGY_BIN`, and `INTENT_FACTORY_GLM_BIN` unset, so any code
   path that actually needed one of those to resolve a provider CLI fails
   loudly instead of silently reaching a real local install.
+- `--verify-discriminating` does not check any case against its
+  `expected.json`. Instead, for each case it applies the case's declared
+  `discriminator` mutation (see below) to a fresh copy of its `setup` steps
+  and requires the mutated run to fail. A case that still passes with its
+  discriminator applied does not prove what it claims and is reported as a
+  failure naming the case; a case with no `discriminator` block is also a
+  failure. Combine with `--case <id>` to check one case.
 - `--json` prints the report as JSON instead of a human-readable summary.
 - An unknown flag exits 2.
 
@@ -45,7 +52,8 @@ and has:
   "proves": "one sentence: what this case proves",
   "contract": { /* a complete, valid schemaVersion 3 contract */ },
   "recordings": { "<runtimeId>": "<recording-file>.jsonl" },
-  "setup": [ /* optional, see below */ ]
+  "setup": [ /* optional, see below */ ],
+  "discriminator": { /* required, see below */ }
 }
 ```
 
@@ -81,6 +89,27 @@ case-insensitive); when present, the step's call must reject with a message
 matching it, or the case fails — this is how a case pins a crash without
 needing a second field in `expected.json` to describe the rejection.
 
+### `discriminator`
+
+Every case must declare a `discriminator`: one mutation that, applied to the
+case's own `setup` steps, must make the case fail. A case whose expected
+outcome does not actually depend on some step it sets up proves nothing about
+that step — `--verify-discriminating` catches that by requiring the mutated
+run to fail.
+
+The mutation is applied in memory to the normalized step list (defaulting to
+`[{"type": "run"}]` the same way an omitted `setup` does); it never touches a
+file on disk, versioned or otherwise.
+
+| type | fields | effect |
+|---|---|---|
+| `removeSetupStep` | `indices` (non-empty array of step indices) | drops those steps before running the case |
+
+Pick whichever indices, once missing, necessarily change the run's outcome —
+not merely indices that happen to exist. If a declared discriminator does not
+make its case fail, the case's `setup`, `contract`, or `expected.json` is
+wrong and needs fixing; the discriminator requirement itself does not bend.
+
 ### `expected.json`
 
 ```jsonc
@@ -91,14 +120,23 @@ needing a second field in `expected.json` to describe the rejection.
       "errorCode": null,
       "revisions": 0,
       "runtimeIds": ["replay-worker"],
-      "routingHistoryLength": 0
+      "routingHistoryLength": 0,
+      "integratedHead": true
+    }
+  },
+  "integration": {
+    "runRefMatchesIntegratedHead": ["<node-id>"],
+    "acceptedRecords": [{ "node": "<node-id>", "attempt": 1 }],
+    "worktreesAbsent": {
+      "attempts": [{ "node": "<node-id>", "attempt": 1 }],
+      "candidate": true
     }
   }
 }
 ```
 
-Every field is optional; only what a case declares is checked. Fields read
-directly off the node's persisted snapshot
+Every field is optional; only what a case declares is checked. `nodes` fields
+read directly off the node's persisted snapshot
 (`.runs/<contractId>/nodes/<node-id>.json`) after every `setup` step has run:
 
 - `status` — the node's terminal status.
@@ -108,6 +146,22 @@ directly off the node's persisted snapshot
   invocations together, in the order they actually ran).
 - `routingHistoryLength` — the length of `routing.history` (fallback/backoff
   hops; a gate-triggered revision retry is not a hop and does not add to it).
+- `integratedHead` — `true` requires a published sha (a non-null string),
+  `false` requires `null`, and a string requires that exact sha.
+
+`integration` checks facts that live outside any one node's snapshot — the
+actual publication a resume or recovery claims to finish, not just the node's
+own after-the-fact bookkeeping:
+
+- `runRefMatchesIntegratedHead` — an array of node ids; for each, the run's
+  git ref (`refs/intent-factory/<runId>/run`) must exist and equal that
+  node's `integratedHead`.
+- `acceptedRecords` — an array of `{node, attempt}`; each must have an
+  `"accepted"` record in `integration.jsonl`.
+- `worktreesAbsent.attempts` — an array of `{node, attempt}`; each attempt
+  worktree must no longer exist on disk.
+- `worktreesAbsent.candidate` — when `true`, the run's `.candidate` worktree
+  must no longer exist on disk.
 
 ## Adding a case
 
@@ -120,10 +174,15 @@ directly off the node's persisted snapshot
    `error`; add `files` for the envelope to also write into the workspace).
 4. Write `expected.json` with only the fields the case actually needs to
    prove its point.
-5. Run `node evals/run.mjs --class deterministic --case <id> --json` and
+5. Write a `discriminator` (see above) and confirm with
+   `node evals/run.mjs --class deterministic --case <id> --verify-discriminating`
+   that the mutation it names actually makes the case fail. If it does not,
+   `expected.json` is not checking what the case claims to prove — fix the
+   case, not the discriminator.
+6. Run `node evals/run.mjs --class deterministic --case <id> --json` and
    confirm it passes; then run the whole class to confirm you have not
    broken anything else.
-6. If the scenario is expressible only partly through `replay` (it needs real
+7. If the scenario is expressible only partly through `replay` (it needs real
    filesystem or git state `replay` cannot produce), use `setup` for the rest
    and say exactly what is synthesized in `proves` — never invent a fake
    model response to stand in for a scenario `replay` cannot express.

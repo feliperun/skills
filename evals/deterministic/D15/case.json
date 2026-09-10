@@ -1,7 +1,7 @@
 {
   "id": "D15",
   "title": "a sealed and clean attempt is not re-sealed on retry",
-  "proves": "pins the regression fixed in 6e1afef: sealAttempt's dirty probe excluded only .runs, so an attempt worktree whose only untracked entry is the node_modules symlink (git's node_modules/ ignore pattern never matches a symlink of that name) read as dirty, staged that entry, unstaged it again, and then tried to commit an empty change set, which exits 1. The first worker attempt here makes no file changes at all; when the judge rejects it and the retry seals that attempt before cutting the second one, the only untracked entry in that worktree is the node_modules symlink linked in from the repository. Setup creates that repository-level node_modules directory (fixed content, no npm install) so every attempt worktree gets the symlink; nothing here mocks a model, the false-dirty condition is a real filesystem/git fact.",
+  "proves": "pins the regression fixed in 6e1afef: sealAttempt's dirty probe excluded only .runs, so an attempt worktree whose only untracked entry is the node_modules symlink (git's node_modules/ ignore pattern never matches a symlink of that name) read as dirty, staged that entry, unstaged it again, and then tried to commit an empty change set, which exits 1. The first worker attempt here makes no file changes at all; when the judge rejects it and the retry seals that attempt before cutting the second one, the only untracked entry in that worktree is the node_modules symlink linked in from the repository. Setup creates that repository-level node_modules directory (fixed content, no npm install) so every attempt worktree gets the symlink; nothing here mocks a model, the false-dirty condition is a real filesystem/git fact. The verification command also requires that symlinked marker to be reachable, so a setup that stops creating it does not merely stop exercising the regression silently: it turns the node's own verification into a failure the harness catches.",
   "contract": {
     "schemaVersion": 3,
     "contractVersion": "0.3.0",
@@ -27,7 +27,10 @@
           "symbols": [],
           "decisions": [],
           "nonGoals": [],
-          "verification": [{ "argv": ["true"] }]
+          "verification": [
+            { "argv": ["true"] },
+            { "argv": ["node", "-e", "process.exit(require('node:fs').existsSync('node_modules/marker-package/index.js') ? 0 : 1)"] }
+          ]
         },
         "definitionOfDone": [{ "id": "works", "text": "output.txt exists", "judgment": true }],
         "gate": { "review": "blocking", "failOn": ["major", "critical"], "maxRevisions": 1 }
@@ -42,5 +45,6 @@
     { "type": "mkdirp", "path": "node_modules/marker-package" },
     { "type": "writeFile", "path": "node_modules/marker-package/index.js", "content": "module.exports = {};\n" },
     { "type": "run" }
-  ]
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [0, 1] }
 }

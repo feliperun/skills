@@ -39,5 +39,6 @@
     { "type": "run" },
     { "type": "holdControllerLock" },
     { "type": "resume", "expectError": "controller lock" }
-  ]
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [1] }
 }

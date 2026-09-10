@@ -5,7 +5,16 @@
       "errorCode": null,
       "revisions": 0,
       "runtimeIds": ["replay-worker"],
-      "routingHistoryLength": 0
+      "routingHistoryLength": 0,
+      "integratedHead": true
+    }
+  },
+  "integration": {
+    "runRefMatchesIntegratedHead": ["build"],
+    "acceptedRecords": [{ "node": "build", "attempt": 1 }],
+    "worktreesAbsent": {
+      "attempts": [{ "node": "build", "attempt": 1 }],
+      "candidate": true
     }
   }
 }

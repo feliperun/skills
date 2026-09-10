@@ -17,6 +17,8 @@ import { parseArgs } from "node:util";
 import { runContract, resumeRun } from "../skills/mine/intent-factory/scripts/runner.mjs";
 import { acquire as acquireControllerLock } from "../skills/mine/intent-factory/scripts/lock.mjs";
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
+import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
+import { attemptWorktreePath, candidateWorktreePath, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
 
 const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
 const DETERMINISTIC_ROOT = join(EVALS_ROOT, "deterministic");
@@ -33,13 +35,14 @@ const CLI_OPTIONS = {
   case: { type: "string" },
   json: { type: "boolean" },
   "assert-no-model": { type: "boolean" },
+  "verify-discriminating": { type: "boolean" },
 };
 
 /** @param {string} message @returns {never} */
 function usageError(message) {
   process.stderr.write(`${message}\n`);
   process.stderr.write(
-    "usage: evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--json]\n",
+    "usage: evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--verify-discriminating] [--json]\n",
   );
   process.exitCode = 2;
   throw new UsageError(message);
@@ -279,12 +282,109 @@ function compareNode(nodeId, expectedNode, runDir) {
       failures.push(`node ${nodeId}.routing.history length: expected ${expectedNode.routingHistoryLength}, got ${length}`);
     }
   }
+  if (expectedNode.integratedHead !== undefined) {
+    const integratedHead = actual.integratedHead ?? null;
+    if (expectedNode.integratedHead === true && typeof integratedHead !== "string") {
+      failures.push(`node ${nodeId}.integratedHead: expected a published sha, got ${JSON.stringify(integratedHead)}`);
+    } else if (expectedNode.integratedHead === false && integratedHead !== null) {
+      failures.push(`node ${nodeId}.integratedHead: expected null, got ${JSON.stringify(integratedHead)}`);
+    } else if (typeof expectedNode.integratedHead === "string" && integratedHead !== expectedNode.integratedHead) {
+      failures.push(`node ${nodeId}.integratedHead: expected ${JSON.stringify(expectedNode.integratedHead)}, got ${JSON.stringify(integratedHead)}`);
+    }
+  }
   return failures;
 }
 
 /**
+ * Facts about integration recovery that live outside any single node's
+ * snapshot: the run ref, the integration journal, and worktree cleanup.
+ *
+ * @param {Record<string, unknown>|undefined} expectedIntegration
+ * @param {{repo: string, runDir: string, runId: string}} context
+ * @returns {string[]}
+ */
+function compareIntegration(expectedIntegration, { repo, runDir, runId }) {
+  if (!expectedIntegration) return [];
+  /** @type {string[]} */
+  const failures = [];
+
+  for (const nodeId of /** @type {string[]} */ (expectedIntegration.runRefMatchesIntegratedHead ?? [])) {
+    const statePath = join(runDir, "nodes", `${nodeId}.json`);
+    if (!existsSync(statePath)) {
+      failures.push(`integration.runRefMatchesIntegratedHead: node ${nodeId} has no state file`);
+      continue;
+    }
+    const actual = JSON.parse(readFileSync(statePath, "utf8"));
+    const runRef = gitHead(repo, runRefName(runId));
+    if (!runRef) {
+      failures.push(`integration.runRefMatchesIntegratedHead: run ref ${runRefName(runId)} does not exist`);
+      continue;
+    }
+    if (!actual.integratedHead) {
+      failures.push(`integration.runRefMatchesIntegratedHead: node ${nodeId}.integratedHead is not set`);
+      continue;
+    }
+    if (runRef !== actual.integratedHead) {
+      failures.push(`integration.runRefMatchesIntegratedHead: run ref ${runRef} does not match node ${nodeId}.integratedHead ${actual.integratedHead}`);
+    }
+  }
+
+  const journal = readIntegrationJournal(runDir);
+  for (const record of /** @type {{node: string, attempt: number}[]} */ (expectedIntegration.acceptedRecords ?? [])) {
+    const found = journal.some((entry) => entry.node === record.node && entry.attempt === record.attempt && entry.status === "accepted");
+    if (!found) failures.push(`integration.acceptedRecords: no accepted record for node ${record.node} attempt ${record.attempt}`);
+  }
+
+  const worktreesAbsent = /** @type {{attempts?: {node: string, attempt: number}[], candidate?: boolean}|undefined} */ (expectedIntegration.worktreesAbsent);
+  if (worktreesAbsent) {
+    for (const attempt of worktreesAbsent.attempts ?? []) {
+      const path = attemptWorktreePath(runDir, runId, attempt.node, attempt.attempt);
+      if (existsSync(path)) failures.push(`integration.worktreesAbsent: attempt worktree still exists at ${path}`);
+    }
+    if (worktreesAbsent.candidate) {
+      const path = candidateWorktreePath(runDir, runId);
+      if (existsSync(path)) failures.push(`integration.worktreesAbsent: candidate worktree still exists at ${path}`);
+    }
+  }
+
+  return failures;
+}
+
+/**
+ * @param {Record<string, unknown>} spec
+ * @returns {Record<string, unknown>[]}
+ */
+function normalizedSteps(spec) {
+  return Array.isArray(spec.setup) && spec.setup.length ? spec.setup : [{ type: "run" }];
+}
+
+/**
+ * A discriminator names one mutation that must make its case fail. It is
+ * applied to the normalized step list, never to a file on disk, so it can
+ * never touch a versioned fixture.
+ *
+ * @param {Record<string, unknown>[]} steps
+ * @param {Record<string, unknown>|undefined} discriminator
+ * @returns {Record<string, unknown>[]}
+ */
+function applyDiscriminator(steps, discriminator) {
+  if (!discriminator || typeof discriminator !== "object") throw new Error("case has no discriminator block");
+  if (discriminator.type === "removeSetupStep") {
+    const indices = new Set(/** @type {number[]} */ (discriminator.indices ?? []));
+    if (!indices.size) throw new Error(`discriminator "removeSetupStep" needs a non-empty "indices" array`);
+    for (const index of indices) {
+      if (!Number.isInteger(index) || index < 0 || index >= steps.length) {
+        throw new Error(`discriminator "removeSetupStep" index ${index} is out of range for ${steps.length} step(s)`);
+      }
+    }
+    return steps.filter((_, index) => !indices.has(index));
+  }
+  throw new Error(`unknown discriminator type: ${discriminator.type}`);
+}
+
+/**
  * @param {{caseDir: string, spec: Record<string, unknown>, expected: Record<string, unknown>}} loaded
- * @param {{assertNoModel: boolean}} options
+ * @param {{assertNoModel: boolean, stepsOverride?: Record<string, unknown>[]}} options
  * @returns {Promise<{id: string, title: string, proves: string, ok: boolean, failures: string[]}>}
  */
 async function runCase({ caseDir, spec, expected }, options) {
@@ -302,17 +402,49 @@ async function runCase({ caseDir, spec, expected }, options) {
   }
 
   try {
-    const { workDir, contractPath, runDir } = materializeCase(caseDir, spec);
-    const steps = Array.isArray(spec.setup) && spec.setup.length ? spec.setup : [{ type: "run" }];
+    const { workDir, contractPath, runDir, contract } = materializeCase(caseDir, spec);
+    const steps = options.stepsOverride ?? normalizedSteps(spec);
     for (const step of steps) await executeStep(/** @type {Record<string, unknown>} */ (step), { workDir, contractPath, runDir });
 
     const expectedNodes = /** @type {Record<string, Record<string, unknown>>} */ (expected.nodes ?? {});
-    const failures = Object.entries(expectedNodes).flatMap(([nodeId, expectedNode]) => compareNode(nodeId, expectedNode, runDir));
+    const failures = [
+      ...Object.entries(expectedNodes).flatMap(([nodeId, expectedNode]) => compareNode(nodeId, expectedNode, runDir)),
+      ...compareIntegration(/** @type {Record<string, unknown>|undefined} */ (expected.integration), {
+        repo: workDir,
+        runDir,
+        runId: /** @type {string} */ (contract.id),
+      }),
+    ];
     return { id, title, proves, ok: failures.length === 0, failures };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { id, title, proves, ok: false, failures: [`case threw: ${message}`] };
   }
+}
+
+/**
+ * @param {{caseDir: string, spec: Record<string, unknown>, expected: Record<string, unknown>}[]} loaded
+ * @returns {Promise<{id: string, ok: boolean, failures: string[]}[]>}
+ */
+async function verifyDiscriminating(loaded) {
+  const outcomes = [];
+  for (const entry of loaded) {
+    const id = /** @type {string} */ (entry.spec.id);
+    let stepsOverride;
+    try {
+      stepsOverride = applyDiscriminator(normalizedSteps(entry.spec), /** @type {Record<string, unknown>|undefined} */ (entry.spec.discriminator));
+    } catch (error) {
+      outcomes.push({ id, ok: false, failures: [error instanceof Error ? error.message : String(error)] });
+      continue;
+    }
+    const result = await runCase(entry, { assertNoModel: false, stepsOverride });
+    if (result.ok) {
+      outcomes.push({ id, ok: false, failures: [`case still passes with its discriminator mutation (${JSON.stringify(entry.spec.discriminator)}) applied`] });
+    } else {
+      outcomes.push({ id, ok: true, failures: [] });
+    }
+  }
+  return outcomes;
 }
 
 /**
@@ -330,6 +462,7 @@ async function main(argv) {
   }
   const { values } = parsed;
   const assertNoModel = values["assert-no-model"] === true;
+  const verifyDiscriminatingFlag = values["verify-discriminating"] === true;
   const asJson = values.json === true;
 
   if (values.class === undefined && values.case === undefined) {
@@ -354,6 +487,23 @@ async function main(argv) {
   // Cases run one at a time: a step's env overlay and a synthesized
   // controller.lock both mutate process-global state, which parallel cases
   // would otherwise race on and corrupt.
+  if (verifyDiscriminatingFlag) {
+    const outcomes = await verifyDiscriminating(loaded);
+    const ok = outcomes.every((outcome) => outcome.ok);
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify({ schemaVersion: 1, ok, cases: outcomes }, null, 2)}\n`);
+    } else {
+      for (const outcome of outcomes) {
+        process.stdout.write(`[${outcome.ok ? "ok" : "fail"}] ${outcome.id}\n`);
+        for (const failure of outcome.failures) process.stdout.write(`      ${failure}\n`);
+      }
+      const passed = outcomes.filter((outcome) => outcome.ok).length;
+      process.stdout.write(`${passed}/${outcomes.length} discriminate\n`);
+    }
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+
   const run = async () => {
     const outcomes = [];
     for (const entry of loaded) outcomes.push(await runCase(entry, { assertNoModel }));

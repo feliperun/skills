@@ -38,9 +38,10 @@
   "setup": [
     {
       "type": "run",
-      "env": { "INTENT_FACTORY_INTEGRATION_INTERRUPT": "after-state" },
-      "expectError": "integration interrupted after node state write"
+      "env": { "INTENT_FACTORY_INTEGRATION_INTERRUPT": "before-ref" },
+      "expectError": "integration interrupted at before-ref"
     },
     { "type": "resume" }
-  ]
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [1] }
 }
