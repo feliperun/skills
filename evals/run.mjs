@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -20,6 +21,7 @@ import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
 import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
 import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
+import { compareEvalReports, renderEvalComparisonReport } from "./metrics.mjs";
 
 const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
 const DETERMINISTIC_ROOT = join(EVALS_ROOT, "deterministic");
@@ -43,7 +45,7 @@ const CLI_OPTIONS = {
 function usageError(message) {
   process.stderr.write(`${message}\n`);
   process.stderr.write(
-    "usage: evals/run.mjs (--class deterministic | --case <id> | --verify-discriminating) [--assert-no-model] [--json]\n",
+    "usage: evals/run.mjs (--class deterministic | --case <id> | --verify-discriminating | --compare <before.json> <after.json>) [--assert-no-model] [--json]\n",
   );
   process.exitCode = 2;
   throw new UsageError(message);
@@ -683,10 +685,35 @@ async function verifyDiscriminating(loaded) {
 }
 
 /**
+ * `evals/run.mjs --compare <before.json> <after.json> [--json]`: compare two
+ * already-projected eval reports and print the result.
+ *
+ * @param {string[]} rest
+ * @returns {void}
+ */
+function runCompare(rest) {
+  const asJson = rest.includes("--json");
+  const positionals = rest.filter((arg) => arg !== "--json");
+  if (positionals.length !== 2) {
+    usageError("--compare needs exactly two report paths: <before.json> <after.json>");
+    return;
+  }
+  const [beforePath, afterPath] = positionals;
+  const before = JSON.parse(readFileSync(resolve(beforePath), "utf8"));
+  const after = JSON.parse(readFileSync(resolve(afterPath), "utf8"));
+  const comparison = compareEvalReports(before, after);
+  process.stdout.write(asJson ? `${JSON.stringify({ schemaVersion: 1, indicators: comparison }, null, 2)}\n` : renderEvalComparisonReport(comparison));
+}
+
+/**
  * @param {string[]} argv
  * @returns {Promise<void>}
  */
 async function main(argv) {
+  if (argv[0] === "--compare") {
+    runCompare(argv.slice(1));
+    return;
+  }
   /** @type {{values: Record<string, unknown>}} */
   let parsed;
   try {
@@ -760,8 +787,27 @@ async function main(argv) {
   if (!ok) process.exitCode = 1;
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  if (error instanceof UsageError) return;
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+/**
+ * Whether this module was launched directly (`node evals/run.mjs ...`)
+ * rather than imported — `main()` must run only in the former case, so a
+ * test can import the pure projector/comparator functions above without
+ * also triggering a CLI run against its own argv.
+ *
+ * @param {string|undefined} scriptPath
+ * @returns {boolean}
+ */
+function isEvalsRunMain(scriptPath) {
+  try {
+    return Boolean(scriptPath) && realpathSync(resolve(/** @type {string} */ (scriptPath))) === realpathSync(new URL(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEvalsRunMain(process.argv[1])) {
+  main(process.argv.slice(2)).catch((error) => {
+    if (error instanceof UsageError) return;
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

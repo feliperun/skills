@@ -1,0 +1,50 @@
+{
+  "costPerClosedCheckpoint": {
+    "value": 6.6526,
+    "direction": "down",
+    "count": 7
+  },
+  "firstPassGateRate": {
+    "value": {
+      "fixture-runtime-guard": 1,
+      "evals-harness": 0,
+      "discriminating-cases": 0,
+      "cases-d03-d08": 0,
+      "cases-d09-d14": 0,
+      "discriminator-and-ci": 1,
+      "replay-reset-and-d04": 1
+    },
+    "direction": "up",
+    "count": 7
+  },
+  "judgeInvocationRate": {
+    "value": 1,
+    "direction": "up",
+    "count": 7
+  },
+  "revisionsPerDone": {
+    "value": 0.2857,
+    "direction": "down",
+    "count": 7
+  },
+  "blockedContextRate": {
+    "value": 0.125,
+    "direction": "down",
+    "count": 8
+  },
+  "wallClockPerClosedCheckpoint": {
+    "value": 2358.2641,
+    "direction": "down",
+    "count": 7
+  },
+  "providerFailoverRate": {
+    "value": 0,
+    "direction": "down",
+    "count": 9
+  },
+  "protocolFailureRate": {
+    "value": 0,
+    "direction": "down",
+    "count": 19
+  }
+}
