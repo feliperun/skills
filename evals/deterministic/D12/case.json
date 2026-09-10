@@ -1,0 +1,41 @@
+{
+  "id": "D12",
+  "title": "a fully mechanical node closes with zero judge invocation",
+  "proves": "pins the behavior the unit test D24 ('a three-node replayed contract without judgment items closes with zero judge invocations') already establishes: judgeRequired in judge-gate.mjs is false when no Definition of Done item carries judgment: true, so a gated node whose only DoD item carries a mechanical proof settles from runMechanicalProofs alone and never dispatches the judge runtime at all — not even to have it decline. The node's own runtimeIds therefore names only the worker.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d12-run",
+    "campaignId": "d12-campaign",
+    "goal": "prove a purely mechanical Definition of Done closes without a judge invocation",
+    "runtimeDefaults": { "worker": "replay-worker", "judge": "replay-judge" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} },
+      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write README.md",
+          "instructions": ["Write README.md"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["README.md"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "definitionOfDone": [{ "id": "readme", "text": "README.md exists", "proof": { "kind": "path", "ref": "README.md" } }],
+        "gate": { "failOn": ["critical"] }
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

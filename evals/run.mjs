@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -19,7 +19,7 @@ import { acquire as acquireControllerLock, lockPath, processStartToken as comput
 import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs";
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
 import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
-import { attemptWorktreePath, candidateWorktreePath, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
+import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
 
 const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
 const DETERMINISTIC_ROOT = join(EVALS_ROOT, "deterministic");
@@ -244,6 +244,43 @@ async function executeStep(step, context) {
       startedAt: new Date().toISOString(),
       hostname: hostname(),
     });
+    return;
+  }
+  if (type === "rewindNodeToRunning") {
+    // Simulates a controller that died with this node's provider invocation
+    // already finished on disk but never processed: the node's own status is
+    // wound back to "running" with no result or gate verdict, exactly as
+    // test/helpers.mjs's `orphan()` does, so resume's recovery has to decide
+    // what an invocation it never dispatched itself actually produced.
+    const nodeId = /** @type {string} */ (step.node);
+    const nodePath = join(context.runDir, "nodes", `${nodeId}.json`);
+    const state = JSON.parse(readFileSync(nodePath, "utf8"));
+    writeJsonAtomic(nodePath, { ...state, status: "running", phase: "worker", result: null, gate: null });
+    return;
+  }
+  if (type === "recreateAttemptWorktree") {
+    // A node already integrated has had its attempt worktree removed by the
+    // sealing step; recovering it as a still-running orphan needs that
+    // worktree back so the recovered result can be re-verified and re-sealed,
+    // exactly as test/helpers.mjs's `ensureAttemptWorktree()` does. A no-op
+    // when the worktree was never removed.
+    const nodeId = /** @type {string} */ (step.node);
+    const nodePath = join(context.runDir, "nodes", `${nodeId}.json`);
+    const state = JSON.parse(readFileSync(nodePath, "utf8"));
+    if (state.worktree?.status === "removed" && state.worktree.branch) {
+      const recreated = createAttemptWorktree({
+        repo: context.workDir,
+        runDir: context.runDir,
+        runId: basename(context.runDir),
+        nodeId,
+        attempt: state.attempt,
+        base: state.worktree.baseSha,
+      });
+      writeJsonAtomic(nodePath, {
+        ...state,
+        worktree: { ...state.worktree, status: "ready", path: recreated.path, commit: recreated.commit },
+      });
+    }
     return;
   }
   if (type === "mkdirp") {

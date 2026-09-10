@@ -1,0 +1,1 @@
+{"envelope":{"status":"done","result":"{\"status\":\"done\",\"summary\":\"wrote output.txt on the fallback runtime\",\"changedFiles\":[\"output.txt\"],\"verification\":[],\"artifacts\":[],\"missingContext\":[]}","continuationId":null,"usage":{"inputTokens":5,"outputTokens":2,"cacheReadInputTokens":0},"costUsd":null,"error":null},"files":[{"path":"output.txt","content":"done\n"}]}

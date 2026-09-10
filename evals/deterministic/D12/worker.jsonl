@@ -1,0 +1,1 @@
+{"envelope":{"status":"done","result":"{\"status\":\"done\",\"summary\":\"wrote README.md\",\"changedFiles\":[\"README.md\"],\"verification\":[],\"artifacts\":[],\"missingContext\":[]}","continuationId":null,"usage":{"inputTokens":5,"outputTokens":2,"cacheReadInputTokens":0},"costUsd":null,"error":null},"files":[{"path":"README.md","content":"done\n"}]}

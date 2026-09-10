@@ -1,0 +1,18 @@
+{
+  "nodes": {
+    "build": {
+      "status": "done",
+      "errorCode": null,
+      "revisions": 0,
+      "runtimeIds": ["replay-worker"],
+      "routingHistoryLength": 0
+    },
+    "ship": {
+      "status": "done",
+      "errorCode": null,
+      "revisions": 0,
+      "runtimeIds": ["replay-worker"],
+      "routingHistoryLength": 0
+    }
+  }
+}

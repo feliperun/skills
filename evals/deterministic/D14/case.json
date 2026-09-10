@@ -1,0 +1,60 @@
+{
+  "id": "D14",
+  "title": "finalVerification runs on the phase-terminal node, never before",
+  "proves": "finalVerificationCommands in final-verification.mjs appends contract.finalVerification only to the one node no other node depends on; every other node's own controller verification never sees it. A two-node chain (build, then ship depending on build) whose finalVerification command can only pass once ship's own worker has run proves the ordering two ways at once: if finalVerification ran on build (before ship exists) the command would find nothing and build would fail verification instead of reaching done, and the run would never even reach ship; with the fix build closes on its own taskPacket verification alone and only ship's controller verification carries the extra command, which by then finds what ship's own worker just wrote.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d14-run",
+    "campaignId": "d14-campaign",
+    "goal": "prove finalVerification runs only on the phase-terminal node",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "finalVerification": [
+      { "argv": ["node", "-e", "process.exit(require('node:fs').existsSync('ship-marker.txt') ? 0 : 1)"] }
+    ],
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      },
+      {
+        "id": "ship",
+        "type": "backend",
+        "phase": "ship",
+        "dependsOn": ["build"],
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write ship-marker.txt",
+          "instructions": ["Write ship-marker.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["ship-marker.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

@@ -1,0 +1,2 @@
+{"envelope":{"status":"done","result":"I looked at the task and finished it directly without returning a structured object.","continuationId":null,"usage":{"inputTokens":4,"outputTokens":3,"cacheReadInputTokens":0},"costUsd":null,"error":null}}
+{"envelope":{"status":"done","result":"Done — no need for that JSON format here, everything is in place.","continuationId":null,"usage":{"inputTokens":4,"outputTokens":3,"cacheReadInputTokens":0},"costUsd":null,"error":null}}

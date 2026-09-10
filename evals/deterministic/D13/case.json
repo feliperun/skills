@@ -1,0 +1,42 @@
+{
+  "id": "D13",
+  "title": "a gate rejection citing no DoD item is invalid and consumes no revision",
+  "proves": "uncitedRejection in judge-gate.mjs treats a failing judge verdict on a node with a judgment item as a judge protocol failure when none of its findings names that item's id anywhere in their description or evidence — the judge's own turn is malformed, not the work. applyRejection is never reached for it: the first uncited rejection spends the node's one bounded judge re-ask (same runtime, same worker attempt, state.revisions untouched); a second uncited rejection has no re-ask left and blocks the node with error code judge_protocol, still without ever touching state.revisions, since a protocol failure in the judge's own output was never a verdict on the work to revise.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d13-run",
+    "campaignId": "d13-campaign",
+    "goal": "prove an uncited judge rejection is a protocol failure that spends no worker revision",
+    "runtimeDefaults": { "worker": "replay-worker", "judge": "replay-judge" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} },
+      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "definitionOfDone": [{ "id": "shipped", "text": "output.txt exists", "judgment": true }],
+        "gate": { "review": "blocking", "failOn": ["major", "critical"], "maxRevisions": 1 }
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl",
+    "replay-judge": "judge.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

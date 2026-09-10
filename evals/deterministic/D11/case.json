@@ -1,0 +1,45 @@
+{
+  "id": "D11",
+  "title": "an orphan running node with no process is adopted, not re-implemented",
+  "proves": "a node left status running with an invocation whose provider process is no longer alive, but whose stdout log already holds a complete done envelope, is recovered by recoverOrphan reading that persisted stream and adopting it (kind: adopted) rather than restarting the worker: the run finishes without ever dispatching a second invocation. This mirrors test/helpers.mjs's own recipe for the same scenario (used by the unit test 'resume adopts an orphaned worker result instead of repeating the work'): let a node complete for real, once, so its invocation's stdout log is a real finished replay-bin.mjs transcript, then rewind the node's own status back to running (as if the controller had died before it ever processed that already-finished invocation) and recreate the attempt worktree the earlier full completion had already sealed and removed, since the recovered result still has to be re-verified and re-sealed against a real workspace.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d11-run",
+    "campaignId": "d11-campaign",
+    "goal": "prove an orphaned running node with a finished stream is adopted, not re-dispatched",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    { "type": "run" },
+    { "type": "recreateAttemptWorktree", "node": "build" },
+    { "type": "rewindNodeToRunning", "node": "build" },
+    { "type": "resume" }
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [1] }
+}

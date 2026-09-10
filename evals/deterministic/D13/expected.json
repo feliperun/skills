@@ -1,0 +1,11 @@
+{
+  "nodes": {
+    "build": {
+      "status": "blocked",
+      "errorCode": "judge_protocol",
+      "revisions": 0,
+      "runtimeIds": ["replay-worker", "replay-judge", "replay-judge"],
+      "routingHistoryLength": 0
+    }
+  }
+}

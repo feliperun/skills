@@ -83,6 +83,8 @@ Step types:
 | `mkdirp` | `path` | `mkdirSync(path, {recursive: true})`, relative to the case workspace root |
 | `writeFile` | `path`, `content` | writes a file, relative to the case workspace root |
 | `writeLock` | `processStartToken?` | writes `controller.lock` directly (bypassing `acquire()`'s own exclusivity checks) for this process's own pid; `processStartToken` defaults to this process's real token (a genuinely live-looking lock) and may be overridden with any other string to plant a lock whose recorded token no longer matches the live process holding that pid — standing in for a controller pid later reused by an unrelated process |
+| `rewindNodeToRunning` | `node` | rewrites `nodes/<node>.json` back to `status: "running"`, `phase: "worker"`, `result: null`, `gate: null`, keeping everything else (in particular `invocations`) — the same rewind `test/helpers.mjs`'s `orphan()` does, standing in for a controller that died with this node's invocation already finished on disk but never processed |
+| `recreateAttemptWorktree` | `node` | when `nodes/<node>.json`'s `worktree.status` is `"removed"`, recreates that attempt's worktree on the existing attempt branch and updates the node's `worktree` to `"ready"` at the recreated path — the same recreation `test/helpers.mjs`'s `ensureAttemptWorktree()` does, needed before recovering an orphaned node whose prior integration already sealed and removed its worktree; a no-op otherwise |
 
 `env` overlays environment variables for the duration of that one step only
 (restored immediately after). `expectError` is a regular expression (string,

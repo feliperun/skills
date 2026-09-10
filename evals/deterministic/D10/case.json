@@ -1,0 +1,45 @@
+{
+  "id": "D10",
+  "title": "prose instead of JSON takes one repair reinvocation, then failover",
+  "proves": "a worker's final message that is plain prose rather than the required structured result JSON is a worker-result the runner cannot parse (extractJson finds no JSON object anywhere in it, so parseWorkerResult throws on the raw text) and applyInvalidWorkerResult treats it as repairable exactly once when the node is gated: the first prose reply consumes the node's one bounded repair, re-dispatching the same runtime with a retry prompt and no routing-history entry (isRepairable in backoff.mjs). A second prose reply from that same repair attempt is no longer repairable (revisions has caught up to maxRevisions), so it is settled as a protocol_failure and takes the runtime's declared failover edge instead of blocking, recording exactly one routing-history hop.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d10-run",
+    "campaignId": "d10-campaign",
+    "goal": "prove prose takes one bounded repair, then fails over",
+    "runtimeDefaults": { "worker": "replay-primary", "judge": "replay-judge" },
+    "runtimes": {
+      "replay-primary": { "driver": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
+      "replay-backup": { "driver": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} },
+      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+    },
+    "pollIntervalMs": 10,
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "definitionOfDone": [{ "id": "works", "text": "output.txt exists", "judgment": true }],
+        "gate": { "review": "blocking", "failOn": ["major", "critical"], "maxRevisions": 1 }
+      }
+    ]
+  },
+  "recordings": {
+    "replay-primary": "primary.jsonl",
+    "replay-backup": "backup.jsonl",
+    "replay-judge": "judge.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

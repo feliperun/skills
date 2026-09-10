@@ -1,0 +1,1 @@
+{"envelope":{"status":"done","result":"{\"verdict\":\"pass\",\"maxSeverity\":\"none\",\"summary\":\"output.txt is present\",\"findings\":[]}","continuationId":null,"usage":{"inputTokens":4,"outputTokens":1,"cacheReadInputTokens":0},"costUsd":null,"error":null}}
