@@ -56,5 +56,5 @@
   "recordings": {
     "replay-worker": "worker.jsonl"
   },
-  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+  "discriminator": { "type": "patchContractField", "path": ["nodes", 1, "dependsOn"], "remove": true }
 }

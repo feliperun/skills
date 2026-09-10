@@ -94,24 +94,36 @@ needing a second field in `expected.json` to describe the rejection.
 
 ### `discriminator`
 
-Every case must declare a `discriminator`: one mutation that, applied to the
-case's own `setup` steps, must make the case fail. A case whose expected
-outcome does not actually depend on some step it sets up proves nothing about
-that step — `--verify-discriminating` catches that by requiring the mutated
-run to fail.
+Every case must declare a `discriminator`: one mutation that must make the
+case fail. A case whose expected outcome does not actually depend on
+whatever the mutation touches proves nothing — `--verify-discriminating`
+catches that by requiring the mutated run to fail.
 
-The mutation is applied in memory to the normalized step list (defaulting to
-`[{"type": "run"}]` the same way an omitted `setup` does); it never touches a
-file on disk, versioned or otherwise.
+Every mutation is applied only in memory — to the normalized step list, to a
+fresh in-memory clone of the contract, or to a recording only after it has
+been copied into the case's temporary workspace — and never touches a file on
+disk, versioned or otherwise.
 
 | type | fields | effect |
 |---|---|---|
 | `removeSetupStep` | `indices` (non-empty array of step indices) | drops those steps before running the case |
+| `patchContractField` | `path` (non-empty array of object keys / array indices), and either `value` or `remove: true` | sets, or deletes, one field of the materialized contract before the run |
+| `patchRecordingErrorCode` | `runtime` (a key in the case's `recordings`), `code`, `index` (optional, defaults to `0`) | rewrites `envelope.error.code` on one line of that runtime's recording before it is copied into the workspace |
 
-Pick whichever indices, once missing, necessarily change the run's outcome —
-not merely indices that happen to exist. If a declared discriminator does not
-make its case fail, the case's `setup`, `contract`, or `expected.json` is
-wrong and needs fixing; the discriminator requirement itself does not bend.
+Pick a mutation that, once applied, necessarily changes the run's outcome —
+not merely one that happens to touch something that exists. If a declared
+discriminator does not make its case fail, the case's `setup`, `contract`, or
+`expected.json` is wrong and needs fixing; the discriminator requirement
+itself does not bend.
+
+`removeSetupStep` is rejected as invalid — not merely a failing mutation —
+when it would remove every `run`/`resume` step from the case's setup. A case
+with no step left to execute fails because nothing ran at all, not because of
+whatever the case claims to prove, which would let `--verify-discriminating`
+pass on a case that proves nothing. A case whose `setup` is a single `run`
+step (the default for an omitted `setup`) can never use `removeSetupStep` for
+this reason; reach for `patchContractField` or `patchRecordingErrorCode`
+instead, varying exactly the one value the case's `proves` claim turns on.
 
 ### `expected.json`
 

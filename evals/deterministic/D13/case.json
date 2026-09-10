@@ -38,5 +38,5 @@
     "replay-worker": "worker.jsonl",
     "replay-judge": "judge.jsonl"
   },
-  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+  "discriminator": { "type": "patchContractField", "path": ["nodes", 0, "definitionOfDone", 0, "id"], "value": "checklist" }
 }

@@ -156,15 +156,60 @@ function initializeGitRepo(workDir) {
 }
 
 /**
+ * Set or remove one field inside a contract, addressed by a path of object
+ * keys and array indices, in place.
+ *
+ * @param {Record<string, unknown>} contract
+ * @param {{path: (string|number)[], value?: unknown, remove?: boolean}} contractPatch
+ * @returns {void}
+ */
+function applyContractPatch(contract, { path, value, remove }) {
+  let target = /** @type {Record<string, unknown>} */ (contract);
+  for (const key of path.slice(0, -1)) {
+    target = /** @type {Record<string, unknown>} */ (/** @type {Record<string, unknown>} */ (target)[key]);
+    if (!target || typeof target !== "object") {
+      throw new Error(`discriminator "patchContractField" path ${JSON.stringify(path)} does not resolve inside the contract`);
+    }
+  }
+  const lastKey = /** @type {string|number} */ (path[path.length - 1]);
+  if (remove) delete target[lastKey];
+  else target[lastKey] = value;
+}
+
+/**
+ * Rewrite one recorded envelope's `error.code` inside a jsonl recording,
+ * leaving every other line untouched.
+ *
+ * @param {string} content
+ * @param {{index: number, code: string}} recordingPatch
+ * @returns {string}
+ */
+function patchRecordingErrorCode(content, { index, code }) {
+  const lines = content.split("\n").filter((line) => line.length > 0);
+  if (!Number.isInteger(index) || index < 0 || index >= lines.length) {
+    throw new Error(`discriminator "patchRecordingErrorCode" index ${index} is out of range for ${lines.length} recorded envelope(s)`);
+  }
+  const patched = lines.map((line, lineIndex) => {
+    if (lineIndex !== index) return line;
+    const record = JSON.parse(line);
+    if (!record.envelope?.error) throw new Error(`discriminator "patchRecordingErrorCode" line ${index} has no envelope.error to patch`);
+    record.envelope = { ...record.envelope, error: { ...record.envelope.error, code } };
+    return JSON.stringify(record);
+  });
+  return `${patched.join("\n")}\n`;
+}
+
+/**
  * Materialize one case's contract into a fresh temporary git repository, with
  * every recording copied in and every declared runtime's
  * `config["replay.recording"]` pointed at that copy.
  *
  * @param {string} caseDir
  * @param {Record<string, unknown>} spec
+ * @param {{contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: {runtime: string, index: number, code: string}|null}} [patch]
  * @returns {{workDir: string, contractPath: string, runDir: string, contract: Record<string, unknown>}}
  */
-function materializeCase(caseDir, spec) {
+function materializeCase(caseDir, spec, patch = {}) {
   const workDir = mkdtempSync(join(tmpdir(), `intent-factory-eval-${spec.id}-`));
   initializeGitRepo(workDir);
 
@@ -174,11 +219,16 @@ function materializeCase(caseDir, spec) {
 
   const contract = JSON.parse(JSON.stringify(spec.contract));
   delete contract.cwd;
+  if (patch.contractPatch) applyContractPatch(contract, patch.contractPatch);
   for (const [runtimeId, filename] of Object.entries(recordings)) {
     const source = join(caseDir, filename);
     if (!existsSync(source)) throw new Error(`case ${spec.id} declares recording ${filename} for runtime ${runtimeId}, but the file does not exist`);
     const dest = join(recordingsDir, filename);
-    copyFileSync(source, dest);
+    if (patch.recordingPatch && patch.recordingPatch.runtime === runtimeId) {
+      writeFileSync(dest, patchRecordingErrorCode(readFileSync(source, "utf8"), patch.recordingPatch));
+    } else {
+      copyFileSync(source, dest);
+    }
     const runtime = contract.runtimes?.[runtimeId];
     if (!runtime) throw new Error(`case ${spec.id} declares a recording for unknown runtime ${runtimeId}`);
     contract.runtimes[runtimeId] = { ...runtime, config: { ...(runtime.config ?? {}), "replay.recording": dest } };
@@ -416,16 +466,21 @@ function normalizedSteps(spec) {
 }
 
 /**
- * A discriminator names one mutation that must make its case fail. It is
- * applied to the normalized step list, never to a file on disk, so it can
- * never touch a versioned fixture.
+ * A discriminator names one mutation that must make its case fail. Step
+ * removal is applied to the normalized step list; the other mutation types
+ * are applied to a case's contract or a recording only in memory, once
+ * materialized into a fresh temporary workspace — never to a file on disk, so
+ * a discriminator can never touch a versioned fixture.
  *
- * @param {Record<string, unknown>[]} steps
+ * @param {Record<string, unknown>} spec
  * @param {Record<string, unknown>|undefined} discriminator
- * @returns {Record<string, unknown>[]}
+ * @returns {{steps: Record<string, unknown>[], contractPatch: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch: {runtime: string, index: number, code: string}|null}}
  */
-function applyDiscriminator(steps, discriminator) {
-  if (!discriminator || typeof discriminator !== "object") throw new Error("case has no discriminator block");
+function applyDiscriminator(spec, discriminator) {
+  const caseId = /** @type {string} */ (spec.id);
+  const steps = normalizedSteps(spec);
+  if (!discriminator || typeof discriminator !== "object") throw new Error(`case ${caseId} has no discriminator block`);
+
   if (discriminator.type === "removeSetupStep") {
     const indices = new Set(/** @type {number[]} */ (discriminator.indices ?? []));
     if (!indices.size) throw new Error(`discriminator "removeSetupStep" needs a non-empty "indices" array`);
@@ -434,14 +489,42 @@ function applyDiscriminator(steps, discriminator) {
         throw new Error(`discriminator "removeSetupStep" index ${index} is out of range for ${steps.length} step(s)`);
       }
     }
-    return steps.filter((_, index) => !indices.has(index));
+    const remaining = steps.filter((_, index) => !indices.has(index));
+    // A mutation that erases every step that actually invokes the runner
+    // makes the case fail because nothing ran at all, not because of
+    // whatever the case claims to prove — that passes --verify-discriminating
+    // for a trivial reason instead of a real one.
+    const hadExecutingStep = steps.some((step) => step.type === "run" || step.type === "resume");
+    const stillHasExecutingStep = remaining.some((step) => step.type === "run" || step.type === "resume");
+    if (hadExecutingStep && !stillHasExecutingStep) {
+      throw new Error(`case ${caseId}: discriminator "removeSetupStep" removes every "run"/"resume" step, leaving nothing to execute — pick a mutation that isolates what the case actually proves`);
+    }
+    return { steps: remaining, contractPatch: null, recordingPatch: null };
   }
+
+  if (discriminator.type === "patchContractField") {
+    const path = /** @type {(string|number)[]} */ (discriminator.path);
+    if (!Array.isArray(path) || path.length === 0) throw new Error(`discriminator "patchContractField" needs a non-empty "path" array`);
+    const remove = discriminator.remove === true;
+    if (!remove && !("value" in discriminator)) throw new Error(`discriminator "patchContractField" needs a "value" (or "remove": true)`);
+    return { steps, contractPatch: { path, value: discriminator.value, remove }, recordingPatch: null };
+  }
+
+  if (discriminator.type === "patchRecordingErrorCode") {
+    const runtime = discriminator.runtime;
+    const code = discriminator.code;
+    if (typeof runtime !== "string" || !runtime) throw new Error(`discriminator "patchRecordingErrorCode" needs a "runtime"`);
+    if (typeof code !== "string" || !code) throw new Error(`discriminator "patchRecordingErrorCode" needs a "code"`);
+    const index = typeof discriminator.index === "number" ? discriminator.index : 0;
+    return { steps, contractPatch: null, recordingPatch: { runtime, index, code } };
+  }
+
   throw new Error(`unknown discriminator type: ${discriminator.type}`);
 }
 
 /**
  * @param {{caseDir: string, spec: Record<string, unknown>, expected: Record<string, unknown>}} loaded
- * @param {{assertNoModel: boolean, stepsOverride?: Record<string, unknown>[]}} options
+ * @param {{assertNoModel: boolean, stepsOverride?: Record<string, unknown>[], patch?: {contractPatch?: {path: (string|number)[], value?: unknown, remove?: boolean}|null, recordingPatch?: {runtime: string, index: number, code: string}|null}}} options
  * @returns {Promise<{id: string, title: string, proves: string, ok: boolean, failures: string[]}>}
  */
 async function runCase({ caseDir, spec, expected }, options) {
@@ -459,7 +542,7 @@ async function runCase({ caseDir, spec, expected }, options) {
   }
 
   try {
-    const { workDir, contractPath, runDir, contract } = materializeCase(caseDir, spec);
+    const { workDir, contractPath, runDir, contract } = materializeCase(caseDir, spec, options.patch);
     const steps = options.stepsOverride ?? normalizedSteps(spec);
     for (const step of steps) await executeStep(/** @type {Record<string, unknown>} */ (step), { workDir, contractPath, runDir });
 
@@ -487,14 +570,18 @@ async function verifyDiscriminating(loaded) {
   const outcomes = [];
   for (const entry of loaded) {
     const id = /** @type {string} */ (entry.spec.id);
-    let stepsOverride;
+    let mutation;
     try {
-      stepsOverride = applyDiscriminator(normalizedSteps(entry.spec), /** @type {Record<string, unknown>|undefined} */ (entry.spec.discriminator));
+      mutation = applyDiscriminator(entry.spec, /** @type {Record<string, unknown>|undefined} */ (entry.spec.discriminator));
     } catch (error) {
       outcomes.push({ id, ok: false, failures: [error instanceof Error ? error.message : String(error)] });
       continue;
     }
-    const result = await runCase(entry, { assertNoModel: false, stepsOverride });
+    const result = await runCase(entry, {
+      assertNoModel: false,
+      stepsOverride: mutation.steps,
+      patch: { contractPatch: mutation.contractPatch, recordingPatch: mutation.recordingPatch },
+    });
     if (result.ok) {
       outcomes.push({ id, ok: false, failures: [`case still passes with its discriminator mutation (${JSON.stringify(entry.spec.discriminator)}) applied`] });
     } else {

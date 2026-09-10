@@ -37,5 +37,5 @@
   "recordings": {
     "replay-primary": "primary.jsonl"
   },
-  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+  "discriminator": { "type": "patchRecordingErrorCode", "runtime": "replay-primary", "code": "quota_exhausted" }
 }

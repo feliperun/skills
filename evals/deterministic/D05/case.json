@@ -38,5 +38,5 @@
     "replay-primary": "primary.jsonl",
     "replay-backup": "backup.jsonl"
   },
-  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+  "discriminator": { "type": "patchContractField", "path": ["runtimes", "replay-primary", "fallback"], "remove": true }
 }

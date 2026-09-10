@@ -41,5 +41,5 @@
     "replay-backup": "backup.jsonl",
     "replay-judge": "judge.jsonl"
   },
-  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+  "discriminator": { "type": "patchContractField", "path": ["nodes", 0, "gate", "maxRevisions"], "value": 3 }
 }
