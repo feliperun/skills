@@ -1,16 +1,23 @@
 {
   "id": "D01",
-  "title": "crash between the accepted capsule write and integration publication preserves the prior state",
-  "proves": "a controller killed right after a node's done-capsule is written but before the integration transaction finishes cleanup must, on resume, finish publishing that same accepted result instead of losing or re-running it",
+  "title": "crash after attempt verification but before integration publishes preserves the accepted result",
+  "proves": "a controller killed after the attempt is verified but before the integration transaction publishes the run ref, appends the accepted record and cleans up its worktrees must, on resume, finish that same transaction instead of losing it or re-running the worker",
   "contract": {
     "schemaVersion": 3,
     "contractVersion": "0.3.0",
     "id": "d01-run",
     "campaignId": "d01-campaign",
     "goal": "prove crash-then-resume preserves the accepted capsule",
-    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimeDefaults": {
+      "worker": "replay-worker"
+    },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+      "replay-worker": {
+        "driver": "replay",
+        "model": "replay-worker-model",
+        "vendor": "replay-worker-vendor",
+        "config": {}
+      }
     },
     "nodes": [
       {
@@ -20,13 +27,25 @@
         "taskPacket": {
           "mode": "execution",
           "objective": "write output.txt",
-          "instructions": ["Write output.txt"],
-          "readFiles": ["contract.json"],
-          "writeFiles": ["output.txt"],
+          "instructions": [
+            "Write output.txt"
+          ],
+          "readFiles": [
+            "contract.json"
+          ],
+          "writeFiles": [
+            "output.txt"
+          ],
           "symbols": [],
           "decisions": [],
           "nonGoals": [],
-          "verification": [{ "argv": ["true"] }]
+          "verification": [
+            {
+              "argv": [
+                "true"
+              ]
+            }
+          ]
         },
         "gate": false
       }
@@ -38,10 +57,19 @@
   "setup": [
     {
       "type": "run",
-      "env": { "INTENT_FACTORY_INTEGRATION_INTERRUPT": "before-ref" },
+      "env": {
+        "INTENT_FACTORY_INTEGRATION_INTERRUPT": "before-ref"
+      },
       "expectError": "integration interrupted at before-ref"
     },
-    { "type": "resume" }
+    {
+      "type": "resume"
+    }
   ],
-  "discriminator": { "type": "removeSetupStep", "indices": [1] }
+  "discriminator": {
+    "type": "removeSetupStep",
+    "indices": [
+      1
+    ]
+  }
 }
