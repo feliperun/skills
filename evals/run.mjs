@@ -42,7 +42,7 @@ const CLI_OPTIONS = {
 function usageError(message) {
   process.stderr.write(`${message}\n`);
   process.stderr.write(
-    "usage: evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--verify-discriminating] [--json]\n",
+    "usage: evals/run.mjs (--class deterministic | --case <id> | --verify-discriminating) [--assert-no-model] [--json]\n",
   );
   process.exitCode = 2;
   throw new UsageError(message);
@@ -465,7 +465,7 @@ async function main(argv) {
   const verifyDiscriminatingFlag = values["verify-discriminating"] === true;
   const asJson = values.json === true;
 
-  if (values.class === undefined && values.case === undefined) {
+  if (values.class === undefined && values.case === undefined && !verifyDiscriminatingFlag) {
     usageError("one of --class or --case is required");
     return;
   }
