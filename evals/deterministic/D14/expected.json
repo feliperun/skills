@@ -8,8 +8,8 @@
       "routingHistoryLength": 0
     },
     "ship": {
-      "status": "done",
-      "errorCode": null,
+      "status": "failed",
+      "errorCode": "verification_failed",
       "revisions": 0,
       "runtimeIds": ["replay-worker"],
       "routingHistoryLength": 0
