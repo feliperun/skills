@@ -168,7 +168,7 @@ test("a dsh runtime without a provider route is rejected before anything runs", 
   const value = fixture();
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
-  runtimes.solo = { driver: "dsh", model: "deepseek-flash", vendor: "deepseek", config: {} };
+  runtimes.solo = { driver: "dsh", model: "deepseek-flash", executable: "dsh", vendor: "deepseek", config: {} };
   value.runtimeDefaults = { worker: "solo" };
   const path = writeContract(directory, value);
   assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /config\.provider must be a non-empty string/u);
@@ -184,6 +184,7 @@ test("a dsh runtime with a provider route and an explicit vendor validates and r
     model: "deepseek-flash",
     reasoning: "high",
     sandbox: "workspace-write",
+    executable: "dsh",
     vendor: "deepseek",
     config: { provider: "deepseek-official" },
   };
