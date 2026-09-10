@@ -19,7 +19,8 @@ typecheck`). Schema version is `3`.
   "runtimeDefaults": { "worker": "flash", "judge": "sol" },
   "runtimes": {
     "flash": { "driver": "dsh", "model": "deepseek-flash", "reasoning": "high",
-      "vendor": "deepseek", "config": { "provider": "deepseek-official" } },
+      "vendor": "deepseek",
+      "config": { "provider": "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" } },
     "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
     "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
     "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
@@ -177,16 +178,24 @@ attempt) and is instead refused at execution; see Failover below.
   client that ships with this repository — `headless` is not used because it
   discards the usage the controller records. `config.provider` is required and
   names the harness route (`deepseek-official`); `model` and `reasoning` are
-  passed to the handshake verbatim. The harness catalogue exposes
-  `deepseek-flash` (DeepSeek-V41-Flash, its own default), `deepseek-v4-flash`,
-  `deepseek-v4-pro`, and an experimental vision variant; an id outside it is
-  not validated here and fails inside the harness. `sandbox` maps onto `DSH_PERMISSION_MODE`,
-  so the harness's own file-effect boundary and approval policy follow the
-  contract. Every attempt also loads the closed-packet profile
-  (`dsh-closed-packet.patch.yml`); `config.patch` stacks one more layer.
-  Executable override: `executable` or `INTENT_FACTORY_DSH_BIN`. No default
-  vendor, no continuation (`session/resume` exists on the ACP profile only),
-  and no native schema flag — the judge schema travels in the prompt.
+  passed to the handshake verbatim, so the ids and effort values are the
+  harness's, not this schema's. Its catalogue exposes `deepseek-flash`
+  (DeepSeek-V41-Flash, its own default), `deepseek-v4-flash`, `deepseek-v4-pro`,
+  and the experimental `deepseek-v4-flash-vision-exp`; an id outside it is not
+  validated here and fails inside the harness. The route authenticates with
+  `DEEPSEEK_API_KEY` from the launching environment; declaring
+  `config["api_key.env_key"]` names it for `preflight`, which is what turns a
+  missing credential into a failed check instead of a failed first attempt —
+  the harness reads the variable, not this driver. `sandbox` maps onto
+  `DSH_PERMISSION_MODE`; omitted, the harness keeps its own default
+  (`workspace-write`, with approvals no detached run can answer), so an attempt
+  that must write outside its worktree reports `blocked_context` until the
+  contract declares `danger-full-access`. Every attempt also loads the
+  closed-packet profile (`dsh-closed-packet.patch.yml`); `config.patch` stacks
+  one more layer. Executable override: `executable` or `INTENT_FACTORY_DSH_BIN`.
+  No default vendor, no continuation (`session/resume` exists on the ACP
+  profile only), and no native schema flag — the judge schema travels in the
+  prompt.
 - `exec-jsonl`: generic driver for a JSONL-protocol executable — one
   `run.request` on stdin, `run.started`/`message`/`run.completed`/
   `run.failed` on stdout. Set `executable` (or
