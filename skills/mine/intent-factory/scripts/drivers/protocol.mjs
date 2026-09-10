@@ -316,7 +316,7 @@ export function normalizeCodexResult(stdout, exitCode, signal, options = {}) {
  * @param {unknown} text
  * @returns {boolean}
  */
-function isVerdictCandidate(text) {
+export function isVerdictCandidate(text) {
   const candidate = extractJson(text);
   if (candidate === null) return false;
   try {

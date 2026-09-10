@@ -1,0 +1,42 @@
+# The closed-packet profile: what a worker or a judge that may inspect only the
+# paths its packet names actually needs.
+#
+# Measured on one closed packet (fix a function, verify with an exit code),
+# same model, against the unpatched profile: 60,994 prompt tokens across 6
+# model calls, versus 11,959 across 4 with every row below disabled. The
+# preamble is re-sent on each call, so the saving multiplies by the number of
+# steps a node takes, not by the number of nodes.
+#
+# Rows are disabled by loader id, never removed: the services behind them still
+# mount, so nothing that waits on them fails to activate.
+- id: tool-jobs
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: plan-mode
+  disabled: true
+# The packet is the instruction set: inheriting the repository's AGENTS.md
+# would hand a closed-packet worker rules nobody asked it to follow. In this
+# repository that file alone is ~2,500 prompt tokens per session.
+- id: agent-instructions
+  disabled: true

@@ -138,12 +138,12 @@ strongest runtime of a *different vendor* judges, persisted in
 `routing.assignments`; no admissible cross-vendor judge fails by name
 (`runtime_assignment_judge_unavailable`).
 
-`driver` is `claude`, `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`.
+`driver` is `claude`, `codex`, `agy`, `glm`, `dsh`, `exec-jsonl`, or `replay`.
 Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the driver
 name: an explicit `vendor`, else a provider-config override (a codex runtime
 with `config.model_provider: "deepseek"` is vendor `deepseek`), else the
 driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
-`glm`→zhipu); `replay`/`exec-jsonl` have no default and must declare
+`glm`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
 resolve to the same vendor, and does the same for every runtime in the
 worker's declared fallback chain (rejecting a cycle in that chain outright)
@@ -173,6 +173,17 @@ attempt) and is instead refused at execution; see Failover below.
   `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
 - `agy`: the installed `agy` CLI (or `INTENT_FACTORY_AGY_BIN`); optional
   `printTimeout`; omit `reasoning` for models without `--effort`.
+- `dsh`: the DeepSeek Harness, driven through its `sdk` JSON-RPC profile by a
+  client that ships with this repository — `headless` is not used because it
+  discards the usage the controller records. `config.provider` is required and
+  names the harness route (`deepseek-official`); `model` and `reasoning` are
+  passed to the handshake verbatim. `sandbox` maps onto `DSH_PERMISSION_MODE`,
+  so the harness's own file-effect boundary and approval policy follow the
+  contract. Every attempt also loads the closed-packet profile
+  (`dsh-closed-packet.patch.yml`); `config.patch` stacks one more layer.
+  Executable override: `executable` or `INTENT_FACTORY_DSH_BIN`. No default
+  vendor, no continuation (`session/resume` exists on the ACP profile only),
+  and no native schema flag — the judge schema travels in the prompt.
 - `exec-jsonl`: generic driver for a JSONL-protocol executable — one
   `run.request` on stdin, `run.started`/`message`/`run.completed`/
   `run.failed` on stdout. Set `executable` (or
