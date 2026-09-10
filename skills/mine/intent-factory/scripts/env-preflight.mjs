@@ -59,7 +59,7 @@ function git(dir, args) {
 }
 
 /** @param {NodeJS.ProcessEnv} env @returns {number} */
-function minFreeDiskBytes(env) {
+export function minFreeDiskBytes(env) {
   const raw = env.INTENT_FACTORY_MIN_FREE_DISK_BYTES;
   if (raw === undefined) return DEFAULT_MIN_FREE_DISK_BYTES;
   const parsed = Number(raw);

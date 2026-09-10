@@ -530,6 +530,40 @@ function comparePreflight(expectedPreflight, workDir) {
 }
 
 /**
+ * Compare a case's `gc` expectation against the actual `.runs/` directory
+ * listing and `.runs/gc.jsonl` after every `setup` step has run — the disk-
+ * pressure garbage collector (`disk-gc.mjs`) has no node snapshot of its own
+ * to read, since it can span (and remove) run directories no single node
+ * belongs to.
+ *
+ * @param {{removed?: string[], kept?: string[], events?: {path: string, reason: string}[]}} expectedGc
+ * @param {string} workDir
+ * @returns {string[]}
+ */
+function compareGc(expectedGc, workDir) {
+  const runsRoot = join(workDir, ".runs");
+  /** @type {string[]} */
+  const failures = [];
+  for (const id of expectedGc.removed ?? []) {
+    if (existsSync(join(runsRoot, id))) failures.push(`gc: expected ${id} to have been removed by garbage collection, but it still exists`);
+  }
+  for (const id of expectedGc.kept ?? []) {
+    if (!existsSync(join(runsRoot, id))) failures.push(`gc: expected ${id} to still exist, but it is gone`);
+  }
+  if (expectedGc.events !== undefined) {
+    const gcLogPath = join(runsRoot, "gc.jsonl");
+    const events = existsSync(gcLogPath)
+      ? readFileSync(gcLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      : [];
+    for (const expectedEvent of expectedGc.events) {
+      const match = events.some((event) => typeof event.path === "string" && event.path.endsWith(expectedEvent.path) && event.reason === expectedEvent.reason);
+      if (!match) failures.push(`gc.events: no gc.jsonl event matching ${JSON.stringify(expectedEvent)} (got ${JSON.stringify(events)})`);
+    }
+  }
+  return failures;
+}
+
+/**
  * Facts about integration recovery that live outside any single node's
  * snapshot: the run ref, the integration journal, and worktree cleanup.
  *
@@ -688,6 +722,7 @@ async function runCase({ caseDir, spec, expected }, options) {
     const failures = [
       ...Object.entries(expectedNodes).flatMap(([nodeId, expectedNode]) => compareNode(nodeId, expectedNode, runDir)),
       ...(expected.preflight ? comparePreflight(/** @type {Record<string, unknown>} */ (expected.preflight), workDir) : []),
+      ...(expected.gc ? compareGc(/** @type {{removed?: string[], kept?: string[], events?: {path: string, reason: string}[]}} */ (expected.gc), workDir) : []),
       ...compareIntegration(/** @type {Record<string, unknown>|undefined} */ (expected.integration), {
         repo: workDir,
         runDir,

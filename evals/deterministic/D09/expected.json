@@ -1,0 +1,17 @@
+{
+  "nodes": {
+    "build": {
+      "status": "done",
+      "errorCode": null,
+      "revisions": 0,
+      "runtimeIds": ["replay-worker"],
+      "routingHistoryLength": 0,
+      "integratedHead": true
+    }
+  },
+  "gc": {
+    "removed": ["old-run"],
+    "kept": ["d09-run", "campaigns"],
+    "events": [{ "path": "old-run", "reason": "enospc" }]
+  }
+}

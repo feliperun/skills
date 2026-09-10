@@ -144,6 +144,23 @@ case-insensitive); when present, the step's call must reject with a message
 matching it, or the case fails — this is how a case pins a crash without
 needing a second field in `expected.json` to describe the rejection.
 
+A case whose scenario is disk pressure never fills a real disk. `env` on a
+`run`/`resume` step instead sets one or both of:
+
+- `INTENT_FACTORY_SIMULATE_ENOSPC_MATCH` / `INTENT_FACTORY_SIMULATE_ENOSPC_COUNT`
+  — the next `COUNT` run-directory writes whose path contains `MATCH` fail
+  with a synthetic `ENOSPC` instead of actually writing (`disk-gc.mjs`'s
+  `writeRunTextWithDiskPressureRetry`, the only write `writeNode` makes).
+  `COUNT: "1"` proves a single ENOSPC recovers after one GC pass; `"2"`
+  proves a second one in a row never gets a second retry.
+- `INTENT_FACTORY_SIMULATE_GC_ROUNDS` — deterministically bounds how many
+  times the garbage collector's own "is there enough space now" check
+  reports "not yet" before reporting "enough", standing in for real free
+  space crossing the threshold. It never affects `environmentPreflight`'s own
+  disk check, which always reads real free space. The count is calls, not
+  removals: an eligible-run count of `n` needs `n + 1` to reclaim all of
+  them (see D09).
+
 ### `discriminator`
 
 Every case must declare a `discriminator`: one mutation that must make the
@@ -203,6 +220,11 @@ case's `proves` claim turns on.
   },
   "preflight": {
     "<runtime-id>": { "available": false, "exhaustedUntil": null, "reason": "insufficient_balance" }
+  },
+  "gc": {
+    "removed": ["<run-id-removed-by-garbage-collection>"],
+    "kept": ["<run-id-or-campaigns-that-must-survive>"],
+    "events": [{ "path": "<run-id>", "reason": "enospc" }]
   }
 }
 ```
@@ -241,6 +263,25 @@ entry (`{available, exhaustedUntil, reason}`) in the `preflight.json` a
 using this needs a `preflight` step in its `setup` — this section, not a
 `nodes` entry, is how a case pins the live probe's own classification for a
 runtime no `run`/`resume` step ever dispatches.
+
+`gc` checks facts about `skills/mine/intent-factory/scripts/disk-gc.mjs`'s
+disk-pressure garbage collector, which can remove (or must never remove) a
+run directory no single node's own snapshot describes — there is no `nodes`
+entry to check this against:
+
+- `removed` — an array of run ids (the last path segment under `.runs/`);
+  each must no longer exist on disk.
+- `kept` — an array of run ids, or `"campaigns"`; each must still exist on
+  disk. Always include the case's own current run id and `"campaigns"` here
+  when the scenario puts pressure on the collector, since those are the two
+  guards a regression would most plausibly break.
+- `events` — an array of `{path, reason}`; each must match one line of
+  `.runs/gc.jsonl` (`path` matched by suffix, `reason` matched exactly). A
+  case proving GC actually reclaimed something, not merely that a retry
+  happened to succeed, needs this: `removed` alone cannot tell a directory
+  GC deleted from one that was simply never created (see D09, whose
+  discriminator removes the setup steps that seed the reclaimable run and
+  therefore leaves `gc.jsonl` never written at all).
 
 ## Adding a case
 

@@ -74,6 +74,7 @@ import {
   writeTextAtomic,
 } from "./store.mjs";
 import { acquire as acquireLock, LockLostError, processStartToken } from "./lock.mjs";
+import { writeRunTextWithDiskPressureRetry } from "./disk-gc.mjs";
 import {
   captureWorkspaceSnapshot,
   captureWorkspaceScope,
@@ -3100,7 +3101,7 @@ export function writeNode(runDir, state, lock = null) {
   validateNodeSnapshot(state);
   const serialized = JSON.stringify(state);
   if (Buffer.byteLength(serialized, "utf8") > 128 * 1024) throw new Error("node snapshot exceeds 131072 bytes");
-  writeTextAtomic(join(runDir, "nodes", `${state.id}.json`), `${serialized}\n`);
+  writeRunTextWithDiskPressureRetry(runDir, join(runDir, "nodes", `${state.id}.json`), `${serialized}\n`);
 }
 
 /**

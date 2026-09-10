@@ -1,0 +1,52 @@
+{
+  "id": "D09",
+  "title": "ENOSPC on a run-directory write triggers garbage collection and the run resumes",
+  "proves": "writeNode's write goes through writeRunTextWithDiskPressureRetry (disk-gc.mjs): a write that fails with ENOSPC runs garbage collection once and retries, and the retry succeeds once GC has reclaimed enough space. A finished, unlocked, older run sitting under .runs/ is exactly the kind of directory GC may reclaim, and with INTENT_FACTORY_SIMULATE_GC_ROUNDS bounding the deterministic threshold stand-in to exactly the one candidate available, GC removes precisely that old run and logs it to gc.jsonl with reason enospc — never more than the minimum necessary. The two guards that matter most hold throughout: the run currently writing (d09-run) is never a GC candidate, and .runs/campaigns/, the durable handoff, is never even considered. The node itself completes normally (status done, one worker invocation, no routing hop recorded), since the retry-after-GC path is not a failover edge.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d09-run",
+    "campaignId": "d09-campaign",
+    "goal": "prove ENOSPC on a run-directory write triggers garbage collection once and the write resumes",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    { "type": "mkdirp", "path": ".runs/old-run/nodes" },
+    { "type": "writeFile", "path": ".runs/old-run/run.json", "content": "{\"startedAt\": \"2020-01-01T00:00:00.000Z\"}\n" },
+    { "type": "writeFile", "path": ".runs/old-run/nodes/legacy-node.json", "content": "{\"status\": \"done\"}\n" },
+    {
+      "type": "run",
+      "env": {
+        "INTENT_FACTORY_SIMULATE_ENOSPC_MATCH": "nodes/build.json",
+        "INTENT_FACTORY_SIMULATE_ENOSPC_COUNT": "1",
+        "INTENT_FACTORY_SIMULATE_GC_ROUNDS": "2"
+      }
+    }
+  ],
+  "discriminator": { "type": "removeSetupStep", "indices": [0, 1, 2] }
+}

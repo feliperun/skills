@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -17,6 +17,15 @@ import {
   timeVerificationCommands,
 } from "../scripts/env-preflight.mjs";
 import { validateContract } from "../scripts/contract.mjs";
+import {
+  DISK_PRESSURE_UNRECOVERABLE,
+  describeRuns,
+  runGarbageCollection,
+  selectGarbageCollectableRuns,
+  writeRunTextWithDiskPressureRetry,
+} from "../scripts/disk-gc.mjs";
+import { acquire as acquireLock } from "../scripts/lock.mjs";
+import { writeJsonAtomic } from "../scripts/store.mjs";
 
 const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 
@@ -288,4 +297,157 @@ test("verification timing warns before a command reaches its cap", () => {
   assert.equal(check.ok, false);
   assert.equal(check.advisory, true, "a command close to its cap is a warning, not a blocker");
   assert.match(check.detail, /exit 1/u, "a red command is reported, never failed on: a node may be what turns it green");
+});
+
+/**
+ * @param {string} runsDir
+ * @param {string} id
+ * @param {{startedAt?: string, status?: string}} [options]
+ * @returns {string}
+ */
+function makeRun(runsDir, id, options = {}) {
+  const runDir = join(runsDir, id);
+  mkdirSync(join(runDir, "nodes"), { recursive: true });
+  writeJsonAtomic(join(runDir, "run.json"), { startedAt: options.startedAt ?? new Date().toISOString() });
+  writeJsonAtomic(join(runDir, "nodes", "build.json"), { status: options.status ?? "done" });
+  return runDir;
+}
+
+test("garbage collection selection is pure: sorts oldest first and excludes every ineligible descriptor without touching disk", () => {
+  const descriptors = [
+    { path: "/runs/b", startedAt: "2026-01-02T00:00:00.000Z", hasActiveController: false, allNodesTerminal: true },
+    { path: "/runs/a", startedAt: "2026-01-01T00:00:00.000Z", hasActiveController: false, allNodesTerminal: true },
+    { path: "/runs/running", startedAt: "2025-12-31T00:00:00.000Z", hasActiveController: false, allNodesTerminal: false },
+    { path: "/runs/locked", startedAt: "2025-12-30T00:00:00.000Z", hasActiveController: true, allNodesTerminal: true },
+    { path: "/runs/current", startedAt: "2025-12-29T00:00:00.000Z", hasActiveController: false, allNodesTerminal: true },
+    { path: "/runs/unknown-age", startedAt: null, hasActiveController: false, allNodesTerminal: true },
+    { path: "/runs/campaigns", startedAt: "2025-01-01T00:00:00.000Z", hasActiveController: false, allNodesTerminal: true },
+  ];
+  const selected = selectGarbageCollectableRuns(descriptors, { currentRunDir: "/runs/current" });
+  assert.deepEqual(selected, ["/runs/a", "/runs/b"], "only the two ordinary, terminal, unlocked, non-current runs, oldest first");
+});
+
+test("describeRuns never even describes campaigns/ or archive/, whatever they contain", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-describe-"));
+  mkdirSync(join(runsDir, "campaigns", "camp-1"), { recursive: true });
+  writeJsonAtomic(join(runsDir, "campaigns", "run.json"), { startedAt: "2020-01-01T00:00:00.000Z" });
+  mkdirSync(join(runsDir, "campaigns", "nodes"), { recursive: true });
+  writeJsonAtomic(join(runsDir, "campaigns", "nodes", "build.json"), { status: "done" });
+  mkdirSync(join(runsDir, "archive"), { recursive: true });
+  writeJsonAtomic(join(runsDir, "archive", "run.json"), { startedAt: "2020-01-01T00:00:00.000Z" });
+  mkdirSync(join(runsDir, "archive", "nodes"), { recursive: true });
+  writeJsonAtomic(join(runsDir, "archive", "nodes", "build.json"), { status: "done" });
+  const ordinary = makeRun(runsDir, "ordinary-run", { startedAt: "2026-01-01T00:00:00.000Z" });
+
+  const descriptors = describeRuns(runsDir);
+  assert.deepEqual(descriptors.map((run) => run.path), [ordinary], "campaigns/ and archive/ are never described, even with a run-shaped run.json and nodes/ inside them");
+});
+
+test("garbage collection removes only the minimum necessary, oldest first, and never the active or current run, or campaigns", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-run-"));
+  mkdirSync(join(runsDir, "campaigns", "camp-1"), { recursive: true });
+  writeFileSync(join(runsDir, "campaigns", "camp-1", "campaign.json"), "{}\n");
+
+  const oldest = makeRun(runsDir, "oldest-run", { startedAt: "2026-01-01T00:00:00.000Z" });
+  const middle = makeRun(runsDir, "middle-run", { startedAt: "2026-01-02T00:00:00.000Z" });
+  const newest = makeRun(runsDir, "newest-run", { startedAt: "2026-01-03T00:00:00.000Z" });
+  const running = makeRun(runsDir, "running-run", { startedAt: "2025-12-31T00:00:00.000Z", status: "running" });
+  const locked = makeRun(runsDir, "locked-run", { startedAt: "2025-12-30T00:00:00.000Z" });
+  const lockHandle = acquireLock(locked, { pid: process.pid });
+  const current = makeRun(runsDir, "current-run", { startedAt: "2025-12-29T00:00:00.000Z" });
+
+  try {
+    // Reports "below threshold" for the first three checks (the initial gate,
+    // then before removing oldest and middle) and "above" from then on, so
+    // exactly two removals — the minimum this stub demands — must happen.
+    let calls = 0;
+    const isAboveThreshold = () => { calls += 1; return calls > 3; };
+    const { removed } = runGarbageCollection(runsDir, { currentRunDir: current, isAboveThreshold });
+
+    assert.deepEqual(removed, [oldest, middle], "removes the minimum necessary, strictly oldest first");
+    assert.equal(existsSync(oldest), false);
+    assert.equal(existsSync(middle), false);
+    assert.equal(existsSync(newest), true, "left alone: the threshold was already satisfied by then");
+    assert.equal(existsSync(running), true, "never removed: not every node is terminal");
+    assert.equal(existsSync(locked), true, "never removed: an active controller holds it");
+    assert.equal(existsSync(current), true, "never removed: it is the run currently writing");
+    assert.equal(existsSync(join(runsDir, "campaigns")), true, "never removed: the durable handoff");
+
+    const events = readFileSync(join(runsDir, "gc.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(events.map((event) => event.path), [oldest, middle], "one event per removal, in removal order");
+    for (const event of events) {
+      assert.equal(typeof event.at, "string");
+      assert.equal(event.reason, "enospc");
+    }
+  } finally {
+    lockHandle.release();
+  }
+});
+
+test("garbage collection does nothing once free space is already above the threshold", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-noop-"));
+  const onlyRun = makeRun(runsDir, "only-run", { startedAt: "2026-01-01T00:00:00.000Z" });
+  const { removed } = runGarbageCollection(runsDir, { isAboveThreshold: () => true });
+  assert.deepEqual(removed, []);
+  assert.equal(existsSync(onlyRun), true);
+  assert.equal(existsSync(join(runsDir, "gc.jsonl")), false, "no removal, so no event");
+});
+
+test("INTENT_FACTORY_SIMULATE_GC_ROUNDS deterministically bounds how many eligible runs the default threshold check lets through", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-simulate-rounds-"));
+  const oldest = makeRun(runsDir, "oldest-run", { startedAt: "2026-01-01T00:00:00.000Z" });
+  const newest = makeRun(runsDir, "newest-run", { startedAt: "2026-01-02T00:00:00.000Z" });
+  const previous = process.env.INTENT_FACTORY_SIMULATE_GC_ROUNDS;
+  try {
+    process.env.INTENT_FACTORY_SIMULATE_GC_ROUNDS = "0";
+    assert.deepEqual(runGarbageCollection(runsDir).removed, [], "0 rounds reports the threshold already satisfied");
+    assert.equal(existsSync(oldest), true);
+
+    process.env.INTENT_FACTORY_SIMULATE_GC_ROUNDS = "2";
+    assert.deepEqual(runGarbageCollection(runsDir).removed, [oldest], "one candidate needs candidates+1 = 2 rounds");
+    assert.equal(existsSync(oldest), false);
+    assert.equal(existsSync(newest), true, "the second candidate is never reached once satisfied");
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_SIMULATE_GC_ROUNDS; else process.env.INTENT_FACTORY_SIMULATE_GC_ROUNDS = previous;
+  }
+});
+
+test("a write that fails once with ENOSPC runs GC once and succeeds on retry", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-retry-recover-"));
+  const runDir = join(runsDir, "current-run");
+  mkdirSync(runDir, { recursive: true });
+  const target = join(runDir, "nodes", "build.json");
+  const previousMatch = process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH;
+  const previousCount = process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT;
+  process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH = "build.json";
+  process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT = "1";
+  try {
+    writeRunTextWithDiskPressureRetry(runDir, target, "hello\n");
+    assert.equal(readFileSync(target, "utf8"), "hello\n");
+    assert.equal(process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT, "0", "exactly one simulated failure was consumed");
+  } finally {
+    if (previousMatch === undefined) delete process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH; else process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH = previousMatch;
+    if (previousCount === undefined) delete process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT; else process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT = previousCount;
+  }
+});
+
+test("a second ENOSPC in a row after garbage collection stops the write visibly, never silently", () => {
+  const runsDir = mkdtempSync(join(tmpdir(), "disk-gc-retry-persist-"));
+  const runDir = join(runsDir, "current-run");
+  mkdirSync(runDir, { recursive: true });
+  const target = join(runDir, "nodes", "build.json");
+  const previousMatch = process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH;
+  const previousCount = process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT;
+  process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH = "build.json";
+  process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT = "2";
+  try {
+    assert.throws(
+      () => writeRunTextWithDiskPressureRetry(runDir, target, "hello\n"),
+      (/** @type {Error & {code?: string}} */ error) => error.code === DISK_PRESSURE_UNRECOVERABLE,
+    );
+    assert.equal(existsSync(target), false, "the write never landed");
+  } finally {
+    if (previousMatch === undefined) delete process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH; else process.env.INTENT_FACTORY_SIMULATE_ENOSPC_MATCH = previousMatch;
+    if (previousCount === undefined) delete process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT; else process.env.INTENT_FACTORY_SIMULATE_ENOSPC_COUNT = previousCount;
+  }
 });
