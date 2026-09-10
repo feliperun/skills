@@ -400,6 +400,7 @@ test("a second unparseable worker result takes the failover edge before it block
   const directory = mkdtempSync(join(tmpdir(), "runner-protocol-failover-"));
   const first = fakeCodex(directory, "prose-retry");
   const second = fakeCodex(directory, "prose-retry");
+  const judge = fakeCodex(directory, "prose-retry");
   const path = writeContract(directory, fixture({
     id: "protocol-failover-run",
     pollIntervalMs: 10,
@@ -407,7 +408,7 @@ test("a second unparseable worker result takes the failover edge before it block
     runtimes: {
       first: { driver: "codex", model: "first", executable: first, fallback: "second" },
       second: { driver: "codex", model: "second", executable: second },
-      judge: { driver: "codex", model: "judge", vendor: "openai-judge" },
+      judge: { driver: "codex", model: "judge", executable: judge, vendor: "openai-judge" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
   }));

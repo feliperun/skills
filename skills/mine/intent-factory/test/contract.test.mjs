@@ -72,7 +72,7 @@ function fixture(overrides = {}) {
     goal: "validate protocol",
     cwd: ".",
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimes: { worker: { driver: "codex", model: "test-model" } },
+    runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex" } },
     ...overrides,
     nodes: /** @type {Record<string, unknown>[]} */ (overrides.nodes ?? [{ id: "build", type: "backend", taskPacket: packet(), gate: false }]).map((node, index) => ({
       phase: `fixture-phase-${index}`,
@@ -170,7 +170,7 @@ test("validation rejects unknown fields at every protocol layer", () => {
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, maxCostUsd: 1 }] }, /nodes\[0\] has unexpected field maxCostUsd/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, budgetProfile: budgetProfile() }] }, /nodes\[0\] has unexpected field budgetProfile/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, progressPolicy: { graceSec: 0, intervalSec: 1, maxDryHeartbeats: 3 } }] }, /nodes\[0\] has unexpected field progressPolicy/u],
-    [{ runtimes: { worker: { driver: "codex", model: "m", typo: true } } }, /runtime worker has unexpected field typo/u],
+    [{ runtimes: { worker: { driver: "codex", model: "m", executable: "/nonexistent/codex", typo: true } } }, /runtime worker has unexpected field typo/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { typo: true } }] }, /nodes\[0\]\.gate has unexpected field typo/u],
   ];
   for (const [override, expected] of cases) {
@@ -192,7 +192,7 @@ test("validation rejects unsupported protocol versions and stale packet hashes",
 // fixture's single "worker" runtime cannot serve both roles once the gate is
 // enabled, so every gate-enabled fixture below adds a cross-vendor judge.
 const gatedRuntimes = {
-  runtimes: { worker: { driver: "codex", model: "test-model" }, judge: { driver: "claude", model: "judge-model" } },
+  runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex" }, judge: { driver: "claude", model: "judge-model", executable: "/nonexistent/claude" } },
   runtimeDefaults: { worker: "worker", judge: "judge" },
 };
 
@@ -447,11 +447,11 @@ test("validation rejects invalid runtime field types and routing match values", 
     ["requiredCapabilities", []],
   ];
   for (const [field, value] of runtimeCases) {
-    const { path } = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", [field]: value } } });
+    const { path } = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex", [field]: value } } });
     assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), new RegExp(`runtime worker\\.${field}`));
   }
 
-  const unknownFallback = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", fallback: "missing" } } });
+  const unknownFallback = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex", fallback: "missing" } } });
   assert.throws(
     () => validateContract(JSON.parse(readFileSync(unknownFallback.path, "utf8")), unknownFallback.path),
     /runtime worker\.fallback.*unknown runtime/u,
@@ -984,8 +984,8 @@ test("replayPolicy defaults to safe and accepts only its enumerated values", () 
 test("runtime fallback is a declared one-hop edge and rejects self-loops", () => {
   const { path } = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker", fallback: "backup" },
-      backup: { driver: "codex", model: "backup" },
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "backup" },
+      backup: { driver: "codex", model: "backup", executable: "/nonexistent/codex" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
   });
@@ -996,7 +996,7 @@ test("runtime fallback is a declared one-hop edge and rejects self-loops", () =>
 
   const invalid = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker", fallback: "worker" },
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
   });
@@ -1007,7 +1007,7 @@ test("a gate-enabled node whose worker and judge runtime share a vendor is rejec
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: {
-      worker: { driver: "codex", model: "worker" },
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1021,8 +1021,8 @@ test("a codex runtime with a custom model_provider resolves to that provider's v
   const { path } = writeFixture({
     runtimeDefaults: { worker: "deepseek-flash", judge: "opus" },
     runtimes: {
-      "deepseek-flash": { driver: "codex", model: "deepseek-v4-flash", config: { model_provider: "deepseek" } },
-      opus: { driver: "claude", model: "opus" },
+      "deepseek-flash": { driver: "codex", model: "deepseek-v4-flash", executable: "/nonexistent/codex", config: { model_provider: "deepseek" } },
+      opus: { driver: "claude", model: "opus", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
