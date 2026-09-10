@@ -1,0 +1,43 @@
+{
+  "id": "D02",
+  "title": "a second concurrent resume is rejected by the controller lock",
+  "proves": "resume acquires the run's controller.lock before touching any node state; a resume attempted while that lock is already held by a live process is rejected outright, and no node state changes as a result. The concurrent holder is synthesized directly (this process takes the lock for itself) rather than spawned as a second OS process, since the point under test is the lock check itself, not process scheduling.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d02-run",
+    "campaignId": "d02-campaign",
+    "goal": "prove a concurrent resume is rejected by the controller lock",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    { "type": "run" },
+    { "type": "holdControllerLock" },
+    { "type": "resume", "expectError": "controller lock" }
+  ]
+}

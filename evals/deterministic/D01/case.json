@@ -1,0 +1,46 @@
+{
+  "id": "D01",
+  "title": "crash between the accepted capsule write and integration publication preserves the prior state",
+  "proves": "a controller killed right after a node's done-capsule is written but before the integration transaction finishes cleanup must, on resume, finish publishing that same accepted result instead of losing or re-running it",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d01-run",
+    "campaignId": "d01-campaign",
+    "goal": "prove crash-then-resume preserves the accepted capsule",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    {
+      "type": "run",
+      "env": { "INTENT_FACTORY_INTEGRATION_INTERRUPT": "after-state" },
+      "expectError": "integration interrupted after node state write"
+    },
+    { "type": "resume" }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "D16",
+  "title": "the candidate worktree inherits the same environment as the attempt",
+  "proves": "pins the regression fixed in ce675f9: the integration candidate worktree is verified separately from the attempt worktree, and only the attempt used to get node_modules linked in. A verification command that shells out to something under node_modules therefore passed in the attempt and failed in the candidate, and the failure read as the node's own defect rather than a missing install. Setup creates a repository-level node_modules directory (fixed content, no npm install) and the node's verification command checks, in whichever worktree it runs, that a file under node_modules is reachable; with the fix this passes identically in both worktrees on the first attempt.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d16-run",
+    "campaignId": "d16-campaign",
+    "goal": "prove the integration candidate worktree inherits the attempt's environment",
+    "runtimeDefaults": { "worker": "replay-worker" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [
+            { "argv": ["node", "-e", "process.exit(require('node:fs').existsSync('node_modules/marker-package/index.js') ? 0 : 1)"] }
+          ]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    { "type": "mkdirp", "path": "node_modules/marker-package" },
+    { "type": "writeFile", "path": "node_modules/marker-package/index.js", "content": "module.exports = {};\n" },
+    { "type": "run" }
+  ]
+}
