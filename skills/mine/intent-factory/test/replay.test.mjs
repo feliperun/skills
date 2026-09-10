@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acknowledgeJournalEvent, campaignDir, readJournal } from "../scripts/campaign.mjs";
-import { driverCapabilities, normalizeProviderResult, providerCommand } from "../scripts/drivers/index.mjs";
+import { driverCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/drivers/index.mjs";
 import { liveInputTokens, liveSessionMetrics, liveUsage } from "../scripts/drivers/exec-jsonl.mjs";
 import { replayDriver } from "../scripts/drivers/replay.mjs";
 import { JUDGE_SCHEMA } from "../scripts/lib.mjs";
@@ -161,6 +161,58 @@ test("version probe and live preflight bypass never consume the recording", asyn
   });
   assert.equal(readFileSync(cursorPath, "utf8"), "0\n", "the preflight answer must not advance the cursor");
   assert.equal(existsSync(`${recording}.invocations.jsonl`), false);
+});
+
+test("replay.probe config carries a simulated version-probe outcome to --replay-probe, distinct reasons for balance and quota", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "replay-probe-"));
+
+  assert.deepEqual(replayDriver.versionArgs({ driver: "replay", model: "m" }), ["--version"]);
+  const balanceArgs = replayDriver.versionArgs({
+    driver: "replay",
+    model: "m",
+    config: { "replay.probe": { exitCode: 1, stderr: "Error: Insufficient Balance" } },
+  });
+  assert.deepEqual(balanceArgs, ["--version", "--replay-probe", JSON.stringify({ exitCode: 1, stderr: "Error: Insufficient Balance" })]);
+  assert.throws(
+    () => replayDriver.versionArgs({ driver: "replay", model: "m", config: { "replay.probe": "not-an-object" } }),
+    /replay\.probe.*must be an object/u,
+  );
+
+  const balance = await runBin({ args: balanceArgs, cwd: directory });
+  assert.equal(balance.code, 1);
+  assert.match(balance.stderr, /Insufficient Balance/u);
+
+  const quotaArgs = replayDriver.versionArgs({
+    driver: "replay",
+    model: "m",
+    config: { "replay.probe": { exitCode: 1, stderr: "Rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00" } },
+  });
+  const quota = await runBin({ args: quotaArgs, cwd: directory });
+  assert.equal(quota.code, 1);
+  assert.match(quota.stderr, /reset at 2026-01-01/u);
+
+  const balanceProbe = await probeRuntime({
+    driver: "replay",
+    model: "m",
+    executable: bin,
+    config: { "replay.probe": { exitCode: 1, stderr: "Error: Insufficient Balance" } },
+  });
+  assert.deepEqual(balanceProbe.availability, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
+
+  const quotaProbe = await probeRuntime({
+    driver: "replay",
+    model: "m",
+    executable: bin,
+    config: { "replay.probe": { exitCode: 1, stderr: "Rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00" } },
+  });
+  assert.deepEqual(quotaProbe.availability, { available: false, exhaustedUntil: "2026-01-01T00:00:00.000Z", reason: "quota_exhausted" });
+
+  const missingProbe = await probeRuntime({
+    driver: "replay",
+    model: "m",
+    executable: join(directory, "does-not-exist-replay-bin"),
+  });
+  assert.equal(missingProbe.availability?.reason, "not_found");
 });
 
 test("consumes recording lines strictly in order through the cursor sidecar", async () => {

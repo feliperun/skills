@@ -84,6 +84,16 @@ whose scenario turns on a reset landing inside a window measured from
 whenever the suite happens to run (see D04's `primary.jsonl`); an absolute
 timestamp works too when the exact instant does not matter to the case.
 
+A recording only stands in for a prompt invocation — the live version probe
+(`probeRuntime`, run once per declared runtime whenever a contract leaves a
+role's runtime to be composed) never touches it. A case whose scenario turns
+on that probe's own classification (e.g. distinguishing an insufficient-
+balance stop from a quota stop from a missing CLI) instead sets a runtime's
+`config["replay.probe"]` to `{"exitCode": <int>, "stderr": "<text>"}`
+directly in `case.json`; the replay driver carries it to `replay-bin.mjs` as
+a `--replay-probe` argument for the `--version` invocation only, so it never
+touches or consumes a recording (see D06).
+
 ### `case.json`
 
 ```jsonc
@@ -126,6 +136,7 @@ Step types:
 | `writeLock` | `processStartToken?` | writes `controller.lock` directly (bypassing `acquire()`'s own exclusivity checks) for this process's own pid; `processStartToken` defaults to this process's real token (a genuinely live-looking lock) and may be overridden with any other string to plant a lock whose recorded token no longer matches the live process holding that pid — standing in for a controller pid later reused by an unrelated process |
 | `rewindNodeToRunning` | `node` | rewrites `nodes/<node>.json` back to `status: "running"`, `phase: "worker"`, `result: null`, `gate: null`, keeping everything else (in particular `invocations`) — the same rewind `test/helpers.mjs`'s `orphan()` does, standing in for a controller that died with this node's invocation already finished on disk but never processed |
 | `recreateAttemptWorktree` | `node` | when `nodes/<node>.json`'s `worktree.status` is `"removed"`, recreates that attempt's worktree on the existing attempt branch and updates the node's `worktree` to `"ready"` at the recreated path — the same recreation `test/helpers.mjs`'s `ensureAttemptWorktree()` does, needed before recovering an orphaned node whose prior integration already sealed and removed its worktree; a no-op otherwise |
+| `preflight` | — | calls `preflightContract(contractPath, {static: true})` — the same static, no-model probe the `preflight` CLI command runs, one `probeRuntime` call per reachable runtime, including every candidate of a role a contract leaves for the factory to compose — and writes the returned array to `preflight.json` in the case workspace root. Unlike `run`/`resume`, this never throws when a reachable runtime cannot be probed; a case whose point is exactly that a bad runtime is classified, not that it blocks a run, uses this instead (see D06) |
 
 `env` overlays environment variables for the duration of that one step only
 (restored immediately after). `expectError` is a regular expression (string,
@@ -189,6 +200,9 @@ case's `proves` claim turns on.
       "attempts": [{ "node": "<node-id>", "attempt": 1 }],
       "candidate": true
     }
+  },
+  "preflight": {
+    "<runtime-id>": { "available": false, "exhaustedUntil": null, "reason": "insufficient_balance" }
   }
 }
 ```
@@ -220,6 +234,13 @@ own after-the-fact bookkeeping:
   worktree must no longer exist on disk.
 - `worktreesAbsent.candidate` — when `true`, the run's `.candidate` worktree
   must no longer exist on disk.
+
+`preflight` checks a map from runtime id to that runtime's exact `availability`
+entry (`{available, exhaustedUntil, reason}`) in the `preflight.json` a
+`preflight` setup step wrote; only the named runtime ids are checked. A case
+using this needs a `preflight` step in its `setup` — this section, not a
+`nodes` entry, is how a case pins the live probe's own classification for a
+runtime no `run`/`resume` step ever dispatches.
 
 ## Adding a case
 

@@ -16,7 +16,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { runContract, resumeRun } from "../skills/mine/intent-factory/scripts/runner.mjs";
+import { preflightContract, runContract, resumeRun } from "../skills/mine/intent-factory/scripts/runner.mjs";
 import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../skills/mine/intent-factory/scripts/lock.mjs";
 import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs";
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
@@ -421,6 +421,16 @@ async function executeStep(step, context) {
     }
     return;
   }
+  if (type === "preflight") {
+    // The static preflight probe (probeRuntime, never a recording) reports
+    // every reachable runtime's own availability and never throws on a bad
+    // one — unlike run/resume, which refuse to dispatch at all when any
+    // reachable runtime cannot be probed. Written to a fixed path so a case
+    // with no run/resume step at all can still assert on it.
+    const results = await preflightContract(context.contractPath, { static: true });
+    writeFileSync(join(context.workDir, "preflight.json"), JSON.stringify(results, null, 2));
+    return;
+  }
   if (type === "mkdirp") {
     mkdirSync(safeJoin(context.workDir, /** @type {string} */ (step.path)), { recursive: true });
     return;
@@ -485,6 +495,35 @@ function compareNode(nodeId, expectedNode, runDir) {
       failures.push(`node ${nodeId}.integratedHead: expected null, got ${JSON.stringify(integratedHead)}`);
     } else if (typeof expectedNode.integratedHead === "string" && integratedHead !== expectedNode.integratedHead) {
       failures.push(`node ${nodeId}.integratedHead: expected ${JSON.stringify(expectedNode.integratedHead)}, got ${JSON.stringify(integratedHead)}`);
+    }
+  }
+  return failures;
+}
+
+/**
+ * Compare a case's `preflight` expectation against the `preflight.json` a
+ * `preflight` setup step wrote (see `executeStep`) — one static probe result
+ * per reachable runtime, keyed by runtime id.
+ *
+ * @param {Record<string, unknown>} expectedPreflight
+ * @param {string} workDir
+ * @returns {string[]}
+ */
+function comparePreflight(expectedPreflight, workDir) {
+  const path = join(workDir, "preflight.json");
+  if (!existsSync(path)) {
+    return [`preflight: no preflight.json was written; the case needs a "preflight" setup step`];
+  }
+  const results = /** @type {{id: string|null, availability?: {available: boolean, exhaustedUntil: string|null, reason: string}}[]} */ (
+    JSON.parse(readFileSync(path, "utf8"))
+  );
+  const byId = Object.fromEntries(results.map((entry) => [entry.id, entry]));
+  /** @type {string[]} */
+  const failures = [];
+  for (const [runtimeId, expectedEntry] of Object.entries(expectedPreflight)) {
+    const actualEntry = byId[runtimeId]?.availability ?? null;
+    if (JSON.stringify(actualEntry) !== JSON.stringify(expectedEntry)) {
+      failures.push(`preflight.${runtimeId}.availability: expected ${JSON.stringify(expectedEntry)}, got ${JSON.stringify(actualEntry)}`);
     }
   }
   return failures;
@@ -648,6 +687,7 @@ async function runCase({ caseDir, spec, expected }, options) {
     const expectedNodes = /** @type {Record<string, Record<string, unknown>>} */ (expected.nodes ?? {});
     const failures = [
       ...Object.entries(expectedNodes).flatMap(([nodeId, expectedNode]) => compareNode(nodeId, expectedNode, runDir)),
+      ...(expected.preflight ? comparePreflight(/** @type {Record<string, unknown>} */ (expected.preflight), workDir) : []),
       ...compareIntegration(/** @type {Record<string, unknown>|undefined} */ (expected.integration), {
         repo: workDir,
         runDir,

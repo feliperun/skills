@@ -43,9 +43,23 @@ export const replayDriver = {
       ?? fileURLToPath(new URL("./replay-bin.mjs", import.meta.url));
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /**
+   * A recording only stands in for a prompt invocation; the live version
+   * probe (`probeRuntime`) never touches it, so a deterministic case that
+   * needs to prove a probe's own balance/quota/missing-CLI classification
+   * declares `config["replay.probe"]` instead — carried to replay-bin.mjs as
+   * a `--replay-probe` argument, the same way a recorded envelope carries
+   * `error.resetAt` to prove a reset instant.
+   *
+   * @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]}
+   */
   versionArgs(runtime) {
-    return runtime.versionArgs ?? ["--version"];
+    const probe = runtime.config?.["replay.probe"];
+    if (probe === undefined) return runtime.versionArgs ?? ["--version"];
+    if (!probe || typeof probe !== "object" || Array.isArray(probe)) {
+      throw new TypeError('replay runtime config["replay.probe"] must be an object');
+    }
+    return ["--version", "--replay-probe", JSON.stringify(probe)];
   },
 
   parseVersion,

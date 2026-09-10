@@ -380,6 +380,29 @@ test("preflight still probes and reports version when an environment variable is
   }
 });
 
+test("preflight classifies a non-zero exit by its stderr text: balance, quota with reset, and a missing binary", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-driver-availability-"));
+
+  const balanceExecutable = join(directory, "balance-wrapper.mjs");
+  writeFileSync(balanceExecutable, "#!/usr/bin/env node\nprocess.stderr.write('Error: Insufficient Balance\\n');\nprocess.exit(1);\n");
+  chmodSync(balanceExecutable, 0o755);
+  const balance = await probeRuntime({ id: "balance-runtime", driver: "exec-jsonl", model: "m", executable: balanceExecutable }, { cwd: directory });
+  assert.equal(balance.ok, false);
+  assert.deepEqual(balance.availability, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
+
+  const quotaExecutable = join(directory, "quota-wrapper.mjs");
+  writeFileSync(quotaExecutable, "#!/usr/bin/env node\nprocess.stderr.write('Error: rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00\\n');\nprocess.exit(1);\n");
+  chmodSync(quotaExecutable, 0o755);
+  const quota = await probeRuntime({ id: "quota-runtime", driver: "exec-jsonl", model: "m", executable: quotaExecutable }, { cwd: directory });
+  assert.equal(quota.ok, false);
+  assert.deepEqual(quota.availability, { available: false, exhaustedUntil: "2026-01-01T00:00:00.000Z", reason: "quota_exhausted" });
+
+  const missing = await probeRuntime({ id: "missing-runtime", driver: "exec-jsonl", model: "m", executable: join(directory, "does-not-exist") }, { cwd: directory });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.availability?.reason, "not_found");
+  assert.equal(missing.availability?.exhaustedUntil, null);
+});
+
 test("generic exec-jsonl rejects unknown fields, bad ordering, and multiple terminals", () => {
   const valid = { schemaVersion: 1, type: "run.completed", result: "ok" };
   /** @type {[unknown, RegExp][]} */

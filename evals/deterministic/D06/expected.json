@@ -1,0 +1,8 @@
+{
+  "preflight": {
+    "replay-worker-balance": { "available": false, "exhaustedUntil": null, "reason": "insufficient_balance" },
+    "replay-worker-quota": { "available": false, "exhaustedUntil": "2099-01-01T00:00:00.000Z", "reason": "quota_exhausted" },
+    "replay-worker-missing": { "available": false, "exhaustedUntil": null, "reason": "not_found" },
+    "replay-worker-ready": { "available": true, "exhaustedUntil": null, "reason": "ready" }
+  }
+}

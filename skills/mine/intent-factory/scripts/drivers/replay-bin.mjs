@@ -271,6 +271,25 @@ function containmentProblem(path, workspace) {
 
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
+  const probeArg = argValue(args, "--replay-probe");
+  if (probeArg !== null) {
+    /** @type {unknown} */
+    let probe;
+    try {
+      probe = JSON.parse(probeArg);
+    } catch {
+      fail("--replay-probe must be valid JSON");
+    }
+    if (!probe || typeof probe !== "object" || Array.isArray(probe)) {
+      fail("--replay-probe must be a JSON object");
+    }
+    const record = /** @type {Record<string, unknown>} */ (probe);
+    if (typeof record.stderr === "string" && record.stderr) process.stderr.write(`${record.stderr}\n`);
+    const exitCode = typeof record.exitCode === "number" && Number.isInteger(record.exitCode) && record.exitCode >= 0 && record.exitCode <= 255
+      ? record.exitCode
+      : 1;
+    process.exit(exitCode);
+  }
   process.stdout.write("replay 1.0.0\n");
   process.exit(0);
 }

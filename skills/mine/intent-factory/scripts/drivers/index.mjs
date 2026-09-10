@@ -199,19 +199,39 @@ export function normalizeProviderAvailability(runtimeOrDriver, response, exitCod
   const message = typeof error?.message === "string" ? error.message : "";
   const text = `${code} ${message}`;
   if (envelope.status === "done" || envelope.status === "no-op") return { available: true, exhaustedUntil: null, reason: "ready" };
+  const classified = classifyAvailabilityText(text);
   // A hard balance stop (DeepSeek's 402 "Insufficient Balance") has no reset
   // instant to report, unlike quota_exhausted, so it must be classified before
   // that branch even though its text never matches the quota pattern.
+  if (classified?.reason === "insufficient_balance") return classified;
+  if (envelope.status === "exhausted" || classified?.reason === "quota_exhausted") {
+    return { available: false, exhaustedUntil: resetTimestamp(envelope.exhaustedUntil ?? error?.resetAt ?? message), reason: code || "quota_exhausted" };
+  }
+  if (classified?.reason === "authentication_failed") return classified;
+  return { available: false, exhaustedUntil: null, reason: code || "provider_unavailable" };
+}
+
+/**
+ * Classify raw provider-produced text (a structured envelope's `error.code
+ * error.message`, or a probe's raw stderr on a non-zero exit) into the same
+ * insufficient-balance/quota/authentication reasons `normalizeProviderAvailability`
+ * recognizes. Shared so a CLI-missing exit and a raw stderr balance/quota
+ * message are classified by one set of patterns, never two drifting copies.
+ *
+ * @param {string} text
+ * @returns {{available: false, exhaustedUntil: string|null, reason: string}|null} null when text names none of the known patterns
+ */
+function classifyAvailabilityText(text) {
   if (/insufficient balance/iu.test(text) || /\b402\b/u.test(text)) {
     return { available: false, exhaustedUntil: null, reason: "insufficient_balance" };
   }
-  if (envelope.status === "exhausted" || /quota|rate.?limit|usage limit|limit exhausted|1310/iu.test(text)) {
-    return { available: false, exhaustedUntil: resetTimestamp(envelope.exhaustedUntil ?? error?.resetAt ?? message), reason: code || "quota_exhausted" };
+  if (/quota|rate.?limit|usage limit|limit exhausted|1310/iu.test(text)) {
+    return { available: false, exhaustedUntil: resetTimestamp(text), reason: "quota_exhausted" };
   }
   if (/auth|credential|unauthori[sz]ed|forbidden|invalid.*(?:key|token)|(?:api|access) key|login/iu.test(text)) {
     return { available: false, exhaustedUntil: null, reason: "authentication_failed" };
   }
-  return { available: false, exhaustedUntil: null, reason: code || "provider_unavailable" };
+  return null;
 }
 
 /** @param {unknown} value @returns {string|null} */
@@ -364,7 +384,7 @@ export function probeRuntime(runtime, options = {}) {
       if (signal || exitCode !== 0) {
         finish({
           ...withVersion,
-          availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
+          availability: classifyAvailabilityText(stderr) ?? { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
           detail: `${identity(version)} · ${[missingEnvironmentDetail, lastLine(stderr) ?? `${executable} exited with code ${exitCode}`].filter(Boolean).join(" · ")}`,
         });
         return;

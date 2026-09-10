@@ -1,0 +1,64 @@
+{
+  "id": "D06",
+  "title": "the live probe distinguishes insufficient balance from quota exhaustion and a missing CLI",
+  "proves": "preflightContract's static probe (probeRuntime, never a recording) runs once per reachable runtime, and normalizeProviderAvailability's shared classifier gives each of three unavailable runtimes its own reason: replay-worker-balance's version probe exits non-zero with 'Insufficient Balance' in stderr and is classified insufficient_balance with no reset instant, because waiting never resolves a balance stop; replay-worker-quota's probe exits non-zero naming a future reset instant and is classified quota_exhausted with that instant parsed into exhaustedUntil; replay-worker-missing's executable does not exist on disk at all and is classified not_found, the CLI-absent case, distinct from either provider stop; replay-worker-ready's probe succeeds and is classified ready. All four are reachable because the contract's only node leaves its worker role for the factory to compose, so reachableRuntimes lists every declared runtime as a composition candidate.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d06-run",
+    "campaignId": "d06-campaign",
+    "goal": "prove the live probe classifies insufficient balance, quota exhaustion, and a missing CLI as three distinct reasons",
+    "runtimes": {
+      "replay-worker-balance": {
+        "driver": "replay",
+        "model": "replay-worker-balance-model",
+        "vendor": "replay-worker-balance-vendor",
+        "config": { "replay.probe": { "exitCode": 1, "stderr": "Error: Insufficient Balance" } }
+      },
+      "replay-worker-quota": {
+        "driver": "replay",
+        "model": "replay-worker-quota-model",
+        "vendor": "replay-worker-quota-vendor",
+        "config": { "replay.probe": { "exitCode": 1, "stderr": "Rate limit exceeded. Your limit will reset at 2099-01-01 00:00:00" } }
+      },
+      "replay-worker-missing": {
+        "driver": "replay",
+        "model": "replay-worker-missing-model",
+        "vendor": "replay-worker-missing-vendor",
+        "executable": "/nonexistent/replay-missing-binary"
+      },
+      "replay-worker-ready": {
+        "driver": "replay",
+        "model": "replay-worker-ready-model",
+        "vendor": "replay-worker-ready-vendor",
+        "config": {}
+      }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {},
+  "setup": [{ "type": "preflight" }],
+  "discriminator": {
+    "type": "patchContractField",
+    "path": ["runtimes", "replay-worker-balance", "config", "replay.probe", "stderr"],
+    "value": "Rate limit exceeded. Your limit will reset at 2099-01-01 00:00:00"
+  }
+}
