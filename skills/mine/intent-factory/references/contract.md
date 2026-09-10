@@ -8,7 +8,7 @@ typecheck`). Schema version is `3`.
 ```json
 {
   "schemaVersion": 3,
-  "contractVersion": "0.1.0",
+  "contractVersion": "0.3.0",
   "id": "feature-42",
   "campaignId": "feature-42",
   "goal": "Deliver feature 42 with tests",
@@ -16,12 +16,12 @@ typecheck`). Schema version is `3`.
   "maxParallel": 1,
   "stallTimeoutSec": 300,
   "timeoutSec": 2400,
-  "runtimeDefaults": { "worker": "luna", "judge": "sol" },
+  "runtimeDefaults": { "worker": "flash", "judge": "sol" },
   "runtimes": {
-    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh", "fallback": "flash" },
-    "flash": { "driver": "codex", "model": "deepseek-v4-flash", "reasoning": "low",
-      "config": { "model_provider": "deepseek" } },
-    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh" },
+    "flash": { "driver": "dsh", "model": "deepseek-flash", "reasoning": "high",
+      "vendor": "deepseek", "config": { "provider": "deepseek-official" } },
+    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
+    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
     "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
     "glm": { "driver": "glm", "model": "glm-5.3[1m]", "config": { "auth_token.env_key": "ZAI_API_KEY" } },
     "agy-flash": { "driver": "agy", "model": "gemini-3.7-flash-low" }
@@ -177,7 +177,10 @@ attempt) and is instead refused at execution; see Failover below.
   client that ships with this repository — `headless` is not used because it
   discards the usage the controller records. `config.provider` is required and
   names the harness route (`deepseek-official`); `model` and `reasoning` are
-  passed to the handshake verbatim. `sandbox` maps onto `DSH_PERMISSION_MODE`,
+  passed to the handshake verbatim. The harness catalogue exposes
+  `deepseek-flash` (DeepSeek-V41-Flash, its own default), `deepseek-v4-flash`,
+  `deepseek-v4-pro`, and an experimental vision variant; an id outside it is
+  not validated here and fails inside the harness. `sandbox` maps onto `DSH_PERMISSION_MODE`,
   so the harness's own file-effect boundary and approval policy follow the
   contract. Every attempt also loads the closed-packet profile
   (`dsh-closed-packet.patch.yml`); `config.patch` stacks one more layer.
