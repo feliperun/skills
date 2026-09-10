@@ -212,9 +212,9 @@ test("preflight's reachable-state enumeration stops at one hop and never probes 
   const contractPath = writeContract(directory, fixture({
     runtimeDefaults: { worker: "a", judge: "a" },
     runtimes: {
-      a: { driver: "codex", model: "a", fallback: "b" },
-      b: { driver: "codex", model: "b", fallback: "c" },
-      c: { driver: "codex", model: "c" },
+      a: { driver: "codex", model: "a", executable: "/nonexistent/codex", fallback: "b" },
+      b: { driver: "codex", model: "b", executable: "/nonexistent/codex", fallback: "c" },
+      c: { driver: "codex", model: "c", executable: "/nonexistent/codex" },
     },
     nodes: [{ id: "build", type: "backend", runtime: "a", taskPacket: packet(), gate: false }],
   }));

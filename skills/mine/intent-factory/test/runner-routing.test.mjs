@@ -72,8 +72,8 @@ test("preflight preserves conflicting runtime and node capability requirements",
   const path = writeContract(directory, fixture({
     runtimeDefaults: {},
     runtimes: {
-      luna: { driver: "codex", model: "gpt-5.6-luna", requiredCapabilities: { sandbox: true } },
-      sol: { driver: "codex", model: "gpt-5.6-sol" },
+      luna: { driver: "codex", model: "gpt-5.6-luna", executable: "/nonexistent/codex", requiredCapabilities: { sandbox: true } },
+      sol: { driver: "codex", model: "gpt-5.6-sol", executable: "/nonexistent/codex" },
     },
     nodes: [{
       id: "build",
@@ -197,9 +197,9 @@ test("preflight deduplicates initial runtimes and follows failover targets", asy
 test("failoverEdges lists one declared edge per runtime, ordered by costRank", () => {
   const contract = failoverContract("runner-declared-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", costRank: 2, fallback: "dear" },
-      dear: { driver: "codex", model: "dear", costRank: 9 },
-      cheap: { driver: "codex", model: "cheap", costRank: 1, fallback: "dear" },
+      mid: { driver: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "dear" },
+      dear: { driver: "codex", model: "dear", executable: "/nonexistent/codex", costRank: 9 },
+      cheap: { driver: "codex", model: "cheap", executable: "/nonexistent/codex", costRank: 1, fallback: "dear" },
     },
   });
   assert.deepEqual(
@@ -225,10 +225,10 @@ test("an unranked runtime's declared edge sorts after every ranked runtime", () 
   // declare one at or past any sentinel a ranked-last encoding could pick.
   const contract = failoverContract("runner-unranked-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", costRank: 2, fallback: "target" },
-      unranked: { driver: "codex", model: "unranked", fallback: "target" },
-      astronomical: { driver: "codex", model: "astronomical", costRank: Number.MAX_SAFE_INTEGER, fallback: "target" },
-      target: { driver: "codex", model: "target" },
+      mid: { driver: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "target" },
+      unranked: { driver: "codex", model: "unranked", executable: "/nonexistent/codex", fallback: "target" },
+      astronomical: { driver: "codex", model: "astronomical", executable: "/nonexistent/codex", costRank: Number.MAX_SAFE_INTEGER, fallback: "target" },
+      target: { driver: "codex", model: "target", executable: "/nonexistent/codex" },
     },
   });
   assert.deepEqual(
