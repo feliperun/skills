@@ -231,6 +231,11 @@ export function validateContract(raw, contractPath, options = {}) {
   // A gated node whose worker and judge share a vendor cannot produce an
   // independent review — the same vendor grading its own output is not a
   // gate, so this is rejected outright rather than left to reach dispatch.
+  // The worker's declared fallback chain is checked the same way, since it is
+  // statically known which runtime a worker failover lands on; the symmetric
+  // case — the judge's own fallback landing on the worker's vendor — depends
+  // on which worker runtime actually ran and is refused at execution instead
+  // (node.mjs, `judge_fallback_vendor_conflict`).
   for (const [index, node] of nodes.entries()) {
     if (!node.gate.enabled) continue;
     const workerRuntimeId = node.runtime ?? defaults.worker;
@@ -240,6 +245,19 @@ export function validateContract(raw, contractPath, options = {}) {
     const judgeVendor = runtimes[/** @type {string} */ (judgeRuntimeId)].vendor;
     if (workerVendor === judgeVendor) {
       throw new TypeError(`nodes[${index}] worker runtime ${workerRuntimeId} and judge runtime ${judgeRuntimeId} share vendor ${workerVendor}`);
+    }
+    const seenFallbacks = new Set([/** @type {string} */ (workerRuntimeId)]);
+    let fallbackId = runtimes[/** @type {string} */ (workerRuntimeId)].fallback;
+    while (fallbackId !== undefined) {
+      if (seenFallbacks.has(fallbackId)) {
+        throw new TypeError(`nodes[${index}] worker runtime ${workerRuntimeId} fallback chain cycles back to ${fallbackId}`);
+      }
+      seenFallbacks.add(fallbackId);
+      const fallbackVendor = runtimes[fallbackId].vendor;
+      if (fallbackVendor === judgeVendor) {
+        throw new TypeError(`nodes[${index}] worker runtime ${workerRuntimeId} fallback runtime ${fallbackId} and judge runtime ${judgeRuntimeId} share vendor ${fallbackVendor}`);
+      }
+      fallbackId = runtimes[fallbackId].fallback;
     }
   }
 

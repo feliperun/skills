@@ -1,0 +1,49 @@
+{
+  "id": "D08",
+  "title": "a worker's declared fallback sharing the judge's vendor is rejected at validate",
+  "proves": "a gate-enabled node whose worker runtime and judge runtime resolve to distinct vendors, but whose worker's declared fallback resolves to the judge's vendor, never reaches dispatch: validateContract walks the worker's whole fallback chain against the judge's vendor and rejects the contract outright, exactly like it already does for the worker's own primary vendor. Nothing is invoked (no recording is even configured), because validation fails before runContract creates a run directory or dispatches any runtime.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d08-run",
+    "campaignId": "d08-campaign",
+    "goal": "prove a worker fallback sharing the judge's vendor is rejected at validate, not left to reach dispatch",
+    "runtimeDefaults": { "worker": "replay-worker", "judge": "replay-judge" },
+    "runtimes": {
+      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "fallback": "replay-worker-fallback", "config": {} },
+      "replay-worker-fallback": { "driver": "replay", "model": "replay-worker-fallback-model", "vendor": "replay-judge-vendor", "config": {} },
+      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": { "failOn": ["critical"] }
+      }
+    ]
+  },
+  "recordings": {},
+  "setup": [
+    {
+      "type": "run",
+      "expectError": "worker runtime replay-worker fallback runtime replay-worker-fallback and judge runtime replay-judge share vendor replay-judge-vendor"
+    }
+  ],
+  "discriminator": {
+    "type": "patchContractField",
+    "path": ["runtimes", "replay-worker-fallback", "vendor"],
+    "value": "replay-worker-fallback-vendor"
+  }
+}

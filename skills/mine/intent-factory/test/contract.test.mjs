@@ -1017,6 +1017,69 @@ test("a gate-enabled node whose worker and judge runtime share a vendor is rejec
   );
 });
 
+test("a gate-enabled node whose worker and judge have distinct vendors, and whose worker fallback is also a distinct vendor, passes", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "judge" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy" },
+      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.nodes[0].gate.enabled, true);
+});
+
+test("a gate-enabled node whose worker fallback shares the judge's vendor is rejected", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "judge" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { driver: "claude", model: "worker-backup", executable: "/nonexistent/claude" },
+      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path, "utf8")), path),
+    /worker runtime worker fallback runtime worker-backup and judge runtime judge share vendor anthropic/u,
+  );
+});
+
+test("a gate-enabled node whose worker fallback's own fallback shares the judge's vendor is rejected", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "judge" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker-backup-2" },
+      "worker-backup-2": { driver: "claude", model: "worker-backup-2", executable: "/nonexistent/claude" },
+      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path, "utf8")), path),
+    /worker runtime worker fallback runtime worker-backup-2 and judge runtime judge share vendor anthropic/u,
+  );
+});
+
+test("a gate-enabled node whose worker fallback chain cycles is rejected", () => {
+  const { path } = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "judge" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker" },
+      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(path, "utf8")), path),
+    /worker runtime worker fallback chain cycles back to worker/u,
+  );
+});
+
 test("a codex runtime with a custom model_provider resolves to that provider's vendor, not openai", () => {
   const { path } = writeFixture({
     runtimeDefaults: { worker: "deepseek-flash", judge: "opus" },

@@ -145,7 +145,12 @@ with `config.model_provider: "deepseek"` is vendor `deepseek`), else the
 driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
 `glm`→zhipu); `replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
-resolve to the same vendor.
+resolve to the same vendor, and does the same for every runtime in the
+worker's declared fallback chain (rejecting a cycle in that chain outright)
+— all statically knowable from the contract alone. The symmetric case, a
+judge fallback landing on the vendor of the worker runtime that actually ran,
+cannot be checked statically (it depends on which worker runtime ran this
+attempt) and is instead refused at execution; see Failover below.
 
 - `claude`: `permissionMode` (default `acceptEdits`; a node that runs
   commands needs `bypassPermissions`, since headless `acceptEdits` denies
@@ -189,8 +194,12 @@ summaries forward, never a continuation ID.
 ### Failover
 
 `runtimes[<id>].fallback` names at most one other runtime id — the single hop
-a role takes on provider exhaustion; there is no chain, so a cycle is
-structurally impossible and a self-loop is rejected. `tier` groups runtimes
+a role takes on provider exhaustion at execution time; a self-loop is
+rejected outright. Runtimes can still chain (a fallback whose own fallback
+names a third runtime, and so on); validation walks that full chain for a
+gate-enabled node's worker and rejects a cycle in it, but nothing walks or
+rejects a cycle in a chain no gated node's worker reaches, or in a judge's
+chain. `tier` groups runtimes
 for composed re-tiering (cheaper tiers first); `costRank` breaks ties. A
 worker fallback is taken unconditionally once reachable and unattempted this
 revision. A judge fallback is admissible only when it differs in vendor from
