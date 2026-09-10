@@ -9,13 +9,14 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { runContract, resumeRun } from "../skills/mine/intent-factory/scripts/runner.mjs";
-import { acquire as acquireControllerLock } from "../skills/mine/intent-factory/scripts/lock.mjs";
+import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../skills/mine/intent-factory/scripts/lock.mjs";
+import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs";
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
 import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
 import { attemptWorktreePath, candidateWorktreePath, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
@@ -224,6 +225,25 @@ async function executeStep(step, context) {
   }
   if (type === "holdControllerLock") {
     acquireControllerLock(context.runDir, { pid: process.pid });
+    return;
+  }
+  if (type === "writeLock") {
+    // A raw, unmediated write to controller.lock: the only way to plant a
+    // record acquire() itself would refuse to install over a live holder.
+    // Writing this process's own pid with a token that does not match its
+    // own live token stands in for a controller pid later reused by a
+    // different, unrelated live process — the fact the takeover logic keys
+    // on rather than pid liveness alone.
+    const processStartTokenValue = step.processStartToken === undefined
+      ? computeProcessStartToken(process.pid)
+      : (typeof step.processStartToken === "string" ? step.processStartToken : null);
+    writeJsonAtomic(lockPath(context.runDir), {
+      schemaVersion: 1,
+      pid: process.pid,
+      processStartToken: processStartTokenValue,
+      startedAt: new Date().toISOString(),
+      hostname: hostname(),
+    });
     return;
   }
   if (type === "mkdirp") {

@@ -1,0 +1,42 @@
+{
+  "id": "D05",
+  "title": "a quota error with no reset takes the fallback edge exactly once",
+  "proves": "a worker exhaustion envelope with error code quota_exhausted and no resetAt classifies as an outright failover (quotaResetSchedule has nothing to wait on) rather than a wait, and planRoute spends the runtime's one declared fallback hop: the node finishes on the fallback runtime, never re-attempting the exhausted primary, and records exactly one routing-history hop. The replay driver's own canonicalization keeps only error.code and error.message off a recorded envelope (see replay.mjs's canonicalError) and drops any resetAt a recording might carry, so a replay-driven quota envelope can only ever exercise this no-reset branch, never the scheduled-reset one.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d05-run",
+    "campaignId": "d05-campaign",
+    "goal": "prove a quota error with no reset takes the declared fallback edge exactly once",
+    "runtimeDefaults": { "worker": "replay-primary" },
+    "runtimes": {
+      "replay-primary": { "driver": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
+      "replay-backup": { "driver": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} }
+    },
+    "pollIntervalMs": 10,
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-primary": "primary.jsonl",
+    "replay-backup": "backup.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

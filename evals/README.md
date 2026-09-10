@@ -82,6 +82,7 @@ Step types:
 | `holdControllerLock` | — | acquires the run's `controller.lock` for this process, synthesizing a concurrent holder |
 | `mkdirp` | `path` | `mkdirSync(path, {recursive: true})`, relative to the case workspace root |
 | `writeFile` | `path`, `content` | writes a file, relative to the case workspace root |
+| `writeLock` | `processStartToken?` | writes `controller.lock` directly (bypassing `acquire()`'s own exclusivity checks) for this process's own pid; `processStartToken` defaults to this process's real token (a genuinely live-looking lock) and may be overridden with any other string to plant a lock whose recorded token no longer matches the live process holding that pid — standing in for a controller pid later reused by an unrelated process |
 
 `env` overlays environment variables for the duration of that one step only
 (restored immediately after). `expectError` is a regular expression (string,

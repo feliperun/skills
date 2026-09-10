@@ -1,0 +1,82 @@
+{
+  "id": "D03",
+  "title": "lock takeover with a reused pid is detected by processStartToken",
+  "proves": "a controller.lock whose recorded pid is alive but whose recorded process start token no longer matches that live process's own token is stale and must be taken over on resume, exactly like lock.mjs's own token-mismatch unit test simulates pid reuse: the same pid this very process now holds, but a token that does not match, standing in for a controller that died and whose pid a later, unrelated process was handed. The run is first interrupted before the integration ref publishes (as D01 does) so a resume has real work left to finish; a lock is then planted directly (acquire() itself would refuse to overwrite a lock it reads as still live, so the plant bypasses it, the same way the unit tests in lock.test.mjs do) first with this process's own real token (a genuinely live lock) and then with a token that does not match it (the reused-pid shape). Resume must take over that second lock and finish the run.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d03-run",
+    "campaignId": "d03-campaign",
+    "goal": "prove a stale lock with a reused pid is taken over via processStartToken, not pid liveness",
+    "runtimeDefaults": {
+      "worker": "replay-worker"
+    },
+    "runtimes": {
+      "replay-worker": {
+        "driver": "replay",
+        "model": "replay-worker-model",
+        "vendor": "replay-worker-vendor",
+        "config": {}
+      }
+    },
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": [
+            "Write output.txt"
+          ],
+          "readFiles": [
+            "contract.json"
+          ],
+          "writeFiles": [
+            "output.txt"
+          ],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [
+            {
+              "argv": [
+                "true"
+              ]
+            }
+          ]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-worker": "worker.jsonl"
+  },
+  "setup": [
+    {
+      "type": "run",
+      "env": {
+        "INTENT_FACTORY_INTEGRATION_INTERRUPT": "before-ref"
+      },
+      "expectError": "integration interrupted at before-ref"
+    },
+    {
+      "type": "writeLock"
+    },
+    {
+      "type": "writeLock",
+      "processStartToken": "stale-token-simulating-a-reused-pid"
+    },
+    {
+      "type": "resume"
+    }
+  ],
+  "discriminator": {
+    "type": "removeSetupStep",
+    "indices": [
+      2
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+{"envelope":{"status":"exhausted","result":null,"continuationId":null,"usage":{"inputTokens":3,"outputTokens":0,"cacheReadInputTokens":0},"costUsd":null,"error":{"code":"authority_denied","message":"operator authority required to proceed"}}}

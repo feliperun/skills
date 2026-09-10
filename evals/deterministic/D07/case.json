@@ -1,0 +1,41 @@
+{
+  "id": "D07",
+  "title": "a scope or authority stop never rotates runtime",
+  "proves": "an exhaustion envelope whose error code is one the node owns rather than the network or the provider's quota (NON_FAILOVER_CODES in backoff.mjs — here authority_denied, an authority stop) is settled straight to exhausted on the runtime that produced it: handleProviderExhaustion returns before classifyTransition or planRoute ever run, so no routing-history hop is recorded and the runtime's own declared fallback, though present and reachable, is never dispatched. A run whose worker runtime declares a fallback but whose only recorded invocation is the primary is the proof that no rotation happened.",
+  "contract": {
+    "schemaVersion": 3,
+    "contractVersion": "0.3.0",
+    "id": "d07-run",
+    "campaignId": "d07-campaign",
+    "goal": "prove an authority stop settles exhausted without ever rotating to the declared fallback runtime",
+    "runtimeDefaults": { "worker": "replay-primary" },
+    "runtimes": {
+      "replay-primary": { "driver": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
+      "replay-backup": { "driver": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} }
+    },
+    "pollIntervalMs": 10,
+    "nodes": [
+      {
+        "id": "build",
+        "type": "backend",
+        "phase": "build",
+        "taskPacket": {
+          "mode": "execution",
+          "objective": "write output.txt",
+          "instructions": ["Write output.txt"],
+          "readFiles": ["contract.json"],
+          "writeFiles": ["output.txt"],
+          "symbols": [],
+          "decisions": [],
+          "nonGoals": [],
+          "verification": [{ "argv": ["true"] }]
+        },
+        "gate": false
+      }
+    ]
+  },
+  "recordings": {
+    "replay-primary": "primary.jsonl"
+  },
+  "discriminator": { "type": "removeSetupStep", "indices": [0] }
+}

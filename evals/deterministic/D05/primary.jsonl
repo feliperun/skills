@@ -1,0 +1,1 @@
+{"envelope":{"status":"exhausted","result":null,"continuationId":null,"usage":{"inputTokens":3,"outputTokens":0,"cacheReadInputTokens":0},"costUsd":null,"error":{"code":"quota_exhausted","message":"quota exhausted, no reset announced"}}}

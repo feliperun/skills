@@ -1,0 +1,11 @@
+{
+  "nodes": {
+    "build": {
+      "status": "exhausted",
+      "errorCode": "authority_denied",
+      "revisions": 0,
+      "runtimeIds": ["replay-primary"],
+      "routingHistoryLength": 0
+    }
+  }
+}
