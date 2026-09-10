@@ -1,0 +1,33 @@
+{
+  "source": "diff",
+  "commands": [
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/scripts/judge-gate.mjs"
+      ]
+    },
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/scripts/node.mjs"
+      ]
+    },
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/scripts/worktree.mjs"
+      ]
+    },
+    {
+      "argv": [
+        "node",
+        "--test",
+        "skills/mine/intent-factory/test/integration.test.mjs"
+      ]
+    }
+  ]
+}

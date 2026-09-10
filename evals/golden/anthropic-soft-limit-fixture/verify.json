@@ -1,0 +1,12 @@
+{
+  "source": "diff",
+  "commands": [
+    {
+      "argv": [
+        "node",
+        "--test",
+        "skills/mine/intent-factory/test/drivers.test.mjs"
+      ]
+    }
+  ]
+}

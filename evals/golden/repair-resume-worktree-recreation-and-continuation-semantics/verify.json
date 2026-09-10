@@ -1,0 +1,19 @@
+{
+  "source": "diff",
+  "commands": [
+    {
+      "argv": [
+        "node",
+        "--test",
+        "skills/mine/intent-factory/scripts/runner.test.mjs"
+      ]
+    },
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/test/helpers.mjs"
+      ]
+    }
+  ]
+}

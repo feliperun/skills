@@ -244,3 +244,57 @@ own after-the-fact bookkeeping:
    filesystem or git state `replay` cannot produce), use `setup` for the rest
    and say exactly what is synthesized in `proves` — never invent a fake
    model response to stand in for a scenario `replay` cannot express.
+
+## Golden set
+
+```
+node evals/build-golden.mjs
+node evals/run.mjs --validate-golden --min <n> [--json]
+node evals/run.mjs --verify-fixtures [--json]
+```
+
+`evals/golden/<task-id>/` holds one task per real commit in this
+repository's own history — never a hand-written scenario. `build-golden.mjs`
+(re)builds the whole directory from git plumbing: a curated list of commits
+the intent-factory itself integrated into `main` (see
+`docs/intent-factory/TECH-SPEC-2026-09-09.md` §C1.3), plus every `fix`
+commit whose own diff touches both
+`skills/mine/intent-factory/scripts/` and `skills/mine/intent-factory/test/`
+in the same commit — a correction landed together with the test that pins
+it, discovered by walking `main`, not picked by hand.
+
+Each task directory has:
+
+- `statement.md` — the node's original `taskPacket`, read verbatim from
+  `.runs/<runId>/contract.json` when that run directory still exists, or
+  (almost always, since old runs get pruned) the commit's own message,
+  untouched. Never rewritten: a later paraphrase of what the task asked for
+  would contaminate any measurement run against it.
+- `verify.json` — `{source, commands}`. `source: "taskPacket"` when the
+  node's own declared `verification` survived in `contract.json`;
+  otherwise `source: "diff"` and `commands` is derived mechanically from the
+  commit's own diff — `node --check <file>` for every non-test `.mjs` file
+  it touches, `node --test <file>` for every `*.test.mjs` file it touches.
+  Every command is the same `{argv, ...}` shape
+  `validateVerificationCommands` (`skills/mine/intent-factory/scripts/verification.mjs`)
+  already enforces on a real contract.
+- `meta.json` — `commitSha`, `parentSha`, `parentTreeSha` (the parent
+  commit's git tree id, what `--verify-fixtures` checks the bundle against),
+  and, when a run directory survived to report them, `runtimeOriginal`,
+  `costUsdOriginal`, `wallClockSecOriginal` — `null`, never `0`, when
+  unknown.
+
+Every task's parent commit lives in the single shared
+`evals/golden/fixtures.bundle` instead of a `fixture.bundle` per task: the
+parent commits share most of their ancestry, so one bundle covering all of
+them packs to roughly a twenty-fifth the size of one shallow bundle per
+task repeated.
+
+- `--validate-golden --min <n>` fails if there are fewer than `n` task
+  directories, if any is missing `statement.md`/`verify.json`/`meta.json`,
+  or if `verify.json`'s commands do not validate as a real verification-command
+  list.
+- `--verify-fixtures` fetches each task's `parentSha` from the bundle into a
+  throwaway bare repository and compares the restored tree id against
+  `meta.json`'s `parentTreeSha`, failing loudly if any task does not
+  restore or the tree does not match.

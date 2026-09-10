@@ -1,0 +1,12 @@
+{
+  "source": "diff",
+  "commands": [
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/scripts/runner.mjs"
+      ]
+    }
+  ]
+}
