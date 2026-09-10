@@ -36,6 +36,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
     { driver: "agy", model: "m" },
     { driver: "glm", model: "m" },
     { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
+    { driver: "zcode", model: "m" },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ];
   const expected = [
@@ -87,6 +88,19 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: true,
       toolPolicy: true,
+    },
+    {
+      structuredOutput: false,
+      promptTransport: "argv",
+      maxArgvPromptBytes: 128 * 1024,
+      sandbox: false,
+      permissions: false,
+      continuation: true,
+      tokenBudget: false,
+      costBudget: false,
+      usage: true,
+      cost: false,
+      toolPolicy: false,
     },
     {
       structuredOutput: true,
@@ -1146,5 +1160,183 @@ test("a stream with no completion event reports the process's own startup error"
   );
 
   const withoutStderr = normalizeCodexResult("", 1, null, {});
-  assert.equal(withoutStderr.error?.message, "Codex emitted no turn.completed event");
+  assert.equal(withoutStderr.error.message, "Codex emitted no turn.completed event");
+});
+
+test("builds zcode commands pinned to the Z.ai endpoint", () => {
+  const previous = {
+    ZAI_API_KEY: process.env.ZAI_API_KEY,
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+    INTENT_FACTORY_ZCODE_BIN: process.env.INTENT_FACTORY_ZCODE_BIN,
+    INTENT_FACTORY_TEST_ZCODE_TOKEN: process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN,
+  };
+  process.env.ZAI_API_KEY = "test-zai-token";
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.INTENT_FACTORY_ZCODE_BIN;
+  delete process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN;
+  try {
+    const command = providerCommand({ driver: "zcode", model: "glm-5.3[1m]" }, "task");
+    assert.equal(command.executable, "zcode");
+    assert.equal(command.promptTransport, "argv");
+    assert.equal(command.input, null);
+    assert.deepEqual(command.args, ["--json", "--no-color", "--mode", "yolo", "--prompt", "task"]);
+    assert.equal(command.env?.ZCODE_MODEL, "glm/glm-5.3", "the [1m] suffix is a claude-CLI tier marker the provider does not know");
+    assert.equal(command.env?.ZCODE_BASE_URL, "https://api.z.ai/api/anthropic");
+    assert.equal(command.env?.GLM_API_KEY, "test-zai-token");
+    assert.equal(command.env?.ANTHROPIC_API_KEY, null, "ambient Anthropic key must be removed: the CLI checks it first");
+
+    const judge = providerCommand({ driver: "zcode", model: "glm-5.3", permissionMode: "plan" }, "review");
+    assert.deepEqual(judge.args.slice(0, 4), ["--json", "--no-color", "--mode", "plan"]);
+
+    const custom = providerCommand({
+      driver: "zcode",
+      model: "glm-5.3",
+      config: {
+        provider: "zai",
+        base_url: "https://custom.example/api",
+        "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN",
+      },
+    }, "task");
+    assert.equal(custom.env?.ZCODE_MODEL, "zai/glm-5.3");
+    assert.equal(custom.env?.ZCODE_BASE_URL, "https://custom.example/api");
+    assert.equal("ZAI_API_KEY" in (custom.env ?? {}), false, "an unresolved token is omitted, not blanked");
+
+    process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN = "custom-token";
+    const resolved = providerCommand({
+      driver: "zcode",
+      model: "glm-5.3",
+      config: { provider: "zai", "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN" },
+    }, "task");
+    assert.equal(resolved.env?.ZAI_API_KEY, "custom-token");
+
+    const continued = providerCommand({ driver: "zcode", model: "glm-5.3" }, "next task", {
+      continuationId: "sess_zcode-1",
+    });
+    assert.deepEqual(continued.args.slice(0, 5), ["--json", "--no-color", "--mode", "yolo", "--resume"]);
+    assert.ok(continued.args.includes("sess_zcode-1"));
+    assert.deepEqual(continued.args.slice(-2), ["--prompt", "next task"]);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("zcode tool policy is refused honestly and the judge schema travels in the prompt", () => {
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  const command = providerCommand({ driver: "zcode", model: "glm-5.3" }, "work", {
+    toolPolicy: policy,
+    schema: JUDGE_SCHEMA,
+  });
+  assert.equal(command.args.includes("--settings"), false, "the CLI has no settings flag to pretend with");
+  assert.deepEqual(
+    missingCapabilities(driverCapabilities({ driver: "zcode" }), { toolPolicy: true }),
+    ["toolPolicy=true (driver provides toolPolicy=false)"],
+  );
+  assert.deepEqual(
+    missingCapabilities(driverCapabilities({ driver: "zcode" }), { structuredOutput: true }),
+    ["structuredOutput=true (driver provides structuredOutput=false)"],
+  );
+  const bare = providerCommand({ driver: "zcode", model: "glm-5.3" }, "work");
+  assert.equal(bare.args.at(-2), "--prompt");
+  assert.equal(bare.args.at(-1), "work", "no offered schema leaves the prompt untouched");
+  assert.deepEqual(command.args.slice(-2), ["--prompt", command.args.at(-1)]);
+  assert.match(command.args.at(-1), /^work/u, "the prompt stays the prefix");
+  assert.ok(command.args.at(-1).includes(JSON.stringify(JUDGE_SCHEMA)), "the schema text rides inside the prompt");
+});
+
+test("normalizes the ZCode result object with cache-aware usage", () => {
+  // Shape recorded from a live zcode 0.16.5 headless run on 2026-09-10.
+  const result = JSON.stringify({
+    sessionId: "sess_bf4de980",
+    traceId: "7ceb9c1a",
+    turnId: "turn_aa9444ba",
+    response: "pong",
+    usage: { source: "provider", inputTokens: 15506, outputTokens: 109, totalTokens: 15615, cacheReadTokens: 9024, cacheWriteTokens: 0, reasoningTokens: 0 },
+    eventCount: 118,
+    projection: { status: "idle", turnCount: 1, totalTokenCount: 15615, contextUsed: 15615, contextWindow: 1000000 },
+  });
+  const envelope = normalizeProviderResult("zcode", result, 0, null);
+  assert.equal(envelope.status, "done");
+  assert.equal(envelope.result, "pong");
+  assert.equal(envelope.continuationId, "sess_bf4de980");
+  assert.equal(envelope.error, null);
+  assert.deepEqual(envelope.usage, { inputTokens: 6482, outputTokens: 109, cacheReadInputTokens: 9024 },
+    "inputTokens already include the cached reads, so the cache component is subtracted");
+
+  const empty = JSON.stringify({ sessionId: "sess_x", response: "", usage: {} });
+  assert.equal(normalizeProviderResult("zcode", empty, 0, null).status, "no-op");
+});
+
+test("selects structured JSON from a ZCode judge response", () => {
+  const verdict = JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "clean", findings: [] });
+  const result = JSON.stringify({
+    sessionId: "sess_judge",
+    response: `Review complete.\n\n\`\`\`json\n${verdict}\n\`\`\``,
+    usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 0 },
+  });
+  const envelope = normalizeProviderResult("zcode", result, 0, null, { preferStructured: true });
+  assert.equal(envelope.result, verdict);
+  assert.equal(envelope.status, "done");
+});
+
+test("zcode startup failures carry the process's own stderr", () => {
+  // A missing provider API key dies before any output and explains itself on
+  // stderr; the envelope must classify as an auth failure, not an outage.
+  const authFailure = normalizeProviderResult("zcode", "", 1, null, {
+    stderr: "Error: Turn execution failed (traceId: t1)\nCause: AiSdkModelAdapterError: Model provider is missing an API key: zai\n",
+  });
+  assert.equal(authFailure.status, "failed");
+  assert.equal(authFailure.error?.code, "incomplete_stream");
+  assert.match(authFailure.error?.message ?? "", /missing an API key/u);
+  assert.deepEqual(
+    normalizeProviderAvailability("zcode", authFailure),
+    { available: false, exhaustedUntil: null, reason: "authentication_failed" },
+  );
+
+  const quotaText = normalizeProviderResult("zcode", "", 1, null, {
+    stderr: "Error: 429 too many requests; usage limit exhausted, resets 2026-09-11 02:00:00\n",
+  });
+  assert.equal(quotaText.error?.code, "quota_exhausted");
+  assert.equal(
+    normalizeProviderAvailability("zcode", quotaText).exhaustedUntil,
+    "2026-09-11T02:00:00.000Z",
+  );
+
+  const plain = normalizeProviderResult("zcode", "", 1, null, {});
+  assert.equal(plain.error?.code, "incomplete_stream");
+  assert.match(plain.error?.message ?? "", /ZCode emitted no result object/u);
+
+  const invalid = normalizeProviderResult("zcode", "not json at all", 1, null, {});
+  assert.equal(invalid.status, "failed");
+  assert.equal(invalid.error?.code, "incomplete_stream");
+
+  const exitedWithResponse = normalizeProviderResult("zcode", JSON.stringify({ sessionId: "s", response: "partial", usage: {} }), 1, null, {});
+  assert.equal(exitedWithResponse.status, "failed", "a non-zero exit is a provider failure even with a response");
+  assert.equal(exitedWithResponse.error?.message, "partial");
+
+  const killed = normalizeProviderResult("zcode", "", null, "SIGTERM", {});
+  assert.equal(killed.status, "canceled");
+});
+
+test("accepts a zcode runtime in contracts and keeps the zhipu vendor", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-zcode-contract-"));
+  const value = fixture();
+  /** @type {Record<string, Record<string, unknown>>} */
+  const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
+  runtimes.zcodeFlash = { driver: "zcode", model: "glm-5.3-flash", permissionMode: "edit" };
+  const path = writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.runtimes.zcodeFlash.driver, "zcode");
+  assert.equal(contract.runtimes.zcodeFlash.vendor, "zhipu", "the driver default names the vendor");
+  assert.equal(routeRuntime(contract, { id: "z", type: "backend", runtime: "zcodeFlash", gate: {} }).id, "zcodeFlash");
+});
+
+test("live metering has no zcode transcript: usage settles from the terminal envelope", () => {
+  assert.deepEqual(
+    liveSessionMetrics("zcode", JSON.stringify({ sessionId: "s", response: "ok", usage: { inputTokens: 5 } })),
+    { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false },
+    "the single-JSON output is only parseable at process end, so mid-run metering reads zero",
+  );
 });

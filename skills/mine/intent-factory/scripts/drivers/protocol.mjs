@@ -1,7 +1,7 @@
 /**
  * Shared provider-protocol normalization and version parsing, extracted from
  * `exec-jsonl.mjs` because `claude.mjs`, `codex.mjs`, `agy.mjs`, `glm.mjs`,
- * `replay.mjs` and `exec-jsonl.mjs` itself all depend on it.
+ * `zcode.mjs`, `replay.mjs` and `exec-jsonl.mjs` itself all depend on it.
  */
 
 /**
@@ -138,6 +138,57 @@ export function normalizeAgyResult(stdout, exitCode, signal, options = {}) {
     result,
     continuationId: typeof record.conversation_id === "string" ? record.conversation_id : null,
     usage: canonicalUsage(record.usage),
+    costUsd: null,
+    error: null,
+  };
+}
+
+/**
+ * @param {string} stdout
+ * @param {number|null} exitCode
+ * @param {string|null} signal
+ * @param {import("./index.mjs").NormalizeOptions} options
+ * @returns {import("./index.mjs").ProviderEnvelope}
+ */
+export function normalizeZcodeResult(stdout, exitCode, signal, options = {}) {
+  if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
+  // The headless result is one JSON object, not an event stream: a run that
+  // died before it (config rejection, auth refusal) leaves stdout empty and
+  // the whole diagnosis on stderr.
+  let record;
+  let parsed = false;
+  try {
+    record = JSON.parse(stdout);
+    parsed = record !== null && typeof record === "object" && !Array.isArray(record);
+  } catch {}
+  if (!parsed) {
+    const reason = withStartupReason("ZCode emitted no result object", options);
+    // A run that died before its result object still classifies by its own
+    // stderr: quota evidence is exhaustion, everything else is a plain
+    // incomplete stream whose diagnosis travels in the message.
+    if (isQuotaText(reason)) return failed("quota_exhausted", boundedMessage(reason, 512), "exhausted");
+    return failed("incomplete_stream", reason);
+  }
+  const response = typeof record.response === "string" ? record.response : null;
+  if (exitCode !== 0) {
+    return failed("provider_error", response?.trim() ? response : withStartupReason(`ZCode exited with code ${exitCode}`, options));
+  }
+  const usage = record.usage && typeof record.usage === "object" && !Array.isArray(record.usage)
+    ? /** @type {Record<string, unknown>} */ (record.usage)
+    : {};
+  const result = options.preferStructured ? extractJson(response) ?? response : response;
+  return {
+    status: result?.trim() ? "done" : "no-op",
+    result,
+    continuationId: typeof record.sessionId === "string" ? record.sessionId : null,
+    // ZCode inputTokens already include the cached reads (its totalTokens is
+    // inputTokens + outputTokens), so the cache component is subtracted here.
+    usage: canonicalUsage({
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cache_read_tokens: usage.cacheReadTokens,
+      cache_write_tokens: usage.cacheWriteTokens,
+    }, { inputIncludesCache: true }),
     costUsd: null,
     error: null,
   };
