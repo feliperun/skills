@@ -527,6 +527,94 @@ console.log(JSON.stringify({event:"result",result:{
 }
 
 /**
+ * A stand-in for the DeepSeek Harness that speaks the `sdk` JSON-RPC profile:
+ * the initialize handshake, `session.event` notifications, and the `turn/end`
+ * reason whose `error.code` decides failover. Modes name the transcript the
+ * harness should produce, so the adapter's folding is testable without a real
+ * harness, a provider, or a network.
+ *
+ * @param {string} directory
+ * @param {"pass"|"no-usage"|"quota"|"two-verdicts"|"silent"|"blocked"} mode
+ * @returns {string}
+ */
+export function fakeDsh(directory, mode = "pass") {
+  const path = join(mkdtempSync(join(tmpdir(), "runner-fake-dsh-")), `fake-dsh-${mode}.mjs`);
+  writeFileSync(path, `#!${process.execPath}
+const mode = ${JSON.stringify(mode)};
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+if (process.argv.includes("--version")) {
+  console.log("fake-dsh 0.1.5-rc.1");
+} else if (mode === "silent") {
+  process.exitCode = 1;
+} else {
+  let buffered = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffered += chunk;
+    const lines = buffered.split("\\n");
+    buffered = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const request = JSON.parse(line);
+      if (request.method === "initialize") {
+        send({ jsonrpc: "2.0", id: request.id, result: { serverInfo: { name: "deepseek-harness-sdk-runtime", version: "0.0.1" } } });
+      }
+      if (request.method !== "session/prompt") continue;
+      const sessionId = request.params.sessionId;
+      const event = (payload) => send({ jsonrpc: "2.0", method: "session.event", params: { sessionId, event: payload } });
+      const text = (value, usage) => event({ type: "assistant/message", data: {
+        message: { role: "assistant", content: [{ type: "text", text: value }] },
+        ...(usage ? { usage } : {}),
+      } });
+      const usage = { inputTokens: 120, outputTokens: 40, cacheReadTokens: 800 };
+      if (mode === "pass") {
+        text("working", usage);
+        text(JSON.stringify({ status: "done", summary: "ok", changedFiles: [], verification: [], artifacts: [], missingContext: [] }), usage);
+        event({ type: "turn/end", data: { reason: { kind: "completed" } } });
+      } else if (mode === "no-usage") {
+        text(JSON.stringify({ status: "done", summary: "ok", changedFiles: [], verification: [], artifacts: [], missingContext: [] }));
+        event({ type: "turn/end", data: { reason: { kind: "completed" } } });
+      } else if (mode === "two-verdicts") {
+        text(JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "one", findings: [] }), usage);
+        text(JSON.stringify({ verdict: "fail", maxSeverity: "critical", summary: "two", findings: [] }), usage);
+        event({ type: "turn/end", data: { reason: { kind: "completed" } } });
+      } else if (mode === "quota") {
+        event({ type: "assistant/message", data: { message: { role: "assistant", content: [] }, usage } });
+        event({ type: "turn/end", data: { reason: { kind: "error", error: {
+          message: "429 Too Many Requests: usage limit exhausted, reset at 2026-09-10T12:00:00Z",
+          code: "QUOTA",
+          providerRetryAfterMs: 60000,
+        } } } });
+      } else if (mode === "blocked") {
+        event({ type: "turn/end", data: { reason: { kind: "blocked" } } });
+      }
+    }
+  });
+}
+`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+/**
+ * @template T
+ * @param {string} directory
+ * @param {"pass"|"no-usage"|"quota"|"two-verdicts"|"silent"|"blocked"} mode
+ * @param {() => T | Promise<T>} body
+ * @returns {Promise<T>}
+ */
+export async function withFakeDsh(directory, mode, body) {
+  const previous = process.env.INTENT_FACTORY_DSH_BIN;
+  process.env.INTENT_FACTORY_DSH_BIN = fakeDsh(directory, mode);
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_DSH_BIN;
+    else process.env.INTENT_FACTORY_DSH_BIN = previous;
+  }
+}
+
+/**
  * @param {string} nodePath
  * @returns {string|null}
  */

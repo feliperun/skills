@@ -35,6 +35,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
     { driver: "claude", model: "m" },
     { driver: "agy", model: "m" },
     { driver: "glm", model: "m" },
+    { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ];
   const expected = [
@@ -86,6 +87,18 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: true,
       toolPolicy: true,
+    },
+    {
+      structuredOutput: true,
+      promptTransport: "stdin",
+      sandbox: true,
+      permissions: false,
+      continuation: false,
+      tokenBudget: false,
+      costBudget: false,
+      usage: true,
+      cost: false,
+      toolPolicy: false,
     },
     {
       structuredOutput: true,

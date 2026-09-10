@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
@@ -1252,5 +1253,38 @@ test("run metadata records identity warnings and rejects a budget extension fiel
   assert.throws(
     () => validateRunMetadata({ ...metadata, budgetExtension: { previous: 1000, maxInputTokens: 5000, at: new Date().toISOString() } }),
     /run metadata has unexpected field budgetExtension/u,
+  );
+});
+
+test("the canonical contract example in the reference validates exactly as written", () => {
+  // The example at the top of references/contract.md is what a contract author
+  // copies first. It has drifted before: a stale contractVersion, and a judge
+  // that shared its driver-default vendor with the worker, so every gate-enabled
+  // node built from it was rejected. Guard the shape, not the prose.
+  const reference = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "references", "contract.md"), "utf8");
+  const block = /```json\n([\s\S]*?)\n```/u.exec(reference)?.[1];
+  assert.ok(block, "the reference must carry the canonical JSON example");
+  const value = JSON.parse(block);
+  const directory = mkdtempSync(join(tmpdir(), "runner-doc-example-"));
+  // Only the placeholder cwd changes: it names a sibling repository the example
+  // cannot ship, and every path inside the contract resolves against it.
+  value.cwd = ".";
+  mkdirSync(join(directory, "src"), { recursive: true });
+  writeFileSync(join(directory, "src", "feature-42.ts"), "");
+  for (const node of value.nodes) {
+    const target = join(directory, node.taskPacketFile ?? "packet.json");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, JSON.stringify(helpers.packet({ readFiles: ["src/feature-42.ts"], writeFiles: ["src/feature-42.ts"] })));
+  }
+  const path = helpers.writeContract(directory, value);
+  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  assert.equal(contract.nodes[0].gate.enabled, true, "the example must keep proving the gated path");
+  const worker = contract.runtimeDefaults?.worker;
+  const judge = contract.runtimeDefaults?.judge;
+  assert.ok(worker && judge, "the example must keep a worker and a judge default");
+  assert.notEqual(
+    contract.runtimes[worker].vendor,
+    contract.runtimes[judge].vendor,
+    "the example's worker and judge must not share a vendor",
   );
 });

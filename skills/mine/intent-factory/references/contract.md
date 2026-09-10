@@ -8,7 +8,7 @@ typecheck`). Schema version is `3`.
 ```json
 {
   "schemaVersion": 3,
-  "contractVersion": "0.1.0",
+  "contractVersion": "0.3.0",
   "id": "feature-42",
   "campaignId": "feature-42",
   "goal": "Deliver feature 42 with tests",
@@ -16,12 +16,13 @@ typecheck`). Schema version is `3`.
   "maxParallel": 1,
   "stallTimeoutSec": 300,
   "timeoutSec": 2400,
-  "runtimeDefaults": { "worker": "luna", "judge": "sol" },
+  "runtimeDefaults": { "worker": "flash", "judge": "sol" },
   "runtimes": {
-    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh", "fallback": "flash" },
-    "flash": { "driver": "codex", "model": "deepseek-v4-flash", "reasoning": "low",
-      "config": { "model_provider": "deepseek" } },
-    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh" },
+    "flash": { "driver": "dsh", "model": "deepseek-flash", "reasoning": "high",
+      "vendor": "deepseek",
+      "config": { "provider": "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" } },
+    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
+    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
     "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
     "glm": { "driver": "glm", "model": "glm-5.3[1m]", "config": { "auth_token.env_key": "ZAI_API_KEY" } },
     "agy-flash": { "driver": "agy", "model": "gemini-3.7-flash-low" }
@@ -138,12 +139,12 @@ strongest runtime of a *different vendor* judges, persisted in
 `routing.assignments`; no admissible cross-vendor judge fails by name
 (`runtime_assignment_judge_unavailable`).
 
-`driver` is `claude`, `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`.
+`driver` is `claude`, `codex`, `agy`, `glm`, `dsh`, `exec-jsonl`, or `replay`.
 Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the driver
 name: an explicit `vendor`, else a provider-config override (a codex runtime
 with `config.model_provider: "deepseek"` is vendor `deepseek`), else the
 driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
-`glm`→zhipu); `replay`/`exec-jsonl` have no default and must declare
+`glm`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
 resolve to the same vendor, and does the same for every runtime in the
 worker's declared fallback chain (rejecting a cycle in that chain outright)
@@ -173,6 +174,28 @@ attempt) and is instead refused at execution; see Failover below.
   `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
 - `agy`: the installed `agy` CLI (or `INTENT_FACTORY_AGY_BIN`); optional
   `printTimeout`; omit `reasoning` for models without `--effort`.
+- `dsh`: the DeepSeek Harness, driven through its `sdk` JSON-RPC profile by a
+  client that ships with this repository — `headless` is not used because it
+  discards the usage the controller records. `config.provider` is required and
+  names the harness route (`deepseek-official`); `model` and `reasoning` are
+  passed to the handshake verbatim, so the ids and effort values are the
+  harness's, not this schema's. Its catalogue exposes `deepseek-flash`
+  (DeepSeek-V41-Flash, its own default), `deepseek-v4-flash`, `deepseek-v4-pro`,
+  and the experimental `deepseek-v4-flash-vision-exp`; an id outside it is not
+  validated here and fails inside the harness. The route authenticates with
+  `DEEPSEEK_API_KEY` from the launching environment; declaring
+  `config["api_key.env_key"]` names it for `preflight`, which is what turns a
+  missing credential into a failed check instead of a failed first attempt —
+  the harness reads the variable, not this driver. `sandbox` maps onto
+  `DSH_PERMISSION_MODE`; omitted, the harness keeps its own default
+  (`workspace-write`, with approvals no detached run can answer), so an attempt
+  that must write outside its worktree reports `blocked_context` until the
+  contract declares `danger-full-access`. Every attempt also loads the
+  closed-packet profile (`dsh-closed-packet.patch.yml`); `config.patch` stacks
+  one more layer. Executable override: `executable` or `INTENT_FACTORY_DSH_BIN`.
+  No default vendor, no continuation (`session/resume` exists on the ACP
+  profile only), and no native schema flag — the judge schema travels in the
+  prompt.
 - `exec-jsonl`: generic driver for a JSONL-protocol executable — one
   `run.request` on stdin, `run.started`/`message`/`run.completed`/
   `run.failed` on stdout. Set `executable` (or

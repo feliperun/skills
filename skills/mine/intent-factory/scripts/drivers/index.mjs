@@ -3,6 +3,7 @@ import { claudeDriver } from "./claude.mjs";
 import { codexDriver } from "./codex.mjs";
 import { agyDriver } from "./agy.mjs";
 import { glmDriver } from "./glm.mjs";
+import { dshDriver } from "./dsh.mjs";
 import { execJsonlDriver } from "./exec-jsonl.mjs";
 import { replayDriver } from "./replay.mjs";
 
@@ -17,6 +18,7 @@ const DRIVERS = new Map([
   ["codex", codexDriver],
   ["agy", agyDriver],
   ["glm", glmDriver],
+  ["dsh", dshDriver],
   ["exec-jsonl", execJsonlDriver],
   ["replay", replayDriver],
 ]);
@@ -48,8 +50,9 @@ const CAPABILITY_NAMES = new Set([
 
 /**
  * One declared runtime. `driver` names a registered adapter (`claude`,
- * `codex`, `agy`, `glm`, `exec-jsonl`, or `replay`); replay requires
- * `config["replay.recording"]` for commands.
+ * `codex`, `agy`, `glm`, `dsh`, `exec-jsonl`, or `replay`); replay requires
+ * `config["replay.recording"]` for commands, and dsh requires
+ * `config.provider` for the harness route every attempt runs on.
  *
  * @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, tier?: number|string, vendor?: string}} DriverRuntime
  */
