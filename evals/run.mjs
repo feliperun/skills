@@ -21,7 +21,9 @@ import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs
 import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
 import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
 import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
-import { compareEvalReports, renderEvalComparisonReport } from "./metrics.mjs";
+import { compareEvalReports, mergeEvalRunSources, projectEvalIndicators, readEvalRunSources, renderEvalComparisonReport } from "./metrics.mjs";
+
+/** @typedef {Record<string, unknown>} JsonObject */
 
 const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
 const DETERMINISTIC_ROOT = join(EVALS_ROOT, "deterministic");
@@ -45,7 +47,7 @@ const CLI_OPTIONS = {
 function usageError(message) {
   process.stderr.write(`${message}\n`);
   process.stderr.write(
-    "usage: evals/run.mjs (--class deterministic | --case <id> | --verify-discriminating | --compare <before.json> <after.json>) [--assert-no-model] [--json]\n",
+    "usage: evals/run.mjs (--class deterministic | --case <id> | --verify-discriminating | --compare <before.json> <after.json> | --project <runDir>... [--campaign <id>] [--note <text>]) [--assert-no-model] [--json]\n",
   );
   process.exitCode = 2;
   throw new UsageError(message);
@@ -685,6 +687,21 @@ async function verifyDiscriminating(loaded) {
 }
 
 /**
+ * A report file on disk is either a bare indicator map (the `EvalReport`
+ * shape `projectEvalIndicators` returns) or that same map wrapped with a
+ * `provenance` block (what `--project` writes and what `evals/baseline.json`
+ * and `evals/fixtures/*.json` carry). Either way, `compareEvalReports` only
+ * ever wants the indicator map.
+ *
+ * @param {unknown} parsed
+ * @returns {JsonObject}
+ */
+function evalIndicatorsOf(parsed) {
+  const object = /** @type {JsonObject} */ (parsed);
+  return object && typeof object.indicators === "object" && object.indicators !== null ? /** @type {JsonObject} */ (object.indicators) : object;
+}
+
+/**
  * `evals/run.mjs --compare <before.json> <after.json> [--json]`: compare two
  * already-projected eval reports and print the result.
  *
@@ -699,10 +716,68 @@ function runCompare(rest) {
     return;
   }
   const [beforePath, afterPath] = positionals;
-  const before = JSON.parse(readFileSync(resolve(beforePath), "utf8"));
-  const after = JSON.parse(readFileSync(resolve(afterPath), "utf8"));
+  const before = evalIndicatorsOf(JSON.parse(readFileSync(resolve(beforePath), "utf8")));
+  const after = evalIndicatorsOf(JSON.parse(readFileSync(resolve(afterPath), "utf8")));
   const comparison = compareEvalReports(before, after);
   process.stdout.write(asJson ? `${JSON.stringify({ schemaVersion: 1, indicators: comparison }, null, 2)}\n` : renderEvalComparisonReport(comparison));
+}
+
+/**
+ * `evals/run.mjs --project <runDir>... [--campaign <id>] [--note <text>] [--json]`:
+ * project indicators straight from one or more runs' own `events.jsonl`/
+ * `usage.jsonl` (concatenated when more than one directory is given — a
+ * campaign run across several sequential orchestrator attempts has no
+ * single directory holding every record) and print the result together with
+ * its provenance, so a report on disk can be regenerated and audited
+ * against the run directories it claims to measure instead of trusted as a
+ * bare number.
+ *
+ * @param {string[]} rest
+ * @returns {void}
+ */
+function runProject(rest) {
+  const asJson = rest.includes("--json");
+  /** @type {string|null} */
+  let campaign = null;
+  /** @type {string|null} */
+  let note = null;
+  /** @type {string[]} */
+  const runDirs = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg === "--json") continue;
+    if (arg === "--campaign") {
+      index += 1;
+      campaign = rest[index] ?? null;
+      continue;
+    }
+    if (arg === "--note") {
+      index += 1;
+      note = rest[index] ?? null;
+      continue;
+    }
+    runDirs.push(arg);
+  }
+  if (runDirs.length === 0) {
+    usageError("--project needs at least one run directory");
+    return;
+  }
+  const resolvedRunDirs = runDirs.map((runDir) => resolve(runDir));
+  const merged = mergeEvalRunSources(resolvedRunDirs.map((runDir) => readEvalRunSources(runDir)));
+  const indicators = projectEvalIndicators(merged);
+  const report = {
+    schemaVersion: 1,
+    provenance: { campaign, runIds: resolvedRunDirs.map((runDir) => basename(runDir)), runDirs: resolvedRunDirs, generatedAt: new Date().toISOString(), note },
+    indicators,
+  };
+  if (asJson) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`provenance: ${JSON.stringify(report.provenance)}\n`);
+  for (const [name, indicator] of Object.entries(indicators)) {
+    process.stdout.write(`${name}: ${JSON.stringify(/** @type {JsonObject} */ (indicator).value)} (n=${/** @type {JsonObject} */ (indicator).count})\n`);
+  }
 }
 
 /**
@@ -712,6 +787,10 @@ function runCompare(rest) {
 async function main(argv) {
   if (argv[0] === "--compare") {
     runCompare(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "--project") {
+    runProject(argv.slice(1));
     return;
   }
   /** @type {{values: Record<string, unknown>}} */

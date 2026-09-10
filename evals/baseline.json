@@ -1,50 +1,73 @@
 {
-  "costPerClosedCheckpoint": {
-    "value": 6.6526,
-    "direction": "down",
-    "count": 7
+  "schemaVersion": 1,
+  "provenance": {
+    "campaign": "intent-factory-measurement-20260910",
+    "runIds": [
+      "if-measure-c0-guard-20260910",
+      "if-measure-c1a-20260910",
+      "if-measure-c1a-fix-d01-20260910",
+      "if-measure-c1b-20260910",
+      "if-measure-c1c-20260910"
+    ],
+    "runDirs": [
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c0-guard-20260910",
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c1a-20260910",
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c1a-fix-d01-20260910",
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c1b-20260910",
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c1c-20260910"
+    ],
+    "generatedAt": "2026-09-10T18:48:46.176Z",
+    "note": "substitutes the intended suite-speed campaign baseline: that campaign's .runs/ artefacts no longer exist in this tree, so this records intent-factory-measurement-20260910's own baseline instead (every closed node from c0-guard through c1c)"
   },
-  "firstPassGateRate": {
-    "value": {
-      "fixture-runtime-guard": 1,
-      "evals-harness": 0,
-      "discriminating-cases": 0,
-      "cases-d03-d08": 0,
-      "cases-d09-d14": 0,
-      "discriminator-and-ci": 1,
-      "replay-reset-and-d04": 1
+  "indicators": {
+    "costPerClosedCheckpoint": {
+      "value": 6.1839,
+      "direction": "down",
+      "count": 7
     },
-    "direction": "up",
-    "count": 7
-  },
-  "judgeInvocationRate": {
-    "value": 1,
-    "direction": "up",
-    "count": 7
-  },
-  "revisionsPerDone": {
-    "value": 0.2857,
-    "direction": "down",
-    "count": 7
-  },
-  "blockedContextRate": {
-    "value": 0.125,
-    "direction": "down",
-    "count": 8
-  },
-  "wallClockPerClosedCheckpoint": {
-    "value": 2358.2641,
-    "direction": "down",
-    "count": 7
-  },
-  "providerFailoverRate": {
-    "value": 0,
-    "direction": "down",
-    "count": 9
-  },
-  "protocolFailureRate": {
-    "value": 0,
-    "direction": "down",
-    "count": 19
+    "firstPassGateRate": {
+      "value": {
+        "fixture-runtime-guard": 1,
+        "evals-harness": 0,
+        "discriminating-cases": 0,
+        "cases-d03-d08": 0,
+        "cases-d09-d14": 0,
+        "discriminator-and-ci": 1,
+        "replay-reset-and-d04": 1,
+        "comparator-and-baseline": 0
+      },
+      "direction": "up",
+      "count": 8
+    },
+    "judgeInvocationRate": {
+      "value": 1,
+      "direction": "up",
+      "count": 7
+    },
+    "revisionsPerDone": {
+      "value": 0.2857,
+      "direction": "down",
+      "count": 7
+    },
+    "blockedContextRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 7
+    },
+    "wallClockPerClosedCheckpoint": {
+      "value": 1851.0644,
+      "direction": "down",
+      "count": 7
+    },
+    "providerFailoverRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 8
+    },
+    "protocolFailureRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 19
+    }
   }
 }

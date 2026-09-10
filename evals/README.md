@@ -29,6 +29,36 @@ node evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--ve
 - `--json` prints the report as JSON instead of a human-readable summary.
 - An unknown flag exits 2.
 
+## Indicator projection and comparison
+
+```
+node evals/run.mjs --project <runDir>... [--campaign <id>] [--note <text>] [--json]
+node evals/run.mjs --compare <before.json> <after.json> [--json]
+```
+
+`--project` reads one or more orchestrator run directories' own
+`events.jsonl` and `usage.jsonl` (never a node snapshot or a hand-written
+number — see `evals/metrics.mjs`'s `projectEvalIndicators`) and prints the
+indicator report: `costPerClosedCheckpoint`, `firstPassGateRate` (grouped by
+node id), `judgeInvocationRate`, `revisionsPerDone`, `blockedContextRate`,
+`wallClockPerClosedCheckpoint`, `providerFailoverRate`, and
+`protocolFailureRate`. An indicator with no supporting record is `null`,
+never `0`. More than one `<runDir>` concatenates their records first — a
+campaign built from several sequential orchestrator runs has no single
+directory holding every record. The printed report carries a `provenance`
+block (`campaign`, `runIds`, `runDirs`, `generatedAt`, `note`) so it can be
+regenerated and checked against the run directories it claims to measure;
+`evals/baseline.json` and `evals/fixtures/{a,b}.json` are this command's own
+output, not written by hand.
+
+`--compare` reads two such reports (either the bare indicator map or the
+`--project`-shaped `{provenance, indicators}` wrapper) and prints, per
+indicator, each side's value and sample count, the delta, and the direction
+that counts as improvement. Comparing a `null` indicator against a measured
+number never produces a numeric delta — it reports "sem base de
+comparacao" (`comparable: false`) instead of a delta that would silently
+read as zero.
+
 Exit code is 1 if any case fails, 0 otherwise.
 
 ## Case format

@@ -1,45 +1,60 @@
 {
-  "costPerClosedCheckpoint": {
-    "value": 4.5116,
-    "direction": "down",
-    "count": 2
+  "schemaVersion": 1,
+  "provenance": {
+    "campaign": "intent-factory-measurement-20260910",
+    "runIds": [
+      "if-measure-c1c-20260910"
+    ],
+    "runDirs": [
+      "/Users/frb/dev/frb/skills/.runs/if-measure-c1c-20260910"
+    ],
+    "generatedAt": "2026-09-10T18:48:46.122Z",
+    "note": "if-measure-c1c-20260910 as of this measurement; fixture for --compare, not hand-written"
   },
-  "firstPassGateRate": {
-    "value": {
-      "discriminator-and-ci": 1,
-      "replay-reset-and-d04": 1
+  "indicators": {
+    "costPerClosedCheckpoint": {
+      "value": 6.556,
+      "direction": "down",
+      "count": 2
     },
-    "direction": "up",
-    "count": 2
-  },
-  "judgeInvocationRate": {
-    "value": 1,
-    "direction": "up",
-    "count": 2
-  },
-  "revisionsPerDone": {
-    "value": 0,
-    "direction": "down",
-    "count": 2
-  },
-  "blockedContextRate": {
-    "value": 0,
-    "direction": "down",
-    "count": 2
-  },
-  "wallClockPerClosedCheckpoint": {
-    "value": 1763.0135,
-    "direction": "down",
-    "count": 2
-  },
-  "providerFailoverRate": {
-    "value": 0,
-    "direction": "down",
-    "count": 3
-  },
-  "protocolFailureRate": {
-    "value": 0,
-    "direction": "down",
-    "count": 4
+    "firstPassGateRate": {
+      "value": {
+        "discriminator-and-ci": 1,
+        "replay-reset-and-d04": 1,
+        "comparator-and-baseline": 0
+      },
+      "direction": "up",
+      "count": 3
+    },
+    "judgeInvocationRate": {
+      "value": 1,
+      "direction": "up",
+      "count": 2
+    },
+    "revisionsPerDone": {
+      "value": 0,
+      "direction": "down",
+      "count": 2
+    },
+    "blockedContextRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 2
+    },
+    "wallClockPerClosedCheckpoint": {
+      "value": 2303.4695,
+      "direction": "down",
+      "count": 2
+    },
+    "providerFailoverRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 3
+    },
+    "protocolFailureRate": {
+      "value": 0,
+      "direction": "down",
+      "count": 6
+    }
   }
 }

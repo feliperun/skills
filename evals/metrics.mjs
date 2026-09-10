@@ -272,6 +272,25 @@ export function readEvalRunSources(runDir) {
 }
 
 /**
+ * Merge several runs' already-read sources into one. A campaign built from
+ * more than one sequential orchestrator run (one directory per attempt, each
+ * with its own `events.jsonl`/`usage.jsonl`) has no single run directory
+ * that holds every record, so `--project` reads each directory separately
+ * with `readEvalRunSources` and merges here before `projectEvalIndicators`
+ * regroups everything by node and timestamp; which source contributed a
+ * given record does not matter past this point.
+ *
+ * @param {{events: unknown[], usageRecords: unknown[]}[]} sourcesList
+ * @returns {{events: unknown[], usageRecords: unknown[]}}
+ */
+export function mergeEvalRunSources(sourcesList) {
+  return {
+    events: sourcesList.flatMap((sources) => sources.events),
+    usageRecords: sourcesList.flatMap((sources) => sources.usageRecords),
+  };
+}
+
+/**
  * Records of one JSONL artefact. An unterminated final line was never a
  * committed record, so it is skipped rather than parsed.
  *
