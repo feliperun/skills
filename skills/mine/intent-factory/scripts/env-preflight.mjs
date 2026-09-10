@@ -310,8 +310,12 @@ export function reachableRuntimes(contract) {
       const runtime = explicit
         ? /** @type {RuntimeSnapshot} */ (routeRuntime(contract, node, role))
         : runtimeSnapshot(contract, fallbackId);
+      // The judge role carries no extra capability set: the verdict contract
+      // is enforced at the review boundary (judgePrompt embeds the schema in
+      // the prompt text, parseJudge validates, the bounded re-ask arbiters),
+      // so a driver without a schema channel — zcode — can still judge.
       const required = role === "judge"
-        ? [runtime.requiredCapabilities, node.gate.requiredCapabilities, { structuredOutput: true }]
+        ? [runtime.requiredCapabilities, node.gate.requiredCapabilities]
         : [runtime.requiredCapabilities, node.requiredCapabilities];
       const requiredCapabilitySets = required.filter((item) => item !== undefined);
       addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets);
@@ -334,6 +338,7 @@ const DRIVER_BIN_OVERRIDES = Object.freeze({
   claude: "INTENT_FACTORY_CLAUDE_BIN",
   agy: "INTENT_FACTORY_AGY_BIN",
   glm: "INTENT_FACTORY_GLM_BIN",
+  zcode: "INTENT_FACTORY_ZCODE_BIN",
   "exec-jsonl": "INTENT_FACTORY_EXEC_JSONL_BIN",
 });
 

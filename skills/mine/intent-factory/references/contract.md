@@ -25,6 +25,8 @@ typecheck`). Schema version is `3`.
     "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
     "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
     "glm": { "driver": "glm", "model": "glm-5.3[1m]", "config": { "auth_token.env_key": "ZAI_API_KEY" } },
+    "zcode-flash": { "driver": "zcode", "model": "glm-5.3-flash", "vendor": "zhipu-flash", "permissionMode": "edit" },
+    "zcode-pro": { "driver": "zcode", "model": "glm-5.3", "vendor": "zhipu-pro", "permissionMode": "plan" },
     "agy-flash": { "driver": "agy", "model": "gemini-3.7-flash-low" }
   },
   "nodes": [
@@ -139,19 +141,21 @@ strongest runtime of a *different vendor* judges, persisted in
 `routing.assignments`; no admissible cross-vendor judge fails by name
 (`runtime_assignment_judge_unavailable`).
 
-`driver` is `claude`, `codex`, `agy`, `glm`, `dsh`, `exec-jsonl`, or `replay`.
-Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the driver
-name: an explicit `vendor`, else a provider-config override (a codex runtime
-with `config.model_provider: "deepseek"` is vendor `deepseek`), else the
-driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
-`glm`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
+`driver` is `claude`, `codex`, `agy`, `glm`, `dsh`, `zcode`, `exec-jsonl`, or
+`replay`. Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the
+driver name: an explicit `vendor`, else a provider-config override (a codex
+runtime with `config.model_provider: "deepseek"` is vendor `deepseek`), else
+the driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
+`glm`/`zcode`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
 resolve to the same vendor, and does the same for every runtime in the
 worker's declared fallback chain (rejecting a cycle in that chain outright)
 — all statically knowable from the contract alone. The symmetric case, a
 judge fallback landing on the vendor of the worker runtime that actually ran,
 cannot be checked statically (it depends on which worker runtime ran this
-attempt) and is instead refused at execution; see Failover below.
+attempt) and is instead refused at execution; see Failover below. Two models of one family (a GLM 5.3-flash worker judged by GLM 5.3) pair only by
+declaring distinct `vendor` strings — a claim about review independence, not a
+formality.
 
 - `claude`: `permissionMode` (default `acceptEdits`; a node that runs
   commands needs `bypassPermissions`, since headless `acceptEdits` denies
@@ -172,6 +176,20 @@ attempt) and is instead refused at execution; see Failover below.
   `ANTHROPIC_MODEL`, `ANTHROPIC_AUTH_TOKEN`, strips ambient
   `ANTHROPIC_API_KEY`. Token from `config["auth_token.env_key"]` (default
   `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
+- `zcode`: runs GLM models through Z.ai's own harness CLI headlessly
+  (`zcode --prompt --json`; install the ZCode app or point `executable` /
+  `INTENT_FACTORY_ZCODE_BIN` at the bundled CLI). Model and endpoint travel as
+  `ZCODE_MODEL` (`config.provider`/model, default `glm`/model; a `[1m]` model
+  suffix is stripped — the provider reports the context window itself) and
+  `ZCODE_BASE_URL` (default the Z.ai Anthropic-compatible endpoint); the token
+  rides the provider-derived `${PROVIDER}_API_KEY` variable built from
+  `config["auth_token.env_key"]` (default `ZAI_API_KEY`). `permissionMode`
+  maps to `--mode` (`build`/`edit`/`plan`/`yolo`; default `yolo` — a judge
+  runtime declares `plan`). No schema flag and no hook surface:
+  `structuredOutput`/`toolPolicy` are `false`, judges arbitrate through the
+  prompt-embedded schema, and a `toolPolicy` requirement rejects the runtime.
+  Continuation resumes `sess_…` ids. Mid-run live metering reads zero; usage
+  settles from the terminal result object.
 - `agy`: the installed `agy` CLI (or `INTENT_FACTORY_AGY_BIN`); optional
   `printTimeout`; omit `reasoning` for models without `--effort`.
 - `dsh`: the DeepSeek Harness, driven through its `sdk` JSON-RPC profile by a
@@ -208,7 +226,7 @@ attempt) and is instead refused at execution; see Failover below.
   emits `replay_exhausted` (exit 1); a path escape in `files` emits
   `replay_path_escape` (exit 2) and writes nothing.
 
-Continuation is capability-gated (`codex`, `claude`, `glm`, `agy`,
+Continuation is capability-gated (`codex`, `claude`, `glm`, `zcode`, `agy`,
 `exec-jsonl`, `replay` all declare it) and requires an exact fingerprint of
 the runtime definition; a runtime change, a failover hop, or an adapter
 without the capability starts a fresh session carrying prior structured
