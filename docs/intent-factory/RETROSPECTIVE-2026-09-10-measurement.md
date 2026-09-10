@@ -31,11 +31,12 @@ spent its budget removing.
   would pin does not happen at runtime. `124f34e`
   (`deepseek-balance-classification`) appears to have covered one path only.
 - **D08** — `validateContract` compares only the primary worker and judge
-  vendors (`contract.mjs:234-244`), and `node.mjs:2562-2566` documents outright
-  that the fallback-vendor case "is not caught at validation time". `SKILL.md`
-  states the opposite: that a worker/fallback pair is admissible only when the
-  judge keeps a different resolved vendor. Either the doc is wrong or the
-  validation is missing.
+  vendors (`contract.mjs:234-244`). The runtime refusal at `node.mjs:2562-2566`
+  covers a different case and is deliberate: a *judge's* fallback landing on the
+  worker's vendor depends on which worker actually ran, which a static contract
+  cannot know. But the case `SKILL.md` describes — a *worker's* declared
+  fallback sharing the judge's vendor — is statically knowable and is simply not
+  validated.
 - **D09** — there is no `ENOSPC` handling and no `.runs/` GC anywhere in the
   production tree. Nothing exists to pin.
 
