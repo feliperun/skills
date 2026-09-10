@@ -62,7 +62,11 @@ test("resume re-dispatches a capped live continuation as a fresh attempt in a fr
   const directory = mkdtempSync(join(tmpdir(), "runner-live-continuation-"));
   const path = writeContract(directory, fixture({
     id: "live-continuation-run",
-    timeoutSec: 1,
+    // A generous wall-clock budget, not the minimal 1s: the fake's progress
+    // burst must finish writing its usage-bearing turn.failed line well
+    // before the cap fires even when the host is under load, or the kill
+    // races the write and the invocation's usage is backfilled as null.
+    timeoutSec: 3,
     pollIntervalMs: 5,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));

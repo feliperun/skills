@@ -334,7 +334,10 @@ if (process.argv.includes("--version")) {
         console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));
         return;
       }
-      for (let index = 0; index < 7000; index += 1) console.log(JSON.stringify({ type: "progress", text: "A".repeat(100) }));
+      // A small progress burst, not the 7000-line flood "large-output" uses:
+      // this scenario only needs the turn.failed usage line written well
+      // before the wall-clock cap fires, even on a loaded host.
+      for (let index = 0; index < 50; index += 1) console.log(JSON.stringify({ type: "progress", text: "A".repeat(100) }));
       console.log(JSON.stringify({type:"turn.failed",error:{message:"still running after partial accounting",usage:{input_tokens:5,output_tokens:2,cached_input_tokens:1}}}));
       setInterval(() => {}, 60_000);
       return;
