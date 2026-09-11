@@ -418,7 +418,10 @@ export async function doctorCommand(contractPath, values) {
   }
   // A PATH-only check must not fail a runtime whose binary is supplied through
   // an explicit executable or a INTENT_FACTORY_*_BIN override; the driver probe above
-  // already validated whatever the runtime actually resolves to.
+  // already validated whatever the runtime actually resolves to. `zcode` is
+  // absent on purpose — its binary is a shim the driver writes on first use, so
+  // a PATH miss here is the normal state of a fresh machine, not a missing
+  // dependency; `dsh` runs through its own SDK client, not a PATH binary.
   for (const binary of ["codex", "claude", "agy", "glm", "exec-jsonl"]) {
     const overrideName = /** @type {Record<string, string>} */ (DRIVER_BIN_OVERRIDES)[binary];
     const overridden = overriddenDrivers.has(binary) || Boolean(process.env[overrideName]);

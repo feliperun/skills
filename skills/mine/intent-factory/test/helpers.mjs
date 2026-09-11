@@ -626,6 +626,35 @@ export async function withFakeDsh(directory, mode, body) {
 }
 
 /**
+ * Run `body` with PATH and HOME pointed at a throwaway directory.
+ *
+ * The zcode adapter repairs a host whose CLI resolves to nothing: it looks for
+ * the ZCode app bundle and writes a `zcode` shim into a PATH install dir. A
+ * test that exercises that adapter's default resolution without this wrapper
+ * reads the developer's real PATH and, on a machine that has the app but no
+ * shim, installs one into their real `~/.local/bin` as a side effect of running
+ * the suite.
+ *
+ * @template T
+ * @param {() => T | Promise<T>} body
+ * @returns {Promise<T>}
+ */
+export async function withEmptyPath(body) {
+  const previous = { PATH: process.env.PATH, HOME: process.env.HOME };
+  const directory = mkdtempSync(join(tmpdir(), "runner-empty-path-"));
+  process.env.PATH = directory;
+  process.env.HOME = directory;
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
  * @param {string} nodePath
  * @returns {string|null}
  */

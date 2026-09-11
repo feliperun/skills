@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,13 +22,14 @@ import {
   normalizeExecJsonlResult,
   truncateToolOutput,
 } from "../scripts/drivers/exec-jsonl.mjs";
+import { ensureZcodeAvailable } from "../scripts/drivers/zcode.mjs";
 import { normalizeCodexResult, parseVersion } from "../scripts/drivers/protocol.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
 import { DEFAULT_CLAUDE_TOOLS } from "../scripts/drivers/claude.mjs";
 import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/drivers/codex.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
-import { fixture, packet, writeContract } from "./helpers.mjs";
+import { fixture, packet, withEmptyPath, writeContract } from "./helpers.mjs";
 
 test("all provider adapters report explicit capabilities and transport", () => {
   const runtimes = [
@@ -1221,8 +1222,16 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
     INTENT_FACTORY_ZCODE_BIN: process.env.INTENT_FACTORY_ZCODE_BIN,
     INTENT_FACTORY_TEST_ZCODE_TOKEN: process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN,
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
   };
+  // Resolving the default executable repairs the host when the CLI is off
+  // PATH: with a real PATH and HOME this test would install a shim into the
+  // developer's own install dir as a side effect of running the suite.
+  const sandbox = mkdtempSync(join(tmpdir(), "runner-zcode-default-"));
   process.env.ZAI_API_KEY = "test-zai-token";
+  process.env.PATH = sandbox;
+  process.env.HOME = sandbox;
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.INTENT_FACTORY_ZCODE_BIN;
   delete process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN;
@@ -1288,7 +1297,10 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
 
 test("zcode tool policy is refused honestly and the judge schema travels in the prompt", () => {
   const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
-  const command = providerCommand({ driver: "zcode", model: "glm-5.3" }, "work", {
+  // A named executable keeps this test off the real PATH: an unnamed zcode
+  // runtime resolves the host's CLI and may install a shim while doing it.
+  const runtime = { driver: "zcode", model: "glm-5.3", executable: "/nonexistent/zcode" };
+  const command = providerCommand(runtime, "work", {
     toolPolicy: policy,
     schema: JUDGE_SCHEMA,
   });
@@ -1301,13 +1313,99 @@ test("zcode tool policy is refused honestly and the judge schema travels in the 
     missingCapabilities(driverCapabilities({ driver: "zcode" }), { structuredOutput: true }),
     ["structuredOutput=true (driver provides structuredOutput=false)"],
   );
-  const bare = providerCommand({ driver: "zcode", model: "glm-5.3" }, "work");
+  const bare = providerCommand(runtime, "work");
   assert.equal(bare.args.at(-2), "--prompt");
   assert.equal(bare.args.at(-1), "work", "no offered schema leaves the prompt untouched");
   const prompt = command.args.at(-1) ?? "";
   assert.deepEqual(command.args.slice(-2), ["--prompt", prompt]);
   assert.match(prompt, /^work/u, "the prompt stays the prefix");
   assert.ok(prompt.includes(JSON.stringify(JUDGE_SCHEMA)), "the schema text rides inside the prompt");
+});
+
+test("the zcode adapter installs its CLI onto the PATH when the app is bundled", () => {
+  const root = mkdtempSync(join(tmpdir(), "runner-zcode-host-"));
+  const home = join(root, "home");
+  const bin = join(home, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  const bundle = { electron: join(root, "ZCode"), cli: join(root, "zcode.cjs") };
+  writeFileSync(bundle.electron, "electron");
+  writeFileSync(bundle.cli, "cli");
+  const pathDirs = [bin, "/usr/bin"];
+  const shim = join(bin, "zcode");
+
+  ensureZcodeAvailable({ pathDirs, home, bundle });
+
+  assert.equal(statSync(shim).mode & 0o777, 0o755, "a shim nothing can execute is not on the PATH in any useful sense");
+  const body = readFileSync(shim, "utf8");
+  assert.match(body, /^#!\/usr\/bin\/env bash\n/u);
+  assert.ok(body.includes(`ELECTRON_RUN_AS_NODE=1 exec ${bundle.electron}`), "the app's own Electron runs the bundle");
+  assert.ok(body.includes(bundle.cli), "the bundled CLI is the script Electron is handed");
+
+  // A second pass over identical content must not replace the file. The inode
+  // is the proof: every install lands through a rename.
+  const inode = statSync(shim).ino;
+  ensureZcodeAvailable({ pathDirs, home, bundle });
+  assert.equal(statSync(shim).ino, inode, "an installed shim is left in place");
+
+  // An install dir off the PATH would fix the driver and not the user, which is
+  // the half of the request that matters.
+  ensureZcodeAvailable({ pathDirs: ["/usr/bin"], home, bundle });
+  assert.equal(existsSync(join(home, "bin", "zcode")), false, "nothing is installed outside the PATH");
+
+  // No bundle is not a host to repair.
+  const bare = join(root, "bare");
+  mkdirSync(bare, { recursive: true });
+  ensureZcodeAvailable({ pathDirs: [bare], home, bundle: { electron: join(root, "absent"), cli: join(root, "absent") } });
+  assert.equal(existsSync(join(bare, "zcode")), false);
+
+  // A PATH entry that does not exist is an ordinary host — this machine has
+  // two — and the install lands in one of them, where the write fails. Callers
+  // with no error path around `executable()` (the models report, the doctor,
+  // runtime discovery) must never see that failure.
+  const ghostHome = join(root, "ghost");
+  mkdirSync(ghostHome, { recursive: true });
+  const ghostBin = join(ghostHome, ".local", "bin");
+  assert.doesNotThrow(
+    () => ensureZcodeAvailable({ pathDirs: [ghostBin], home: ghostHome, bundle }),
+    "a host that cannot be repaired degrades to not-found, it does not abort the caller",
+  );
+  assert.equal(existsSync(ghostBin), false, "and it does not invent install dirs");
+});
+
+test("the zcode adapter leaves the user's own zcode alone and keeps naming the command", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runner-zcode-existing-"));
+  const home = join(root, "home");
+  const bin = join(home, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  const bundle = { electron: join(root, "ZCode"), cli: join(root, "zcode.cjs") };
+  writeFileSync(bundle.electron, "electron");
+  writeFileSync(bundle.cli, "cli");
+
+  // A runnable command of that name is the answer already: not a host to repair.
+  const mine = join(bin, "zcode");
+  writeFileSync(mine, "#!/bin/sh\n# hand written\n");
+  chmodSync(mine, 0o755);
+  ensureZcodeAvailable({ pathDirs: [bin], home, bundle });
+  assert.equal(readFileSync(mine, "utf8"), "#!/bin/sh\n# hand written\n", "an existing command is not overwritten");
+
+  // A stale shim — the app moved — is dangling, so nothing resolves and the
+  // installer runs. Writing the path would follow the link onto its target.
+  const stale = join(root, "gone");
+  rmSync(mine);
+  symlinkSync(stale, mine);
+  ensureZcodeAvailable({ pathDirs: [bin], home, bundle });
+  assert.ok(lstatSync(mine).isSymbolicLink(), "the stale link survives");
+  assert.equal(existsSync(stale), false, "and nothing was written through it");
+
+  // The resolved name is what the runtime fingerprint hashes, so it must not
+  // depend on where this host happens to keep the CLI.
+  await withEmptyPath(() => {
+    assert.equal(
+      providerCommand({ driver: "zcode", model: "glm-5.3" }, "task").executable,
+      "zcode",
+      "the adapter names the command, it does not point at a path",
+    );
+  });
 });
 
 test("normalizes the ZCode result object with cache-aware usage", () => {

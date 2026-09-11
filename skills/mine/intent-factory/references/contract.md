@@ -185,9 +185,9 @@ are excluded because judges review captured results.
   `ANTHROPIC_API_KEY`. Token from `config["auth_token.env_key"]` (default
   `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
 - `zcode`: runs GLM models through Z.ai's own harness CLI headlessly
-  (`zcode --prompt --json`; install the ZCode app or point `executable` /
-  `INTENT_FACTORY_ZCODE_BIN` at the bundled CLI). Model and endpoint travel as
-  `ZCODE_MODEL` (`config.provider`/model, default `glm`/model; a `[1m]` model
+  (`zcode --prompt --json`; the adapter installs the shim itself, and
+  `executable` / `INTENT_FACTORY_ZCODE_BIN` override). Model and endpoint travel
+  as `ZCODE_MODEL` (`config.provider`/model, default `glm`/model; a `[1m]` model
   suffix is stripped — the provider reports the context window itself) and
   `ZCODE_BASE_URL` (default the Z.ai Anthropic-compatible endpoint); the token
   rides the provider-derived `${PROVIDER}_API_KEY` variable built from
