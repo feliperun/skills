@@ -1261,6 +1261,17 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     }, "task");
     assert.equal(resolved.env?.ZAI_API_KEY, "custom-token");
 
+    // The CLI folds non-alphanumerics in the provider id into `_` before
+    // appending `_API_KEY`, so a dashed id must name the variable it reads.
+    const dashed = providerCommand({
+      driver: "zcode",
+      model: "glm-5.3",
+      config: { provider: "z-ai", "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN" },
+    }, "task");
+    assert.equal(dashed.env?.ZCODE_MODEL, "z-ai/glm-5.3");
+    assert.equal(dashed.env?.Z_AI_API_KEY, "custom-token");
+    assert.equal("Z-AI_API_KEY" in (dashed.env ?? {}), false, "the unfolded spelling is not a variable the CLI reads");
+
     const continued = providerCommand({ driver: "zcode", model: "glm-5.3" }, "next task", {
       continuationId: "sess_zcode-1",
     });

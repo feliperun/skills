@@ -96,12 +96,28 @@ export const zcodeDriver = {
     const token = authToken(runtime);
     // The token travels under the provider-derived variable name the CLI
     // resolves (e.g. GLM_API_KEY); an unresolved token is omitted, not blanked.
-    if (token !== null) env[`${provider.toUpperCase()}_API_KEY`] = token;
+    const apiKeyVar = providerApiKeyVar(provider);
+    if (token !== null && apiKeyVar !== null) env[apiKeyVar] = token;
     return { executable: this.executable(runtime), args, promptTransport: "argv", input: null, env };
   },
 
   normalize: normalizeZcodeResult,
 };
+
+/**
+ * The variable the harness reads a provider's token from: the CLI folds every
+ * run of non-alphanumerics in the provider id into `_` before appending
+ * `_API_KEY` (`z-ai` → `Z_AI_API_KEY`), so the id carried verbatim in
+ * `ZCODE_MODEL` has to be folded the same way. An id with no alphanumerics
+ * names no variable at all.
+ *
+ * @param {string} provider
+ * @returns {string|null}
+ */
+function providerApiKeyVar(provider) {
+  const stem = provider.trim().replace(/[^a-zA-Z0-9]+/gu, "_").replace(/^_+|_+$/gu, "").toUpperCase();
+  return stem ? `${stem}_API_KEY` : null;
+}
 
 /**
  * @param {import("./index.mjs").DriverRuntime} runtime
