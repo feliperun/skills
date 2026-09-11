@@ -18,15 +18,15 @@ typecheck`). Schema version is `3`.
   "timeoutSec": 2400,
   "runtimeDefaults": { "worker": "flash", "judge": "sol" },
   "runtimes": {
-    "flash": { "driver": "dsh", "model": "deepseek-flash", "reasoning": "high",
+    "flash": { "harness": "dsh", "model": "deepseek-flash", "reasoning": "high",
       "vendor": "deepseek", "sandbox": "danger-full-access",
       "config": { "provider": "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" } },
-    "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
-    "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
-    "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
-    "zcode-flash": { "driver": "zcode", "model": "glm-5.3-flash", "vendor": "zhipu-flash", "permissionMode": "edit" },
-    "zcode-pro": { "driver": "zcode", "model": "glm-5.3", "vendor": "zhipu-pro", "permissionMode": "plan" },
-    "agy-flash": { "driver": "agy", "model": "gemini-3.7-flash-low" }
+    "luna": { "harness": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
+    "sol": { "harness": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
+    "opus": { "harness": "claude", "model": "opus", "permissionMode": "acceptEdits" },
+    "zcode-flash": { "harness": "zcode", "model": "glm-5.3-flash", "vendor": "zhipu-flash", "permissionMode": "edit" },
+    "zcode-pro": { "harness": "zcode", "model": "glm-5.3", "vendor": "zhipu-pro", "permissionMode": "plan" },
+    "agy-flash": { "harness": "agy", "model": "gemini-3.8-flash-low" }
   },
   "nodes": [
     {
@@ -142,14 +142,14 @@ set): the cheapest available runtime executes, the strongest runtime of a
 *different vendor* judges, persisted in `routing.assignments`; no admissible
 cross-vendor judge fails by name (`runtime_assignment_judge_unavailable`).
 
-`driver` names the harness that runs the turn (`claude`, `codex`, `agy`, `dsh`,
-`zcode`, `exec-jsonl`, `replay`) and `model` what that harness asks; the two
+`harness` names the adapter that runs the turn (`claude`, `codex`, `agy`,
+`dsh`, `zcode`, `exec-jsonl`, `replay`) and `model` what it asks; the two
 vary independently — DeepSeek answers through `dsh`, GLM through `zcode`. Name
 a runtime id `<harness>-<model>` so a recorded run says which harness produced
-it; ids take letters, numbers, dot, underscore, dash only. Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the
-driver name: an explicit `vendor`, else a provider-config override (a codex
+it; ids take letters, numbers, dot, underscore, dash only. Vendor is resolved (`resolveVendor` in `harnesses/index.mjs`), not the
+harness name: an explicit `vendor`, else a provider-config override (a codex
 runtime with `config.model_provider: "deepseek"` is vendor `deepseek`), else
-the driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
+the harness default (`claude`→anthropic, `codex`→openai, `agy`→google,
 `zcode`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
 resolve to the same vendor, and does the same for every runtime in the
@@ -209,11 +209,11 @@ are excluded because judges review captured results.
   Authentication stays in `DEEPSEEK_API_KEY`;
   `config["api_key.env_key"]` only names it for `preflight`. `sandbox` maps to
   `DSH_PERMISSION_MODE`, default `workspace-write` (above). Every attempt loads
-  `dsh-closed-packet.patch.yml`; `config.patch` stacks one layer. Executable
+  `dsh/closed-packet.patch.yml`; `config.patch` stacks one layer. Executable
   override: `executable` or `INTENT_FACTORY_DSH_BIN`. No default vendor,
   continuation (`session/resume` is ACP-only), or native schema flag; the judge
   schema travels in the prompt.
-- `exec-jsonl`: generic driver for a JSONL-protocol executable — one
+- `exec-jsonl`: generic harness for a JSONL-protocol executable — one
   `run.request` on stdin, `run.started`/`message`/`run.completed`/
   `run.failed` on stdout. Set `executable` (or
   `INTENT_FACTORY_EXEC_JSONL_BIN`), `args`, `versionArgs` when `--version` is
@@ -256,7 +256,7 @@ same runtime instead of taking an edge; a reset outside that window, or none
 announced, takes the declared/synthesized edge. A wait is not a hop and does
 not consume the failover budget.
 
-`doctor --discover [--json]` normalizes each driver's exhaustion signal into
+`doctor --discover [--json]` normalizes each harness's exhaustion signal into
 `{available, exhaustedUntil, reason}` (missing CLI → `not_found`; auth
 failure has no reset; a quota response keeps its reset, including Z.ai code
 1310).
@@ -267,7 +267,7 @@ failure has no reset; a quota response keeps its reset, including Z.ai code
 failed terminal dependency makes it `blocked`. Terminal states: `done`,
 `no-op`, `blocked`, `failed`, `exhausted`, `stalled`, `canceled` — every node
 ends in exactly one. `stallTimeoutSec` bounds silence on stdout/stderr, but
-only for a driver declaring `streamsOutput` (true for `codex`, `claude`,
+only for a harness declaring `streamsOutput` (true for `codex`, `claude`,
 `agy`, `dsh`; false for `zcode`, which dumps its turn at exit);
 others fall back to `timeoutSec` alone.
 `timeoutSec` (default 2400s) caps one invocation and may be overridden per
@@ -320,7 +320,7 @@ usage.jsonl  integration.jsonl  events.jsonl  notify.jsonl  STATUS.md
 
 `operations/` holds the exact-once intent/settlement record for every
 provider invocation, written before dispatch and merged idempotently after:
-`settled` means a known driver outcome; `unknown_effect` means the request
+`settled` means a known harness outcome; `unknown_effect` means the request
 may have run without proof and is not permission to retry. Replay of an
 unknown-effect window needs `replayPolicy: "safe"` (default) plus a clean
 persisted scope across the window and passing verification; otherwise it
@@ -355,7 +355,7 @@ between attempts) and records the new head; a non-descendant is refused. A
 
 `doctor [<contract.json>] [--cwd <dir>] [--json]` is mutation-free: checks
 `cwd` is a git work tree, `.runs/` is ignored, `node`/`npm` are on `PATH`,
-and — with a contract — every routed driver exists and probes cleanly.
+and — with a contract — every routed harness exists and probes cleanly.
 `cancel <run-dir>` signals the controller (`SIGTERM` then `SIGKILL` after
 2s), takes over its now-stale lock, terminates every recorded invocation,
 and marks the run terminal; it cannot act on a lock held by its own process.

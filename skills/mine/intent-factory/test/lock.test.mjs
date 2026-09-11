@@ -306,7 +306,7 @@ test("resume reaps an orphaned detached invocation on takeover", async () => {
     pid: orphanPid,
     processGroupId: process.platform === "win32" ? null : orphanPid,
     processStartToken: processStartToken(orphanPid),
-    driver: "codex",
+    harness: "codex",
     runtimeId: "luna",
     runtimeFingerprint: "test-runtime",
     runId: "reap-orphan-run",
@@ -482,7 +482,7 @@ test("monitorInvocation reads bounded live evidence and never throws", () => {
     { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
   ].map((event) => JSON.stringify(event)).join("\n") + "\n");
   const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
-    runtime: { driver: "codex" },
+    runtime: { harness: "codex" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
   assert.deepEqual(monitorInvocation(job), { continuationId: "live-thread", turns: 1, cacheReadInputTokens: 80, toolCalls: 1, completed: false });
@@ -504,7 +504,7 @@ test("monitorInvocation keeps counting codex turns after the transcript outgrows
   for (let index = 0; index < 40; index += 1) first.push(fatItem, turn);
   writeFileSync(stdout, `${first.join("\n")}\n`);
   const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
-    runtime: { driver: "codex" },
+    runtime: { harness: "codex" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
   assert.equal(monitorInvocation(job).turns, 40, "the first observation consumes the padded prefix");
@@ -535,7 +535,7 @@ test("monitorInvocation observes claude turns and the session total beyond a fix
   writeFileSync(stdout, `${lines.join("\n")}\n`);
   assert.ok(statSync(stdout).size > 128 * 1024, "the transcript outgrew the old fixed live window");
   const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
-    runtime: { driver: "claude" },
+    runtime: { harness: "claude" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
   const observed = monitorInvocation(job);
@@ -564,7 +564,7 @@ test("stall supervision uses the latest persisted timeout override", async () =>
     contract,
     node,
     state,
-    runtime: { id: "luna", driver: "codex", model: "test" },
+    runtime: { id: "luna", harness: "codex", model: "test" },
     prompt: "task",
     paths: {
       prompt: join(logs, "worker.prompt"),
@@ -593,7 +593,7 @@ test("stall supervision uses the latest persisted timeout override", async () =>
   }
 });
 
-test("stall supervision kills a runtime whose driver declares streamed output once it goes quiet past stallTimeoutSec", async () => {
+test("stall supervision kills a runtime whose harness declares streamed output once it goes quiet past stallTimeoutSec", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "lock-stall-streaming-"));
   const logs = join(runDir, "logs");
   mkdirSync(logs);
@@ -611,7 +611,7 @@ test("stall supervision kills a runtime whose driver declares streamed output on
     contract,
     node,
     state,
-    runtime: { id: "luna", driver: "codex", model: "test" },
+    runtime: { id: "luna", harness: "codex", model: "test" },
     prompt: "task",
     paths: {
       prompt: join(logs, "worker.prompt"),
@@ -644,12 +644,12 @@ test("stall supervision kills a runtime whose driver declares streamed output on
   }
 });
 
-test("stall supervision never kills a runtime whose driver declares no streamed output; it is bounded by timeoutSec instead", async () => {
+test("stall supervision never kills a runtime whose harness declares no streamed output; it is bounded by timeoutSec instead", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "lock-stall-non-streaming-"));
   const logs = join(runDir, "logs");
   mkdirSync(logs);
   const recording = join(runDir, "recording.jsonl");
-  // replay declares streamsOutput: false (measured: replay-bin.mjs writes its
+  // replay declares streamsOutput: false (measured: replay/bin.mjs writes its
   // one envelope line only after delayMs). 5s comfortably outlasts every
   // wait below, so the process is still silent-on-disk at both checkpoints.
   writeFileSync(recording, `${JSON.stringify({
@@ -666,7 +666,7 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
     contract,
     node,
     state,
-    runtime: { id: "replayed", driver: "replay", model: "test", config: { "replay.recording": recording } },
+    runtime: { id: "replayed", harness: "replay", model: "test", config: { "replay.recording": recording } },
     prompt: "task",
     paths: {
       prompt: join(logs, "worker.prompt"),
@@ -684,7 +684,7 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       firstTimeout = { currentJob, status, error };
     });
-    assert.equal(firstTimeout, undefined, "silence alone must not kill a driver that never reports streamed output");
+    assert.equal(firstTimeout, undefined, "silence alone must not kill a harness that never reports streamed output");
 
     // Discriminating check: the gate's stdout/stderr files exist (created
     // empty before spawn) from the very first poll onward, so a streamsOutput
@@ -698,7 +698,7 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       secondTimeout = { currentJob, status, error };
     });
-    assert.equal(secondTimeout, undefined, "a driver that never reports streamed output must survive well past stallTimeoutSec");
+    assert.equal(secondTimeout, undefined, "a harness that never reports streamed output must survive well past stallTimeoutSec");
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
@@ -713,7 +713,7 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
   }
 });
 
-test("a zcode worker runs with the driver's endpoint env overlay applied", async () => {
+test("a zcode worker runs with the harness's endpoint env overlay applied", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "lock-zcode-env-"));
   const logs = join(runDir, "logs");
   mkdirSync(logs);
@@ -752,7 +752,7 @@ setInterval(() => {}, 1000);
     contract,
     node,
     state,
-    runtime: { id: "zcode-glm", driver: "zcode", model: "glm-5.3[1m]" },
+    runtime: { id: "zcode-glm", harness: "zcode", model: "glm-5.3[1m]" },
     prompt: "task",
     paths: {
       prompt: join(logs, "worker.prompt"),
@@ -775,7 +775,7 @@ setInterval(() => {}, 1000);
     assert.ok(observed, "the fake provider wrote its marker within five seconds");
     assert.equal(observed.notify, null, "INTENT_FACTORY_NOTIFY_BIN must not reach the worker provider");
     assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
-    assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "driver env overlay must still apply");
+    assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "harness env overlay must still apply");
     assert.equal(observed.model, "glm/glm-5.3", "the [1m] tier marker is stripped before ZCODE_MODEL");
     assert.equal(observed.token, "zcode-notify-test-token");
     assert.equal(observed.apiKey, null, "ambient Anthropic key is removed, not inherited");
@@ -808,7 +808,7 @@ test("a persistence failure leaves the gated provider unstarted and terminates i
       contract,
       node,
       state,
-      runtime: { id: "luna", driver: "codex", model: "test" },
+      runtime: { id: "luna", harness: "codex", model: "test" },
       prompt: "task",
       paths: {
         prompt: join(logs, "worker.prompt"),

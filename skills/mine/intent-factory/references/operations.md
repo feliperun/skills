@@ -68,7 +68,7 @@ an expiry.
 
 ## Runtime discovery
 
-`doctor --discover [--json]` performs mutation-free driver discovery,
+`doctor --discover [--json]` performs mutation-free harness discovery,
 reporting `{available, exhaustedUntil, reason}` per runtime (missing CLI →
 `not_found`; auth failure has no reset; quota keeps its reset, including
 Z.ai code 1310). Omitted `runtimes`/`runtimeDefaults` are composed once and

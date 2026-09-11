@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { getDriver, probeRuntime, registeredDrivers, resolveVendor } from "./drivers/index.mjs";
+import { getHarness, probeRuntime, registeredHarnesses, resolveVendor } from "./harnesses/index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "./runtime-discovery.mjs";
 
 /**
- * Model catalogue report: which models each registered driver can run, the
+ * Model catalogue report: which models each registered harness can run, the
  * effort levels each accepts, and the worker/judge allocation the discovery
  * law already implies.
  *
@@ -11,19 +11,19 @@ import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "./runtime-dis
  * 2026-09-11: one `id<TAB>display name` line per model on stdout, a progress
  * line on stderr, exit 0, no flags — so the report runs it when that binary is
  * present and falls back to the declared entries when it is not. Every other
- * driver's catalogue is declared below. No catalogue here is fetched from a
+ * harness's catalogue is declared below. No catalogue here is fetched from a
  * network service of our own: `agy models` is the provider CLI's own surface,
  * and no invocation spends tokens.
  *
- * Determinism: driver order is the canonical constant below, never object or
+ * Determinism: harness order is the canonical constant below, never object or
  * Map iteration order (the registry decides membership only); declared model
  * arrays are canonical; `agy models` output is sorted by id before rendering.
  * No clock and no locale reaches the default report; `--probe` is the one
  * opt-in that reads the host.
  */
 
-/** Display order of the registered drivers: claude, codex, agy, dsh, zcode, exec-jsonl, replay. */
-export const MODEL_DRIVER_ORDER = Object.freeze([
+/** Display order of the registered harnesses: claude, codex, agy, dsh, zcode, exec-jsonl, replay. */
+export const MODEL_HARNESS_ORDER = Object.freeze([
   "claude",
   "codex",
   "agy",
@@ -50,13 +50,13 @@ const GLM_ONE_MILLION_CONTEXT_WINDOW_TOKENS = 1_048_576;
 
 /**
  * @typedef {{id: string, contextWindowTokens: number|null, efforts: readonly string[], defaultEffort: string|null, effortInModelId: string|null}} DeclaredModel
- * @typedef {{driver: string, vendor: string|null}} ModelPath
+ * @typedef {{harness: string, vendor: string|null}} ModelPath
  * @typedef {{id: string, contextWindowTokens: number|null, efforts: string[], defaultEffort: string|null, effortInModelId: string|null, declaredBy: ModelPath[]}} ModelView
  * @typedef {{ok: boolean, available: boolean, reason: string, version: string|null}} ProbeView
- * @typedef {{driver: string, executable: string, vendor: string|null, vendorNote: string|null, catalogue: string, effortTransport: string|null, effortAliases: Record<string, string>, effortNotes: string[], models: ModelView[], probe?: ProbeView}} DriverView
- * @typedef {{id: string, driver: string, model: string, vendor: string, tier: number|string|null, costRank: number|null}} AllocationRuntime
+ * @typedef {{harness: string, executable: string, vendor: string|null, vendorNote: string|null, catalogue: string, effortTransport: string|null, effortAliases: Record<string, string>, effortNotes: string[], models: ModelView[], probe?: ProbeView}} HarnessView
+ * @typedef {{id: string, harness: string, model: string, vendor: string, tier: number|string|null, costRank: number|null}} AllocationRuntime
  * @typedef {{worker: AllocationRuntime, judge: AllocationRuntime, vendorException: string|null, reason: string}} AllocationSuggestion
- * @typedef {{schemaVersion: number, availability: string, drivers: DriverView[], suggestion: AllocationSuggestion}} ModelsReport
+ * @typedef {{schemaVersion: number, availability: string, harnesses: HarnessView[], suggestion: AllocationSuggestion}} ModelsReport
  */
 
 /**
@@ -129,14 +129,14 @@ const EFFORT_TRANSPORT = Object.freeze({
 });
 
 /**
- * Why a driver resolves no vendor: dsh, exec-jsonl, and replay have no driver default.
+ * Why a harness resolves no vendor: dsh, exec-jsonl, and replay declare none.
  *
  * @type {Readonly<Record<string, string>>}
  */
 const VENDOR_NOTES = Object.freeze({
-  dsh: "unresolved: dsh declares no driver default; the contract names the vendor",
-  "exec-jsonl": "unresolved: exec-jsonl declares no driver default; the contract names the vendor",
-  replay: "unresolved: replay declares no driver default; the contract names the vendor",
+  dsh: "unresolved: dsh declares no default vendor; the contract names it",
+  "exec-jsonl": "unresolved: exec-jsonl declares no default vendor; the contract names it",
+  replay: "unresolved: replay declares no default vendor; the contract names it",
 });
 
 const AGY_CATALOGUE_TIMEOUT_MS = 10_000;
@@ -190,33 +190,33 @@ function agyModel(id, contextWindowTokens = null) {
 export async function modelsReport(options = {}) {
   const cliCatalogue = agyCliCatalogue(options.cwd);
   const declaredPaths = declaredPathIndex();
-  /** @type {DriverView[]} */
-  const drivers = [];
-  for (const driver of displayOrder()) {
-    const declared = DECLARED_MODEL_CATALOGUES[driver] ?? [];
-    const entries = driver === "agy" ? cliCatalogue ?? declared : declared;
-    const template = { driver, model: entries[0]?.id ?? "runtime-defined" };
-    /** @type {DriverView} */
+  /** @type {HarnessView[]} */
+  const harnesses = [];
+  for (const harness of displayOrder()) {
+    const declared = DECLARED_MODEL_CATALOGUES[harness] ?? [];
+    const entries = harness === "agy" ? cliCatalogue ?? declared : declared;
+    const template = { harness, model: entries[0]?.id ?? "runtime-defined" };
+    /** @type {HarnessView} */
     const view = {
-      driver,
-      executable: getDriver(driver).executable(template),
+      harness,
+      executable: getHarness(harness).executable(template),
       vendor: resolveVendor(template),
-      vendorNote: VENDOR_NOTES[driver] ?? null,
-      catalogue: driver === "agy" ? (cliCatalogue ? "agy-cli" : "declared") : CATALOGUE_SOURCES[driver] ?? "runtime-declared",
-      effortTransport: EFFORT_TRANSPORT[driver] ?? null,
-      effortAliases: driver === "agy" ? { ...AGY_EFFORT_ALIASES } : {},
-      effortNotes: driver === "agy"
+      vendorNote: VENDOR_NOTES[harness] ?? null,
+      catalogue: harness === "agy" ? (cliCatalogue ? "agy-cli" : "declared") : CATALOGUE_SOURCES[harness] ?? "runtime-declared",
+      effortTransport: EFFORT_TRANSPORT[harness] ?? null,
+      effortAliases: harness === "agy" ? { ...AGY_EFFORT_ALIASES } : {},
+      effortNotes: harness === "agy"
         ? ["model ids ending in -low/-medium/-high fix the level themselves, and the adapter still passes --effort on top (double specification)"]
         : [],
-      models: entries.map((entry) => modelView(driver, entry, declaredPaths)),
+      models: entries.map((entry) => modelView(harness, entry, declaredPaths)),
     };
     if (options.probe === true) view.probe = probeView(await probeRuntime(template, { cwd: options.cwd }));
-    drivers.push(view);
+    harnesses.push(view);
   }
   return {
     schemaVersion: 1,
     availability: AVAILABILITY_NOTES[options.probe === true ? "probe" : "declared"],
-    drivers,
+    harnesses,
     suggestion: suggestedAllocation(),
   };
 }
@@ -231,55 +231,55 @@ export async function modelsCommand(options = {}) {
 }
 
 /**
- * @param {string} driver
+ * @param {string} harness
  * @param {DeclaredModel} entry
  * @param {Map<string, ModelPath[]>} declaredPaths
  * @returns {ModelView}
  */
-function modelView(driver, entry, declaredPaths) {
+function modelView(harness, entry, declaredPaths) {
   return {
     id: entry.id,
     contextWindowTokens: entry.contextWindowTokens,
     efforts: [...entry.efforts],
     defaultEffort: entry.defaultEffort,
     effortInModelId: entry.effortInModelId,
-    declaredBy: (declaredPaths.get(entry.id) ?? []).filter((path) => path.driver !== driver),
+    declaredBy: (declaredPaths.get(entry.id) ?? []).filter((path) => path.harness !== harness),
   };
 }
 
 /**
- * Every declared model id, with the drivers that declare it and the vendor
+ * Every declared model id, with the harnesses that declare it and the vendor
  * each of those paths resolves to. Two paths can serve one model under
  * different resolved vendors (agy resells claude-sonnet-4-6, which the claude
- * driver also declares), and the allocation law compares those vendors.
+ * harness also declares), and the allocation law compares those vendors.
  *
  * @returns {Map<string, ModelPath[]>}
  */
 function declaredPathIndex() {
   /** @type {Map<string, ModelPath[]>} */
   const paths = new Map();
-  for (const driver of displayOrder()) {
-    const vendor = resolveVendor({ driver });
-    for (const entry of DECLARED_MODEL_CATALOGUES[driver] ?? []) {
+  for (const harness of displayOrder()) {
+    const vendor = resolveVendor({ harness });
+    for (const entry of DECLARED_MODEL_CATALOGUES[harness] ?? []) {
       const existing = paths.get(entry.id);
-      if (existing) existing.push({ driver, vendor });
-      else paths.set(entry.id, [{ driver, vendor }]);
+      if (existing) existing.push({ harness, vendor });
+      else paths.set(entry.id, [{ harness, vendor }]);
     }
   }
   return paths;
 }
 
 /**
- * Registered drivers in canonical display order. The registry supplies
- * membership; a registered driver missing from the canonical constant is
+ * Registered harnesses in canonical display order. The registry supplies
+ * membership; a registered harness missing from the canonical constant is
  * appended in codepoint order so the report still covers every adapter.
  *
  * @returns {string[]}
  */
 function displayOrder() {
-  const registered = new Set(registeredDrivers());
-  const extra = [...registered].filter((driver) => !MODEL_DRIVER_ORDER.includes(driver)).sort(codepointOrder);
-  return [...MODEL_DRIVER_ORDER.filter((driver) => registered.has(driver)), ...extra];
+  const registered = new Set(registeredHarnesses());
+  const extra = [...registered].filter((harness) => !MODEL_HARNESS_ORDER.includes(harness)).sort(codepointOrder);
+  return [...MODEL_HARNESS_ORDER.filter((harness) => registered.has(harness)), ...extra];
 }
 
 /**
@@ -290,7 +290,7 @@ function displayOrder() {
  * @returns {DeclaredModel[]|null}
  */
 function agyCliCatalogue(cwd) {
-  const executable = getDriver("agy").executable({ driver: "agy", model: "agy-models" });
+  const executable = getHarness("agy").executable({ harness: "agy", model: "agy-models" });
   const result = spawnSync(executable, ["models"], {
     cwd,
     encoding: "utf8",
@@ -323,7 +323,7 @@ export function parseAgyModels(stdout) {
 }
 
 /**
- * @param {import("./drivers/index.mjs").ProbeResult} result
+ * @param {import("./harnesses/index.mjs").ProbeResult} result
  * @returns {ProbeView}
  */
 function probeView(result) {
@@ -345,7 +345,7 @@ function probeView(result) {
  * @returns {AllocationSuggestion}
  */
 function suggestedAllocation() {
-  /** @type {Record<string, {driver: string, model: string, vendor: string, tier: number|string, costRank: number}>} */
+  /** @type {Record<string, {harness: string, model: string, vendor: string, tier: number|string, costRank: number}>} */
   const runtimes = {};
   /** @type {Record<string, {available: boolean, exhaustedUntil: string|null, reason: string}>} */
   const availability = {};
@@ -381,7 +381,7 @@ function suggestedAllocation() {
  * @param {string} judge
  * @param {string|null} vendorException
  * @param {string} reason
- * @param {Record<string, {driver: string, model: string, vendor: string, tier: number|string, costRank: number}>} runtimes
+ * @param {Record<string, {harness: string, model: string, vendor: string, tier: number|string, costRank: number}>} runtimes
  * @returns {AllocationSuggestion}
  */
 function allocation(worker, judge, vendorException, reason, runtimes) {
@@ -395,7 +395,7 @@ function allocation(worker, judge, vendorException, reason, runtimes) {
 
 /**
  * @param {string} id
- * @param {Record<string, {driver: string, model: string, vendor: string, tier: number|string, costRank: number}>} runtimes
+ * @param {Record<string, {harness: string, model: string, vendor: string, tier: number|string, costRank: number}>} runtimes
  * @returns {AllocationRuntime}
  */
 function allocationRuntime(id, runtimes) {
@@ -403,7 +403,7 @@ function allocationRuntime(id, runtimes) {
   if (!runtime) throw new Error(`allocation named an unknown runtime ${id}`);
   return {
     id,
-    driver: runtime.driver,
+    harness: runtime.harness,
     model: runtime.model,
     vendor: runtime.vendor,
     tier: runtime.tier ?? null,
@@ -417,13 +417,13 @@ function allocationRuntime(id, runtimes) {
  */
 export function renderModelsReport(report) {
   const lines = [`models · availability: ${report.availability}`, ""];
-  for (const driver of report.drivers) {
-    const vendor = driver.vendor ?? driver.vendorNote ?? "unresolved";
-    lines.push(`[${driver.driver}] executable ${driver.executable} · vendor ${vendor} · catalogue ${driver.catalogue}`);
-    lines.push(`  effort: ${effortTransportLine(driver)}`);
-    for (const model of driver.models) lines.push(`  ${modelLine(driver, model)}`);
-    if (!driver.models.length) lines.push("  models: none declared — the runtime declaration names the model");
-    if (driver.probe) lines.push(`  probe: ${driver.probe.available ? `reachable${driver.probe.version ? ` (${driver.probe.version})` : ""}` : `unreachable (${driver.probe.reason})`}`);
+  for (const harness of report.harnesses) {
+    const vendor = harness.vendor ?? harness.vendorNote ?? "unresolved";
+    lines.push(`[${harness.harness}] executable ${harness.executable} · vendor ${vendor} · catalogue ${harness.catalogue}`);
+    lines.push(`  effort: ${effortTransportLine(harness)}`);
+    for (const model of harness.models) lines.push(`  ${modelLine(harness, model)}`);
+    if (!harness.models.length) lines.push("  models: none declared — the runtime declaration names the model");
+    if (harness.probe) lines.push(`  probe: ${harness.probe.available ? `reachable${harness.probe.version ? ` (${harness.probe.version})` : ""}` : `unreachable (${harness.probe.reason})`}`);
     lines.push("");
   }
   lines.push("suggested allocation");
@@ -437,27 +437,27 @@ export function renderModelsReport(report) {
 }
 
 /**
- * @param {DriverView} driver
+ * @param {HarnessView} harness
  * @returns {string}
  */
-function effortTransportLine(driver) {
-  if (driver.effortTransport === null) return "none (this harness has no effort flag)";
-  const aliases = Object.keys(driver.effortAliases).sort(codepointOrder);
-  const aliasText = aliases.length ? ` (${aliases.map((key) => `${key}→${driver.effortAliases[key]}`).join(", ")})` : "";
-  const notes = driver.effortNotes.length ? ` · ${driver.effortNotes.join(" · ")}` : "";
-  return `${driver.effortTransport}${aliasText}${notes}`;
+function effortTransportLine(harness) {
+  if (harness.effortTransport === null) return "none (this harness has no effort flag)";
+  const aliases = Object.keys(harness.effortAliases).sort(codepointOrder);
+  const aliasText = aliases.length ? ` (${aliases.map((key) => `${key}→${harness.effortAliases[key]}`).join(", ")})` : "";
+  const notes = harness.effortNotes.length ? ` · ${harness.effortNotes.join(" · ")}` : "";
+  return `${harness.effortTransport}${aliasText}${notes}`;
 }
 
 /**
- * @param {DriverView} driver
+ * @param {HarnessView} harness
  * @param {ModelView} model
  * @returns {string}
  */
-function modelLine(driver, model) {
+function modelLine(harness, model) {
   const parts = [model.id, `context ${model.contextWindowTokens ?? "unknown"}`, effortLine(model)];
-  for (const path of model.declaredBy) parts.push(`also declared by ${path.driver} (vendor ${path.vendor ?? "unresolved"})`);
-  if (model.effortInModelId && driver.effortTransport !== null) {
-    parts.push(`${driver.effortTransport} is passed on top of the id-encoded level`);
+  for (const path of model.declaredBy) parts.push(`also declared by ${path.harness} (vendor ${path.vendor ?? "unresolved"})`);
+  if (model.effortInModelId && harness.effortTransport !== null) {
+    parts.push(`${harness.effortTransport} is passed on top of the id-encoded level`);
   }
   return parts.join(" · ");
 }
@@ -480,7 +480,7 @@ function effortLine(model) {
 function allocationLine(runtime) {
   const tier = runtime.tier === null ? "" : ` · tier ${runtime.tier}`;
   const costRank = runtime.costRank === null ? "" : ` · costRank ${runtime.costRank}`;
-  return `${runtime.id} · driver ${runtime.driver} · model ${runtime.model} · vendor ${runtime.vendor}${tier}${costRank}`;
+  return `${runtime.id} · harness ${runtime.harness} · model ${runtime.model} · vendor ${runtime.vendor}${tier}${costRank}`;
 }
 
 /** @param {string} left @param {string} right @returns {number} */

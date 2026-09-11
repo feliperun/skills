@@ -1,4 +1,4 @@
-const REPORTED_DRIVERS = new Set(["codex", "claude", "agy", "dsh", "zcode"]);
+const REPORTED_HARNESSES = new Set(["codex", "claude", "agy", "dsh", "zcode"]);
 const EXEMPTION_MARKER = "guard-exempt: schema-only";
 
 /**
@@ -119,16 +119,16 @@ function stripLeadingTrivia(text) {
 
 /**
  * @param {string} entryText
- * @returns {{runtimeId: string, driver: string|null, hasExecutable: boolean, exempt: boolean}|null}
+ * @returns {{runtimeId: string, harness: string|null, hasExecutable: boolean, exempt: boolean}|null}
  */
 function parseRuntimeEntry(entryText) {
   const keyMatch = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/.exec(stripLeadingTrivia(entryText));
   if (!keyMatch) return null;
   const runtimeId = /** @type {string} */ (keyMatch[1] ?? keyMatch[2] ?? keyMatch[3]);
-  const driverMatch = /\bdriver\s*:\s*["']([^"']+)["']/.exec(entryText);
+  const harnessMatch = /\bharness\s*:\s*["']([^"']+)["']/.exec(entryText);
   return {
     runtimeId,
-    driver: driverMatch ? driverMatch[1] : null,
+    harness: harnessMatch ? harnessMatch[1] : null,
     // Matches both `executable: value` and the ES2015 shorthand `{ executable }`.
     hasExecutable: /\bexecutable\b/.test(entryText),
     exempt: entryText.includes(EXEMPTION_MARKER),
@@ -137,13 +137,13 @@ function parseRuntimeEntry(entryText) {
 
 /**
  * Scan a test file's source for `runtimes: { ... }` fixture blocks and report
- * every entry whose driver would resolve a real provider CLI (codex, claude,
+ * every entry whose harness would resolve a real provider CLI (codex, claude,
  * agy, dsh, zcode) but declares no `executable`, since env-preflight then
  * falls back to whatever binary of that name is first on PATH.
  *
  * @param {string} source
  * @param {string} fileName
- * @returns {{fileName: string, runtimeId: string, driver: string}[]}
+ * @returns {{fileName: string, runtimeId: string, harness: string}[]}
  */
 export function runtimesMissingExecutable(source, fileName) {
   const findings = [];
@@ -159,10 +159,10 @@ export function runtimesMissingExecutable(source, fileName) {
     const blockMask = sourceMask.slice(openBraceIndex + 1, closeBraceIndex);
     for (const entryText of splitTopLevelEntries(blockContent, blockMask)) {
       const entry = parseRuntimeEntry(entryText);
-      if (!entry || !entry.driver) continue;
-      if (!REPORTED_DRIVERS.has(entry.driver)) continue;
+      if (!entry || !entry.harness) continue;
+      if (!REPORTED_HARNESSES.has(entry.harness)) continue;
       if (entry.hasExecutable || entry.exempt) continue;
-      findings.push({ fileName, runtimeId: entry.runtimeId, driver: entry.driver });
+      findings.push({ fileName, runtimeId: entry.runtimeId, harness: entry.harness });
     }
   }
   return findings;

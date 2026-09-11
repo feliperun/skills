@@ -17,7 +17,7 @@
 import { realpathSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
-import { TOOL_OUTPUT_LIMIT_BYTES, truncateToolOutput } from "./drivers/exec-jsonl.mjs";
+import { TOOL_OUTPUT_LIMIT_BYTES, truncateToolOutput } from "./harnesses/exec-jsonl/index.mjs";
 
 /** Absolute path of this hook, embedded in generated settings. */
 export const HOOK_PATH = fileURLToPath(import.meta.url);
@@ -51,7 +51,7 @@ function parsePolicy(argv) {
  * The hook command string registered in generated settings, carrying the
  * policy it enforces as explicit arguments.
  *
- * @param {import("./drivers/index.mjs").ToolPolicy} policy
+ * @param {import("./harnesses/index.mjs").ToolPolicy} policy
  * @returns {string}
  */
 export function hookCommand(policy) {
@@ -68,7 +68,7 @@ export function hookCommand(policy) {
  * PreToolUse denial where foreground-only applies, PostToolUse bounding where
  * a byte limit applies.
  *
- * @param {import("./drivers/index.mjs").ToolPolicy} policy
+ * @param {import("./harnesses/index.mjs").ToolPolicy} policy
  * @returns {{hooks: Record<string, {matcher: string, hooks: {type: "command", command: string}[]}[]>}}
  */
 export function hookSettings(policy) {
@@ -185,7 +185,7 @@ function hookDecision(policy, payload) {
 }
 
 /**
- * @param {import("./drivers/index.mjs").ToolPolicy} policy
+ * @param {import("./harnesses/index.mjs").ToolPolicy} policy
  * @returns {{type: "command", command: string}}
  */
 function hookEntry(policy) {

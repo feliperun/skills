@@ -1,4 +1,4 @@
-import { normalizeCodexResult, parseVersion, toml } from "./protocol.mjs";
+import { normalizeCodexResult, parseVersion, toml } from "../protocol.mjs";
 
 /**
  * Bound the Codex harness preamble: a closed-packet worker or a read-only judge
@@ -24,9 +24,9 @@ export const CODEX_PREAMBLE_OVERRIDES = Object.freeze([
 ]);
 
 /**
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const codexDriver = {
+export const codexHarness = {
   capabilities: {
     structuredOutput: true,
     promptTransport: "stdin",
@@ -50,19 +50,19 @@ export const codexDriver = {
     defaultMode: "workspace-write",
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_CODEX_BIN ?? runtime.executable ?? "codex";
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const continuationId = options.continuationId ?? null;
     const args = continuationId
@@ -83,5 +83,5 @@ export const codexDriver = {
   normalize: normalizeCodexResult,
 };
 
-export const driver = codexDriver;
-export default codexDriver;
+export const harness = codexHarness;
+export default codexHarness;

@@ -8,13 +8,13 @@
  * Parse newline-delimited JSON without accepting provider prose.
  *
  * @param {string} stdout
- * @param {string} driver
+ * @param {string} harness
  * @returns {Record<string, unknown>[]}
  */
-export function parseJsonLines(stdout, driver) {
+export function parseJsonLines(stdout, harness) {
   const raw = Buffer.from(String(stdout), "utf8");
-  const truncated = raw.length > DRIVER_OUTPUT_LIMIT_BYTES;
-  const bounded = truncated ? raw.subarray(raw.length - DRIVER_OUTPUT_LIMIT_BYTES).toString("utf8") : raw.toString("utf8");
+  const truncated = raw.length > HARNESS_OUTPUT_LIMIT_BYTES;
+  const bounded = truncated ? raw.subarray(raw.length - HARNESS_OUTPUT_LIMIT_BYTES).toString("utf8") : raw.toString("utf8");
   /** @type {Record<string, unknown>[]} */
   const events = [];
   let firstNonEmpty = true;
@@ -27,13 +27,13 @@ export function parseJsonLines(stdout, driver) {
       // A bounded tail (or a log capped by the gate wrapper) can start inside a
       // provider event; only the first non-empty line may be partial.
       if (firstNonEmpty) continue;
-      throw new Error(`${driver} emitted invalid JSON on line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`${harness} emitted invalid JSON on line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return events;
 }
 
-export const DRIVER_OUTPUT_LIMIT_BYTES = 512 * 1024;
+export const HARNESS_OUTPUT_LIMIT_BYTES = 512 * 1024;
 
 /**
  * @param {string} stdout

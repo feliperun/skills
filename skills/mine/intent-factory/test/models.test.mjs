@@ -5,13 +5,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../scripts/runtime-discovery.mjs";
-import { MODEL_DRIVER_ORDER, parseAgyModels } from "../scripts/models.mjs";
-import { registeredDrivers, resolveVendor } from "../scripts/drivers/index.mjs";
+import { MODEL_HARNESS_ORDER, parseAgyModels } from "../scripts/models.mjs";
+import { registeredHarnesses, resolveVendor } from "../scripts/harnesses/index.mjs";
 import { fakeAgy } from "./helpers.mjs";
 import { RUNNER_CLI } from "./runner-helpers.mjs";
 
 /**
- * Every driver's executable is pinned to a path that does not exist unless a
+ * Every harness's executable is pinned to a path that does not exist unless a
  * test says otherwise: the host's own binaries (and, above all, a real `agy`
  * answering `models`) must never reach an assertion.
  *
@@ -22,8 +22,8 @@ function hermeticEnv(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "models-absent-"));
   /** @type {Record<string, string>} */
   const env = {};
-  for (const driver of ["claude", "codex", "agy", "dsh", "zcode", "exec-jsonl", "replay"]) {
-    env[`INTENT_FACTORY_${driver.replace(/-/gu, "_").toUpperCase()}_BIN`] = join(directory, `absent-${driver}`);
+  for (const harness of ["claude", "codex", "agy", "dsh", "zcode", "exec-jsonl", "replay"]) {
+    env[`INTENT_FACTORY_${harness.replace(/-/gu, "_").toUpperCase()}_BIN`] = join(directory, `absent-${harness}`);
   }
   return { ...env, ...overrides };
 }
@@ -54,11 +54,11 @@ function modelsJson(argv, env) {
 
 /**
  * @param {any} report
- * @param {string} driver
+ * @param {string} harness
  * @returns {any}
  */
-function blockOf(report, driver) {
-  return /** @type {any[]} */ (report.drivers).find((view) => view.driver === driver);
+function blockOf(report, harness) {
+  return /** @type {any[]} */ (report.harnesses).find((view) => view.harness === harness);
 }
 
 /**
@@ -68,32 +68,32 @@ function blockOf(report, driver) {
  */
 function modelOf(block, id) {
   const model = /** @type {any[]} */ (block.models).find((entry) => entry.id === id);
-  assert.ok(model, `${block.driver} does not list ${id}`);
+  assert.ok(model, `${block.harness} does not list ${id}`);
   return model;
 }
 
-test("a driver whose catalogue nothing declares is listed with its source named, never dropped", async () => {
+test("a harness whose catalogue nothing declares is listed with its source named, never dropped", async () => {
   const report = modelsJson([], hermeticEnv());
-  for (const driver of ["exec-jsonl", "replay"]) {
-    const block = blockOf(report, driver);
-    assert.ok(block, `${driver} is registered but missing from the report`);
+  for (const harness of ["exec-jsonl", "replay"]) {
+    const block = blockOf(report, harness);
+    assert.ok(block, `${harness} is registered but missing from the report`);
     assert.equal(block.catalogue, "runtime-declared", "the report names who supplies the models");
-    assert.deepEqual(block.models, [], "no model id is invented for a runtime-defined driver");
-    assert.equal(block.effortTransport, null, `${driver} has no effort surface to report`);
+    assert.deepEqual(block.models, [], "no model id is invented for a runtime-defined harness");
+    assert.equal(block.effortTransport, null, `${harness} has no effort surface to report`);
   }
   const text = modelsCli([], hermeticEnv()).stdout;
   assert.match(text, /\[exec-jsonl\][^\n]*catalogue runtime-declared/u);
   assert.match(text, /\[replay\][^\n]*catalogue runtime-declared/u);
 });
 
-test("the report covers every registered driver exactly once, in the documented order", async () => {
+test("the report covers every registered harness exactly once, in the documented order", async () => {
   const report = modelsJson([], hermeticEnv());
-  const listed = /** @type {any[]} */ (report.drivers).map((view) => view.driver);
-  assert.deepEqual([...listed].sort(), [...registeredDrivers()].sort(), "no registered driver is missing and none is invented");
-  assert.deepEqual(listed, [...listed].sort((left, right) => MODEL_DRIVER_ORDER.indexOf(left) - MODEL_DRIVER_ORDER.indexOf(right)), "the fixed order, not registry or object order");
-  for (const view of report.drivers) {
-    assert.ok(view.executable.length > 0, `${view.driver} resolves an executable`);
-    assert.ok(view.vendor !== undefined && view.vendorNote !== undefined, `${view.driver} resolves or explains its vendor`);
+  const listed = /** @type {any[]} */ (report.harnesses).map((view) => view.harness);
+  assert.deepEqual([...listed].sort(), [...registeredHarnesses()].sort(), "no registered harness is missing and none is invented");
+  assert.deepEqual(listed, [...listed].sort((left, right) => MODEL_HARNESS_ORDER.indexOf(left) - MODEL_HARNESS_ORDER.indexOf(right)), "the fixed order, not registry or object order");
+  for (const view of report.harnesses) {
+    assert.ok(view.executable.length > 0, `${view.harness} resolves an executable`);
+    assert.ok(view.vendor !== undefined && view.vendorNote !== undefined, `${view.harness} resolves or explains its vendor`);
   }
 });
 
@@ -143,8 +143,8 @@ test("the effort vocabulary is the vendor's real one: dsh defaults to high, agy 
 
 test("a model reachable by two paths shows both resolved vendors", async () => {
   const report = modelsJson([], hermeticEnv());
-  assert.deepEqual(modelOf(blockOf(report, "claude"), "claude-sonnet-4-6").declaredBy, [{ driver: "agy", vendor: "google" }]);
-  assert.deepEqual(modelOf(blockOf(report, "agy"), "claude-sonnet-4-6").declaredBy, [{ driver: "claude", vendor: "anthropic" }]);
+  assert.deepEqual(modelOf(blockOf(report, "claude"), "claude-sonnet-4-6").declaredBy, [{ harness: "agy", vendor: "google" }]);
+  assert.deepEqual(modelOf(blockOf(report, "agy"), "claude-sonnet-4-6").declaredBy, [{ harness: "claude", vendor: "anthropic" }]);
   assert.equal(blockOf(report, "claude").vendor, "anthropic");
   assert.equal(blockOf(report, "agy").vendor, "google", "agy resells the same id under its own vendor");
 });
@@ -186,8 +186,8 @@ test("probe mode reports per-runtime reachability with the existing probe and ad
   const fake = fakeAgy(mkdtempSync(join(tmpdir(), "models-probe-agy-")));
   const report = modelsJson(["--probe"], hermeticEnv({ INTENT_FACTORY_AGY_BIN: fake }));
   assert.match(report.availability, /doctor/u, "probe mode still points at doctor as authoritative");
-  for (const view of report.drivers) {
-    assert.ok(view.probe, `${view.driver} carries a probe result`);
+  for (const view of report.harnesses) {
+    assert.ok(view.probe, `${view.harness} carries a probe result`);
     assert.equal(typeof view.probe.ok, "boolean");
   }
   assert.equal(blockOf(report, "agy").probe.available, true);

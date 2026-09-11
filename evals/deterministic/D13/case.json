@@ -10,8 +10,8 @@
     "goal": "prove an uncited judge rejection is a protocol failure that spends no worker revision",
     "runtimeDefaults": { "worker": "replay-worker", "judge": "replay-judge" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} },
-      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} },
+      "replay-judge": { "harness": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
     },
     "nodes": [
       {

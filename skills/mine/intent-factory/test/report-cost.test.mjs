@@ -123,7 +123,7 @@ function invocation(id, costUsd) {
     pid: process.pid,
     processGroupId: null,
     processStartToken: null,
-    driver: "codex",
+    harness: "codex",
     phase: "worker",
     promptPath: null,
     stdoutPath: null,

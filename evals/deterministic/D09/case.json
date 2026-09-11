@@ -10,7 +10,7 @@
     "goal": "prove ENOSPC on a run-directory write triggers garbage collection once and the write resumes",
     "runtimeDefaults": { "worker": "replay-worker" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
     },
     "nodes": [
       {

@@ -246,8 +246,8 @@ function patchRecordingEnvelopeField(content, { index, path, value, remove }) {
  * "soon" means relative to whenever the suite actually runs. Resolved once,
  * at materialization time, into a real ISO timestamp measured from now; every
  * other value (an absolute timestamp, or the field's absence) passes through
- * untouched. The replay driver itself never sees the placeholder, only the
- * resolved literal string — exactly the shape a real driver would produce.
+ * untouched. The replay harness itself never sees the placeholder, only the
+ * resolved literal string — exactly the shape a real harness would produce.
  *
  * @param {string} content
  * @returns {string}
@@ -705,9 +705,9 @@ async function runCase({ caseDir, spec, expected }, options) {
   const proves = /** @type {string} */ (spec.proves ?? "");
 
   if (options.assertNoModel) {
-    const nonReplay = Object.entries(/** @type {Record<string, {driver?: string}>} */ (spec.contract?.runtimes ?? {}))
-      .filter(([, runtime]) => runtime.driver !== "replay")
-      .map(([runtimeId, runtime]) => `${runtimeId} (${runtime.driver})`);
+    const nonReplay = Object.entries(/** @type {Record<string, {harness?: string}>} */ (spec.contract?.runtimes ?? {}))
+      .filter(([, runtime]) => runtime.harness !== "replay")
+      .map(([runtimeId, runtime]) => `${runtimeId} (${runtime.harness})`);
     if (nonReplay.length) {
       return { id, title, proves, ok: false, failures: [`--assert-no-model: non-replay runtime(s): ${nonReplay.join(", ")}`] };
     }

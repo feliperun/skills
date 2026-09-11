@@ -13,7 +13,7 @@ actionable verdicts into the session.
 
 | You need | Read |
 | --- | --- |
-| Contract shape, packets, driver protocol, runtimes, gates, worker results, resume | [contract.md](references/contract.md) |
+| Contract shape, packets, harness protocol, runtimes, gates, worker results, resume | [contract.md](references/contract.md) |
 | Worktrees, integration, controller lock, status.json, notify, dashboard, campaigns | [operations.md](references/operations.md) |
 
 ## Session commands

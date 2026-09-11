@@ -22,7 +22,7 @@ import {
   renderStatus,
   validateContract,
 } from "./lib.mjs";
-import { probeRuntime, providerCommand } from "./drivers/index.mjs";
+import { probeRuntime, providerCommand } from "./harnesses/index.mjs";
 import { modelsCommand } from "./models.mjs";
 import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./env-preflight.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
@@ -71,9 +71,9 @@ import {
 /** @typedef {import("./contract.mjs").BoundedScope} BoundedScope */
 /** @typedef {import("./lock.mjs").LockRecord} LockRecord */
 /** @typedef {ReturnType<typeof acquireLock>} LockHandle */
-/** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
-/** @typedef {import("./drivers/index.mjs").ProbeResult} ProbeResult */
-/** @typedef {import("./drivers/index.mjs").ProviderEnvelope} ProviderEnvelope */
+/** @typedef {import("./harnesses/index.mjs").HarnessRuntime} HarnessRuntime */
+/** @typedef {import("./harnesses/index.mjs").ProbeResult} ProbeResult */
+/** @typedef {import("./harnesses/index.mjs").ProviderEnvelope} ProviderEnvelope */
 /** @typedef {import("./campaign.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
 /** @typedef {import("./node.mjs").Job} Job */
@@ -164,12 +164,12 @@ function createLivePreflightRepo() {
  * @returns {RuntimeSnapshot}
  */
 function safeLiveRuntime(runtime) {
-  if (runtime.driver === "codex") return { ...runtime, sandbox: "read-only" };
-  if (runtime.driver === "dsh") return { ...runtime, sandbox: "read-only" };
-  if (runtime.driver === "claude") return { ...runtime, permissionMode: "plan" };
+  if (runtime.harness === "codex") return { ...runtime, sandbox: "read-only" };
+  if (runtime.harness === "dsh") return { ...runtime, sandbox: "read-only" };
+  if (runtime.harness === "claude") return { ...runtime, permissionMode: "plan" };
   // `plan` is the ZCode mode that reads without writing; the adapter's own
   // default is `yolo`, which a preflight prompt must never reach.
-  if (runtime.driver === "zcode") return { ...runtime, permissionMode: "plan" };
+  if (runtime.harness === "zcode") return { ...runtime, permissionMode: "plan" };
   return { ...runtime };
 }
 
@@ -743,7 +743,7 @@ async function main(argv) {
     const environment = environmentPreflight({
       cwd: contract.cwd,
       runtimes: reachableRuntimes(contract),
-      driverVersions: Object.fromEntries(checks.map((check) => [check.id, check.version])),
+      harnessVersions: Object.fromEntries(checks.map((check) => [check.id, check.version])),
     });
     // Opt-in: this actually runs the contract's verification commands, so it
     // costs whatever they cost. It is the only check that can prove a command
@@ -758,7 +758,7 @@ async function main(argv) {
         environment: [...environment.checks, ...timing],
         checks: checks.map((check) => ({
           id: check.id,
-          driver: check.driver,
+          harness: check.harness,
           executable: check.executable,
           model: check.model,
           version: check.version,

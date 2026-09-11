@@ -10,7 +10,7 @@
     "goal": "prove an orphaned running node with a finished stream is adopted, not re-dispatched",
     "runtimeDefaults": { "worker": "replay-worker" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
     },
     "nodes": [
       {

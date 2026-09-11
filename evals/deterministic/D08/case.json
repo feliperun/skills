@@ -10,9 +10,9 @@
     "goal": "prove a worker fallback sharing the judge's vendor is rejected at validate, not left to reach dispatch",
     "runtimeDefaults": { "worker": "replay-worker", "judge": "replay-judge" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "fallback": "replay-worker-fallback", "config": {} },
-      "replay-worker-fallback": { "driver": "replay", "model": "replay-worker-fallback-model", "vendor": "replay-judge-vendor", "config": {} },
-      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "fallback": "replay-worker-fallback", "config": {} },
+      "replay-worker-fallback": { "harness": "replay", "model": "replay-worker-fallback-model", "vendor": "replay-judge-vendor", "config": {} },
+      "replay-judge": { "harness": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
     },
     "nodes": [
       {

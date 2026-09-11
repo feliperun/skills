@@ -30,14 +30,14 @@ test("resume adopts an orphaned worker result instead of repeating the work", as
 });
 
 
-test("resume refuses a driver that was known but is now unavailable", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-resume-driver-drift-"));
-  const path = writeContract(directory, fixture({ id: "resume-driver-drift-run", pollIntervalMs: 10 }));
+test("resume refuses a harness that was known but is now unavailable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-resume-harness-drift-"));
+  const path = writeContract(directory, fixture({ id: "resume-harness-drift-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
   await assert.rejects(
     () => withFakeCodex(directory, "version-fail", () => resumeRun(runDir)),
-    /driver probe unavailable for luna; resume refused/u,
+    /harness probe unavailable for luna; resume refused/u,
   );
 });
 
@@ -296,7 +296,7 @@ test("cancelRun confirms controller death and terminates every recorded provider
     pid: childPid(provider),
     processGroupId: process.platform === "win32" ? null : childPid(provider),
     processStartToken: processStartToken(childPid(provider)),
-    driver: "codex",
+    harness: "codex",
     runtimeId: "luna",
     runtimeFingerprint: "test-runtime",
     runId: basename(runDir),
@@ -397,7 +397,7 @@ test("resume adopts a still-live orphan invocation after its stream completes", 
     pid: childPid(child),
     processGroupId: process.platform === "win32" ? null : childPid(child),
     processStartToken: processStartToken(childPid(child)),
-    driver: "codex",
+    harness: "codex",
     runtimeId: "luna",
     runtimeFingerprint: "test-runtime",
     runId: basename(runDir),

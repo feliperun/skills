@@ -7,7 +7,7 @@ import { preflightContract, runContract } from "../scripts/runner.mjs";
 import { livenessState } from "../scripts/node.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "../scripts/failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "../scripts/backoff.mjs";
-import { getDriver } from "../scripts/drivers/index.mjs";
+import { getHarness } from "../scripts/harnesses/index.mjs";
 import { fakeCodex, fakeExecJsonl, fixture, packet, withFakeAgy, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, fakeClaudeLike, flagValue, failoverContract, RESET_NOW, NETWORK_NOW, NETWORK_DEADLINE, halfJitter } from "./runner-helpers.mjs";
 
@@ -47,7 +47,7 @@ test("preflight reports a missing credential by variable name only", async () =>
     const checks = await withFakeCodex(directory, "pass", () => preflightContract(path));
     assert.deepEqual(checks.map((check) => check.id), ["flash"]);
     assert.equal(checks[0].ok, false);
-    assert.equal(checks[0].driver, "codex");
+    assert.equal(checks[0].harness, "codex");
     assert.match(checks[0].executable, /fake-codex-pass\.mjs$/u);
     assert.equal(checks[0].model, "deepseek-v4-flash");
     assert.equal(checks[0].version, "fake-codex 1.0.0");
@@ -72,8 +72,8 @@ test("preflight preserves conflicting runtime and node capability requirements",
   const path = writeContract(directory, fixture({
     runtimeDefaults: {},
     runtimes: {
-      luna: { driver: "codex", model: "gpt-5.6-luna", executable: "/nonexistent/codex", requiredCapabilities: { sandbox: true } },
-      sol: { driver: "codex", model: "gpt-5.6-sol", executable: "/nonexistent/codex" },
+      luna: { harness: "codex", model: "gpt-5.6-luna", executable: "/nonexistent/codex", requiredCapabilities: { sandbox: true } },
+      sol: { harness: "codex", model: "gpt-5.6-sol", executable: "/nonexistent/codex" },
     },
     nodes: [{
       id: "build",
@@ -98,7 +98,7 @@ test("live preflight proves generation, redacts failures, and static mode stays 
   const path = join(directory, "contract.json");
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable } },
+    runtimes: { jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previous = process.env.INTENT_FACTORY_TEST_LIVE_SECRET;
@@ -117,7 +117,7 @@ test("live preflight proves generation, redacts failures, and static mode stays 
     const staticPath = join(directory, "static-contract.json");
     writeFileSync(staticPath, `${JSON.stringify(fixture({
       runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-      runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: staticExecutable } },
+      runtimes: { jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: staticExecutable } },
       nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
     }), null, 2)}\n`);
     const staticChecks = await preflightContract(staticPath, { static: true });
@@ -152,7 +152,7 @@ if (process.argv.includes("--version")) {
   const path = join(directory, "contract.json");
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
+    runtimes: { jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }), null, 2)}\n`);
   const previousNotify = process.env.INTENT_FACTORY_NOTIFY_BIN;
@@ -181,8 +181,8 @@ test("preflight deduplicates initial runtimes and follows failover targets", asy
   writeFileSync(path, `${JSON.stringify(fixture({
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "exec-jsonl", model: "primary", vendor: "primary-vendor", executable, fallback: "backup" },
-      backup: { driver: "exec-jsonl", model: "backup", vendor: "backup-vendor", executable },
+      primary: { harness: "exec-jsonl", model: "primary", vendor: "primary-vendor", executable, fallback: "backup" },
+      backup: { harness: "exec-jsonl", model: "backup", vendor: "backup-vendor", executable },
     },
     nodes: [
       { id: "first", type: "backend", taskPacket: packet(), gate: false },
@@ -197,9 +197,9 @@ test("preflight deduplicates initial runtimes and follows failover targets", asy
 test("failoverEdges lists one declared edge per runtime, ordered by costRank", () => {
   const contract = failoverContract("runner-declared-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "dear" },
-      dear: { driver: "codex", model: "dear", executable: "/nonexistent/codex", costRank: 9 },
-      cheap: { driver: "codex", model: "cheap", executable: "/nonexistent/codex", costRank: 1, fallback: "dear" },
+      mid: { harness: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "dear" },
+      dear: { harness: "codex", model: "dear", executable: "/nonexistent/codex", costRank: 9 },
+      cheap: { harness: "codex", model: "cheap", executable: "/nonexistent/codex", costRank: 1, fallback: "dear" },
     },
   });
   assert.deepEqual(
@@ -225,10 +225,10 @@ test("an unranked runtime's declared edge sorts after every ranked runtime", () 
   // declare one at or past any sentinel a ranked-last encoding could pick.
   const contract = failoverContract("runner-unranked-failover-", {
     runtimes: {
-      mid: { driver: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "target" },
-      unranked: { driver: "codex", model: "unranked", executable: "/nonexistent/codex", fallback: "target" },
-      astronomical: { driver: "codex", model: "astronomical", executable: "/nonexistent/codex", costRank: Number.MAX_SAFE_INTEGER, fallback: "target" },
-      target: { driver: "codex", model: "target", executable: "/nonexistent/codex" },
+      mid: { harness: "codex", model: "mid", executable: "/nonexistent/codex", costRank: 2, fallback: "target" },
+      unranked: { harness: "codex", model: "unranked", executable: "/nonexistent/codex", fallback: "target" },
+      astronomical: { harness: "codex", model: "astronomical", executable: "/nonexistent/codex", costRank: Number.MAX_SAFE_INTEGER, fallback: "target" },
+      target: { harness: "codex", model: "target", executable: "/nonexistent/codex" },
     },
   });
   assert.deepEqual(
@@ -404,8 +404,8 @@ process.stdin.on("end", () => {
     timeoutSec: 60,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "codex", model: "primary", executable: flaky, costRank: 1 },
-      spare: { driver: "codex", model: "spare", executable: fakeCodex(directory, "pass"), costRank: 2 },
+      primary: { harness: "codex", model: "primary", executable: flaky, costRank: 1 },
+      spare: { harness: "codex", model: "spare", executable: fakeCodex(directory, "pass"), costRank: 2 },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -463,8 +463,8 @@ process.stdin.on("end", () => {
     timeoutSec: 60,
     runtimeDefaults: { worker: "primary-worker", judge: "primary" },
     runtimes: {
-      "primary-worker": { driver: "codex", model: "primary", vendor: "primary-worker-vendor", executable: flaky },
-      primary: { driver: "codex", model: "primary", vendor: "primary-judge-vendor", executable: flaky },
+      "primary-worker": { harness: "codex", model: "primary", vendor: "primary-worker-vendor", executable: flaky },
+      primary: { harness: "codex", model: "primary", vendor: "primary-judge-vendor", executable: flaky },
     },
     nodes: [{
       id: "build",
@@ -496,7 +496,7 @@ test("quota exhaustion with no declared fallback leaves the node exhausted", asy
     timeoutSec: 5,
     runtimeDefaults: { worker: "mid", judge: "mid" },
     runtimes: {
-      mid: { driver: "codex", model: "mid", executable: exhausted, costRank: 2 },
+      mid: { harness: "codex", model: "mid", executable: exhausted, costRank: 2 },
     },
     nodes: [{ id: "build", type: "backend", runtime: "mid", taskPacket: packet(), gate: false }],
   }));
@@ -517,8 +517,8 @@ test("quota exhaustion routes through the declared failover edge", async () => {
     timeoutSec: 5,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "codex", model: "primary", executable: primary, fallback: "backup" },
-      backup: { driver: "codex", model: "backup", executable: backup },
+      primary: { harness: "codex", model: "primary", executable: primary, fallback: "backup" },
+      backup: { harness: "codex", model: "backup", executable: backup },
     },
     nodes: [{ id: "build", type: "backend", runtime: "primary", taskPacket: packet(), gate: false }],
   }));
@@ -543,8 +543,8 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
   // derives failed even when the error is quota-flavored: the run is not
   // waiting for a provider to come back, it is over.
   //
-  // Carve-out: the codex driver's turn.failed quota branch never threads the
-  // provider's resetAt into the envelope's error (drivers are out of scope
+  // Carve-out: the codex harness's turn.failed quota branch never threads the
+  // provider's resetAt into the envelope's error (harnesses are out of scope
   // for this phase), so a fake codex cannot make classifyTransition see a
   // reset window and exercise this end to end through runContract. This
   // exercises livenessState directly against the exact shape the runner
@@ -570,7 +570,7 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
     pollIntervalMs: 10,
     timeoutSec: 5,
     runtimeDefaults: { worker: "primary", judge: "primary" },
-    runtimes: { primary: { driver: "codex", model: "primary", executable: quotaPrimary } },
+    runtimes: { primary: { harness: "codex", model: "primary", executable: quotaPrimary } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const terminalResult = await runContract(terminalPath);
@@ -601,7 +601,7 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   const path = writeContract(directory, fixture({
     id: "phase-reuse-run",
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
+    runtimes: { jsonl: { harness: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet({ objective: "Continue it" }), gate: false },
@@ -634,8 +634,8 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
     id: "phase-runtime-identity-run",
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "exec-jsonl", model: "same-model", vendor: "primary-vendor", executable },
-      backup: { driver: "exec-jsonl", model: "same-model", vendor: "backup-vendor", executable },
+      primary: { harness: "exec-jsonl", model: "same-model", vendor: "primary-vendor", executable },
+      backup: { harness: "exec-jsonl", model: "same-model", vendor: "backup-vendor", executable },
     },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", runtime: "primary", taskPacket: packet(), gate: false },
@@ -671,7 +671,7 @@ else { let input = ""; process.stdin.on("data", (chunk) => { input += chunk; });
   const path = writeContract(directory, fixture({
     id: "phase-chronology-run",
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
+    runtimes: { jsonl: { harness: "exec-jsonl", model: "phase-model", vendor: "exec-jsonl-worker", executable } },
     nodes: [
       { id: "third", type: "backend", phase: "implementation", dependsOn: ["second"], taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -691,7 +691,7 @@ test("Claude phase reuse passes the first explicit session through --resume", as
   const path = writeContract(directory, fixture({
     id: "claude-phase-reuse-run",
     runtimeDefaults: { worker: "provider", judge: "provider" },
-    runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
+    runtimes: { provider: { harness: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -710,7 +710,7 @@ test("a completed phase without a continuation ID remains a fresh invocation", a
   const path = writeContract(directory, fixture({
     id: "phase-no-id-run",
     runtimeDefaults: { worker: "provider", judge: "provider" },
-    runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
+    runtimes: { provider: { harness: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -726,14 +726,14 @@ test("a completed phase without a continuation ID remains a fresh invocation", a
 test("a non-continuing runtime gets a deterministic fresh phase handoff", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-phase-no-continuation-"));
   const fake = fakeClaudeLike(directory);
-  const adapter = getDriver("claude");
+  const adapter = getHarness("claude");
   const previous = adapter.capabilities.continuation;
   adapter.capabilities.continuation = false;
   try {
     const path = writeContract(directory, fixture({
       id: "phase-no-continuation-run",
       runtimeDefaults: { worker: "provider", judge: "provider" },
-      runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
+      runtimes: { provider: { harness: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
       nodes: [
         { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
         { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -779,7 +779,7 @@ test("blocks downstream nodes after a failed dependency", async () => {
 });
 
 
-test("worker invocations send no tool policy to a driver that cannot enforce it", async () => {
+test("worker invocations send no tool policy to a harness that cannot enforce it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-tool-policy-"));
   const marker = join(directory, ".runs", "tool-policy-request.json");
   const provider = join(directory, "policy-provider.mjs");
@@ -803,7 +803,7 @@ if (process.argv.includes("--version")) {
     id: "tool-policy-run",
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl" },
-    runtimes: { jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
+    runtimes: { jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: provider } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const result = await runContract(path);

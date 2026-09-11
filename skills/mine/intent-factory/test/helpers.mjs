@@ -141,15 +141,15 @@ export function fixture(overrides = {}) {
     cwd: ".",
     runtimeDefaults: { worker: "luna", judge: "sol" },
     runtimes: {
-      // sol declares its vendor outright, distinct from luna's driver-default
+      // sol declares its vendor outright, distinct from luna's harness-default
       // "openai": every fixture node's default worker (luna) and judge (sol)
       // pairing must clear the worker/judge cross-vendor gate untouched.
-      luna: { driver: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
-      sol: { driver: "codex", model: "gpt-5.6-sol", reasoning: "xhigh", vendor: "openai-sol" },
-      opus: { driver: "claude", model: "opus", reasoning: "high" },
-      agy: { driver: "agy", model: "gemini-3.7-flash-low" },
+      luna: { harness: "codex", model: "gpt-5.6-luna", reasoning: "xhigh" },
+      sol: { harness: "codex", model: "gpt-5.6-sol", reasoning: "xhigh", vendor: "openai-sol" },
+      opus: { harness: "claude", model: "opus", reasoning: "high" },
+      agy: { harness: "agy", model: "gemini-3.7-flash-low" },
       flash: {
-        driver: "codex",
+        harness: "codex",
         model: "deepseek-v4-flash",
         config: { model_provider: "deepseek", "model_providers.deepseek.env_key": "DEEPSEEK_API_KEY" },
       },

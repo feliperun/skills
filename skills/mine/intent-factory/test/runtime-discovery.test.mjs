@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeAssignments, nextSameTierRuntime, normalizeProviderAvailability } from "../scripts/runtime-discovery.mjs";
-import { normalizeProviderResult, probeRuntime } from "../scripts/drivers/index.mjs";
+import { normalizeProviderResult, probeRuntime } from "../scripts/harnesses/index.mjs";
 
 const ready = { available: true, exhaustedUntil: null, reason: "ready" };
 
@@ -21,8 +21,8 @@ test("normalizes Z.ai code 1310 with its reset timestamp", () => {
 });
 
 test("normalizes Codex and Claude authentication failures", () => {
-  for (const driver of ["codex", "claude"]) {
-    const availability = normalizeProviderAvailability(driver, {
+  for (const harness of ["codex", "claude"]) {
+    const availability = normalizeProviderAvailability(harness, {
       status: "failed",
       error: { code: "authentication_failed", message: "invalid API key" },
     });
@@ -31,8 +31,8 @@ test("normalizes Codex and Claude authentication failures", () => {
 });
 
 test("normalizes Codex and Claude quota failures separately from auth", () => {
-  for (const driver of ["codex", "claude"]) {
-    const availability = normalizeProviderAvailability(driver, {
+  for (const harness of ["codex", "claude"]) {
+    const availability = normalizeProviderAvailability(harness, {
       status: "failed",
       error: { code: "quota_exhausted", message: "usage limit reached", resetAt: "2099-01-01T00:00:00Z" },
     });
@@ -41,7 +41,7 @@ test("normalizes Codex and Claude quota failures separately from auth", () => {
 });
 
 test("an absent CLI is unavailable with a named not_found reason", async () => {
-  const result = await probeRuntime({ driver: "codex", model: "m", executable: join(mkdtempSync(join(tmpdir(), "runtime-discovery-")), "missing") });
+  const result = await probeRuntime({ harness: "codex", model: "m", executable: join(mkdtempSync(join(tmpdir(), "runtime-discovery-")), "missing") });
   assert.equal(result.ok, false);
   assert.equal(result.availability?.reason, "not_found");
 });

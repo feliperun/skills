@@ -51,7 +51,7 @@ test("doctor checks repository prerequisites without mutating anything", () => {
   const runsIgnored = payload.checks.find((check) => check.name === ".runs ignored");
   assert.ok(runsIgnored, ".runs ignored check present");
   assert.equal(runsIgnored.ok, true);
-  assert.equal(payload.checks.some((check) => check.detail.includes("required by contract")), false, "no contract means no required driver");
+  assert.equal(payload.checks.some((check) => check.detail.includes("required by contract")), false, "no contract means no required harness");
   assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
 });
 
@@ -72,7 +72,7 @@ test("doctor reports an unborn repository as a failing git check", () => {
 });
 
 
-test("doctor does not fail a driver resolved through an explicit executable", () => {
+test("doctor does not fail a harness resolved through an explicit executable", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-override-"));
   execFileSync("git", ["init", "-q", directory]);
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
@@ -91,7 +91,7 @@ test("doctor does not fail a driver resolved through an explicit executable", ()
     goal: "doctor",
     cwd: ".",
     runtimeDefaults: { worker: "wrapped", judge: "wrapped" },
-    runtimes: { wrapped: { driver: "exec-jsonl", model: "m", vendor: "wrapped-vendor", executable: "./my-worker.mjs" } },
+    runtimes: { wrapped: { harness: "exec-jsonl", model: "m", vendor: "wrapped-vendor", executable: "./my-worker.mjs" } },
     nodes: [{ id: "build", type: "backend", phase: "doctor", dependsOn: [], taskPacket: packet(), gate: false }],
   })}\n`);
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory, contract], { encoding: "utf8" });

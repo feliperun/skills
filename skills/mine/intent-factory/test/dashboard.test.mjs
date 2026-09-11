@@ -266,14 +266,14 @@ function makeWorld({ longLog = false } = {}) {
   });
   writeJson(join(runDir, "nodes", "alpha.json"), {
     id: "alpha", status: "running", startedAt: NOW, updatedAt: NOW, costUsd: 1.5,
-    runtime: { driver: "claude", model: "claude-sonnet-5" }, gate: null,
+    runtime: { harness: "claude", model: "claude-sonnet-5" }, gate: null,
     invocations: [{ role: "worker", stdoutPath: logPath, promptPath }],
     scope: { changedPaths: ["README.md"], changedPathCount: 1, unexpectedPaths: [], unexpectedPathCount: 0 },
     verification: { passed: true, commands: [{ argv: ["npm", "run", "check"], passed: true, attempts: [{ durationMs: 120, stdout: "ok", stderr: "", passed: true }] }] },
   });
   writeJson(join(runDir, "nodes", "beta.json"), {
     id: "beta", status: "exhausted", startedAt: NOW, updatedAt: LATER, costUsd: 0.4,
-    runtime: { driver: "claude", model: "claude-sonnet-5" },
+    runtime: { harness: "claude", model: "claude-sonnet-5" },
     gate: { verdict: "fail", maxSeverity: "major", summary: "needs work", findings: [{ severity: "major", description: "desc", evidence: "ev" }] },
     invocations: [], scope: null, verification: null,
   });
@@ -321,7 +321,7 @@ function makeIdleWorld() {
     identityWarnings: [], summary: "1 done",
     nodes: [{ id: "build", status: "done", phase: "p0", executionPhase: "complete", runtime: "claude/claude-sonnet-5", continuation: "fresh", attempt: 1, revisions: 0, pendingHandoff: null, note: "complete", scopeFindings: null, errorCode: null, blockedBy: [] }],
   });
-  writeJson(join(runDir, "nodes", "build.json"), { id: "build", status: "done", startedAt: NOW, updatedAt: LATER, costUsd: 0.1, runtime: { driver: "claude", model: "claude-sonnet-5" }, gate: null, invocations: [], scope: null, verification: null });
+  writeJson(join(runDir, "nodes", "build.json"), { id: "build", status: "done", startedAt: NOW, updatedAt: LATER, costUsd: 0.1, runtime: { harness: "claude", model: "claude-sonnet-5" }, gate: null, invocations: [], scope: null, verification: null });
   writeFileSync(join(runDir, "events.jsonl"), `${JSON.stringify({ at: LATER, node: "build", from: "running", to: "done" })}\n`);
   writeFileSync(join(runDir, "notify.jsonl"), "");
   writeFileSync(join(runDir, "usage.jsonl"), "");

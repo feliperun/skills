@@ -5,14 +5,14 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  driverCapabilities,
+  harnessCapabilities,
   missingCapabilities,
   normalizeProviderAvailability,
   normalizeProviderResult,
   probeRuntime,
   providerCommand,
   resolvePermissionExecution,
-} from "../scripts/drivers/index.mjs";
+} from "../scripts/harnesses/index.mjs";
 import {
   EXEC_JSONL_PROTOCOL,
   TOOL_OUTPUT_LIMIT_BYTES,
@@ -21,24 +21,24 @@ import {
   liveUsage,
   normalizeExecJsonlResult,
   truncateToolOutput,
-} from "../scripts/drivers/exec-jsonl.mjs";
-import { ensureZcodeAvailable } from "../scripts/drivers/zcode.mjs";
-import { normalizeCodexResult, parseVersion } from "../scripts/drivers/protocol.mjs";
+} from "../scripts/harnesses/exec-jsonl/index.mjs";
+import { ensureZcodeAvailable } from "../scripts/harnesses/zcode/index.mjs";
+import { normalizeCodexResult, parseVersion } from "../scripts/harnesses/protocol.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
-import { DEFAULT_CLAUDE_TOOLS } from "../scripts/drivers/claude.mjs";
-import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/drivers/codex.mjs";
+import { DEFAULT_CLAUDE_TOOLS } from "../scripts/harnesses/claude/index.mjs";
+import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/harnesses/codex/index.mjs";
 import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
 import { validateContract } from "../scripts/contract.mjs";
 import { fixture, packet, withEmptyPath, writeContract } from "./helpers.mjs";
 
 test("all provider adapters report explicit capabilities and transport", () => {
   const runtimes = [
-    { driver: "codex", model: "m" },
-    { driver: "claude", model: "m" },
-    { driver: "agy", model: "m" },
-    { driver: "zcode", model: "m" },
-    { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
-    { driver: "exec-jsonl", model: "m", executable: "wrapper" },
+    { harness: "codex", model: "m" },
+    { harness: "claude", model: "m" },
+    { harness: "agy", model: "m" },
+    { harness: "zcode", model: "m" },
+    { harness: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
+    { harness: "exec-jsonl", model: "m", executable: "wrapper" },
   ];
   const expected = [
     {
@@ -123,7 +123,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
     },
   ];
   for (let index = 0; index < runtimes.length; index += 1) {
-    const capabilities = driverCapabilities(runtimes[index]);
+    const capabilities = harnessCapabilities(runtimes[index]);
     assert.deepEqual(capabilities, expected[index]);
     assert.ok(Object.keys(capabilities).includes("tokenBudget"));
     assert.ok(Object.keys(capabilities).includes("costBudget"));
@@ -132,40 +132,40 @@ test("all provider adapters report explicit capabilities and transport", () => {
 });
 
 test("provider adapters declare the permission modes that execute commands and their defaults", () => {
-  assert.deepEqual(resolvePermissionExecution({ driver: "claude" }), {
+  assert.deepEqual(resolvePermissionExecution({ harness: "claude" }), {
     executes: false,
     field: "permissionMode",
     mode: "acceptEdits",
     executingModes: ["bypassPermissions"],
   });
-  assert.equal(resolvePermissionExecution({ driver: "claude", permissionMode: "bypassPermissions" }).executes, true);
-  assert.deepEqual(resolvePermissionExecution({ driver: "zcode" }), {
+  assert.equal(resolvePermissionExecution({ harness: "claude", permissionMode: "bypassPermissions" }).executes, true);
+  assert.deepEqual(resolvePermissionExecution({ harness: "zcode" }), {
     executes: true,
     field: "permissionMode",
     mode: "yolo",
     executingModes: ["yolo"],
   });
-  assert.equal(resolvePermissionExecution({ driver: "zcode", permissionMode: "edit" }).executes, false);
+  assert.equal(resolvePermissionExecution({ harness: "zcode", permissionMode: "edit" }).executes, false);
   // Measured 2026-09-11 by running a dsh worker at the harness default: it
   // executed `printf ... > exec-probe.txt` through the shell and the file
   // reached the integrated commit. Declaring only danger-full-access rejected
-  // the very contract that attested the driver.
-  assert.deepEqual(resolvePermissionExecution({ driver: "dsh" }), {
+  // the very contract that attested the harness.
+  assert.deepEqual(resolvePermissionExecution({ harness: "dsh" }), {
     executes: true,
     field: "sandbox",
     mode: "workspace-write",
     executingModes: ["workspace-write", "danger-full-access"],
   });
-  assert.equal(resolvePermissionExecution({ driver: "dsh", sandbox: "danger-full-access" }).executes, true);
-  assert.equal(resolvePermissionExecution({ driver: "dsh", sandbox: "read-only" }).executes, false);
-  assert.deepEqual(resolvePermissionExecution({ driver: "codex" }), {
+  assert.equal(resolvePermissionExecution({ harness: "dsh", sandbox: "danger-full-access" }).executes, true);
+  assert.equal(resolvePermissionExecution({ harness: "dsh", sandbox: "read-only" }).executes, false);
+  assert.deepEqual(resolvePermissionExecution({ harness: "codex" }), {
     executes: true,
     field: "sandbox",
     mode: "workspace-write",
     executingModes: ["read-only", "workspace-write", "danger-full-access"],
   });
-  for (const driver of ["agy", "exec-jsonl", "replay"]) {
-    assert.deepEqual(resolvePermissionExecution({ driver }), {
+  for (const harness of ["agy", "exec-jsonl", "replay"]) {
+    assert.deepEqual(resolvePermissionExecution({ harness }), {
       executes: true,
       field: null,
       mode: null,
@@ -177,25 +177,25 @@ test("provider adapters declare the permission modes that execute commands and t
 test("stdin adapters keep prompts out of argv and argv adapters enforce byte limits", () => {
   const prompt = "prompt with spaces";
   for (const runtime of [
-    { driver: "codex", model: "m" },
-    { driver: "claude", model: "m" },
-    { driver: "exec-jsonl", model: "m", executable: "wrapper" },
+    { harness: "codex", model: "m" },
+    { harness: "claude", model: "m" },
+    { harness: "exec-jsonl", model: "m", executable: "wrapper" },
   ]) {
     const command = providerCommand(runtime, prompt);
     assert.equal(command.promptTransport, "stdin");
     assert.equal(command.input?.includes(prompt) ?? false, true);
     assert.equal(command.args.includes(prompt), false);
   }
-  const argv = providerCommand({ driver: "agy", model: "m", maxArgvPromptBytes: 4 }, "é");
+  const argv = providerCommand({ harness: "agy", model: "m", maxArgvPromptBytes: 4 }, "é");
   assert.equal(argv.promptTransport, "argv");
   assert.throws(
-    () => providerCommand({ driver: "agy", model: "m", maxArgvPromptBytes: 1 }, "é"),
+    () => providerCommand({ harness: "agy", model: "m", maxArgvPromptBytes: 1 }, "é"),
     /argv limit/u,
   );
 });
 
 test("Codex continuation uses exec resume with the session id and prompt", () => {
-  const command = providerCommand({ driver: "codex", model: "m", sandbox: "read-only" }, "continue this", { continuationId: "thread-1" });
+  const command = providerCommand({ harness: "codex", model: "m", sandbox: "read-only" }, "continue this", { continuationId: "thread-1" });
   assert.equal(command.promptTransport, "argv");
   assert.equal(command.input, null);
   assert.deepEqual(command.args.slice(0, 3), ["exec", "resume", "--json"]);
@@ -205,7 +205,7 @@ test("Codex continuation uses exec resume with the session id and prompt", () =>
 });
 
 test("Claude continuation resumes the explicit session", () => {
-  const command = providerCommand({ driver: "claude", model: "m" }, "continue this", {
+  const command = providerCommand({ harness: "claude", model: "m" }, "continue this", {
     continuationId: "session-1",
   });
   assert.equal(command.promptTransport, "stdin");
@@ -217,7 +217,7 @@ test("Claude continuation resumes the explicit session", () => {
 });
 
 test("agy continuation uses the explicit conversation and preserves equals-form argv transport", () => {
-  const command = providerCommand({ driver: "agy", model: "m" }, "continue this", {
+  const command = providerCommand({ harness: "agy", model: "m" }, "continue this", {
     continuationId: "conversation-1",
   });
   assert.equal(command.promptTransport, "argv");
@@ -227,7 +227,7 @@ test("agy continuation uses the explicit conversation and preserves equals-form 
 });
 
 test("generic exec-jsonl emits the documented normalized request", () => {
-  const command = providerCommand({ driver: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "hello", {
+  const command = providerCommand({ harness: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "hello", {
     schema: { type: "object" },
   });
   assert.ok(command.input, "stdin transport provides input");
@@ -384,8 +384,8 @@ test("all adapter normalizers return the common envelope", () => {
     agy: [{ event: "result", result: { status: "SUCCESS", response: "agy", conversation_id: "a", usage: {} } }],
     "exec-jsonl": [{ schemaVersion: 1, type: "run.completed", result: { answer: 1 }, continuationId: "e", usage: { inputTokens: 3 } }],
   };
-  for (const [driver, events] of Object.entries(streams)) {
-    const result = normalizeProviderResult(driver, events.map((event) => JSON.stringify(event)).join("\n"), 0, null);
+  for (const [harness, events] of Object.entries(streams)) {
+    const result = normalizeProviderResult(harness, events.map((event) => JSON.stringify(event)).join("\n"), 0, null);
     assert.equal(result.status, "done");
     assert.equal(typeof result.result, "string");
     assert.ok(result.usage);
@@ -394,13 +394,13 @@ test("all adapter normalizers return the common envelope", () => {
 });
 
 test("preflight reports executable, model, version, and no credential values", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-driver-version-"));
+  const directory = mkdtempSync(join(tmpdir(), "runner-harness-version-"));
   const executable = join(directory, "versioned-wrapper.mjs");
   writeFileSync(executable, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('wrapper 2.4.1');\n");
   chmodSync(executable, 0o755);
   const check = await probeRuntime({
     id: "wrapper-runtime",
-    driver: "exec-jsonl",
+    harness: "exec-jsonl",
     model: "pi-model",
     executable,
   }, { cwd: directory, requiredCapabilities: { promptTransport: "stdin" } });
@@ -412,7 +412,7 @@ test("preflight reports executable, model, version, and no credential values", a
 });
 
 test("preflight still probes and reports version when an environment variable is missing", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-driver-missing-env-"));
+  const directory = mkdtempSync(join(tmpdir(), "runner-harness-missing-env-"));
   const executable = join(directory, "versioned-wrapper.mjs");
   writeFileSync(executable, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('wrapper 3.1.4');\n");
   chmodSync(executable, 0o755);
@@ -422,13 +422,13 @@ test("preflight still probes and reports version when an environment variable is
   try {
     const check = await probeRuntime({
       id: "wrapper-runtime",
-      driver: "exec-jsonl",
+      harness: "exec-jsonl",
       model: "pi-model",
       executable,
       config: { "provider.env_key": envName },
     }, { cwd: directory });
     assert.equal(check.ok, false);
-    assert.equal(check.driver, "exec-jsonl");
+    assert.equal(check.harness, "exec-jsonl");
     assert.equal(check.executable, executable);
     assert.equal(check.model, "pi-model");
     assert.equal(check.version, "wrapper 3.1.4");
@@ -441,23 +441,23 @@ test("preflight still probes and reports version when an environment variable is
 });
 
 test("preflight classifies a non-zero exit by its stderr text: balance, quota with reset, and a missing binary", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-driver-availability-"));
+  const directory = mkdtempSync(join(tmpdir(), "runner-harness-availability-"));
 
   const balanceExecutable = join(directory, "balance-wrapper.mjs");
   writeFileSync(balanceExecutable, "#!/usr/bin/env node\nprocess.stderr.write('Error: Insufficient Balance\\n');\nprocess.exit(1);\n");
   chmodSync(balanceExecutable, 0o755);
-  const balance = await probeRuntime({ id: "balance-runtime", driver: "exec-jsonl", model: "m", executable: balanceExecutable }, { cwd: directory });
+  const balance = await probeRuntime({ id: "balance-runtime", harness: "exec-jsonl", model: "m", executable: balanceExecutable }, { cwd: directory });
   assert.equal(balance.ok, false);
   assert.deepEqual(balance.availability, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
 
   const quotaExecutable = join(directory, "quota-wrapper.mjs");
   writeFileSync(quotaExecutable, "#!/usr/bin/env node\nprocess.stderr.write('Error: rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00\\n');\nprocess.exit(1);\n");
   chmodSync(quotaExecutable, 0o755);
-  const quota = await probeRuntime({ id: "quota-runtime", driver: "exec-jsonl", model: "m", executable: quotaExecutable }, { cwd: directory });
+  const quota = await probeRuntime({ id: "quota-runtime", harness: "exec-jsonl", model: "m", executable: quotaExecutable }, { cwd: directory });
   assert.equal(quota.ok, false);
   assert.deepEqual(quota.availability, { available: false, exhaustedUntil: "2026-01-01T00:00:00.000Z", reason: "quota_exhausted" });
 
-  const missing = await probeRuntime({ id: "missing-runtime", driver: "exec-jsonl", model: "m", executable: join(directory, "does-not-exist") }, { cwd: directory });
+  const missing = await probeRuntime({ id: "missing-runtime", harness: "exec-jsonl", model: "m", executable: join(directory, "does-not-exist") }, { cwd: directory });
   assert.equal(missing.ok, false);
   assert.equal(missing.availability?.reason, "not_found");
   assert.equal(missing.availability?.exhaustedUntil, null);
@@ -514,7 +514,7 @@ test("routes explicit, matching, and default runtimes", () => {
 test("builds custom provider config as command-line overrides", () => {
   /** @type {Record<string, unknown>} */
   const flash = /** @type {Record<string, Record<string, unknown>>} */ (fixture().runtimes).flash;
-  const command = providerCommand({ ...flash, driver: "codex", model: "deepseek-v4-flash", sandbox: "danger-full-access" }, "task");
+  const command = providerCommand({ ...flash, harness: "codex", model: "deepseek-v4-flash", sandbox: "danger-full-access" }, "task");
   assert.equal(command.executable, "codex");
   assert.deepEqual(command.args.slice(0, 4), ["exec", "--json", "--sandbox", "danger-full-access"]);
   assert.ok(command.args.includes("model_provider=\"deepseek\""));
@@ -525,7 +525,7 @@ test("builds custom provider config as command-line overrides", () => {
 
 test("builds agy commands with unambiguous equals-form flags", () => {
   const command = providerCommand(
-    { driver: "agy", model: "gemini-3.7-flash-low", reasoning: "xhigh", printTimeout: "30m" },
+    { harness: "agy", model: "gemini-3.7-flash-low", reasoning: "xhigh", printTimeout: "30m" },
     "task with spaces",
     { schema: JUDGE_SCHEMA },
   );
@@ -543,10 +543,10 @@ test("accepts a zcode runtime in contracts and routes nodes to it", () => {
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
   // guard-exempt: schema-only — validation and routing only, no spawn.
-  runtimes["zcode-glm"] = { driver: "zcode", model: "glm-5.3[1m]", config: { "auth_token.env_key": "ZAI_API_KEY" } };
+  runtimes["zcode-glm"] = { harness: "zcode", model: "glm-5.3[1m]", config: { "auth_token.env_key": "ZAI_API_KEY" } };
   const path = writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(contract.runtimes["zcode-glm"].driver, "zcode");
+  assert.equal(contract.runtimes["zcode-glm"].harness, "zcode");
   assert.equal(routeRuntime(contract, { id: "g", type: "backend", runtime: "zcode-glm", gate: {} }).id, "zcode-glm");
 });
 
@@ -727,7 +727,7 @@ test("codex preamble diet keeps the code-mode host enabled", () => {
 });
 
 test("codex preamble measurement comment pins the four code-mode-host outcomes", () => {
-  const source = readFileSync(new URL("../scripts/drivers/codex.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../scripts/harnesses/codex/index.mjs", import.meta.url), "utf8");
   const declaration = "export const CODEX_PREAMBLE_OVERRIDES";
   const symbolIndex = source.indexOf(declaration);
   assert.ok(symbolIndex !== -1, "codex.mjs must keep exporting CODEX_PREAMBLE_OVERRIDES");
@@ -889,10 +889,10 @@ test("live metering sums per-request Claude usage and prefers the terminal total
   assert.equal(liveInputTokens("claude", partial), 350, "mid-run sum of per-request usage");
   const terminal = `${partial}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 320 } })}`;
   assert.equal(liveInputTokens("claude", terminal), 320, "terminal session total wins");
-  assert.equal(liveInputTokens("exec-jsonl", partial), 0, "completion-only drivers meter as zero mid-run");
+  assert.equal(liveInputTokens("exec-jsonl", partial), 0, "completion-only harnesses meter as zero mid-run");
 });
 
-test("live session metrics expose only what each driver's events prove", () => {
+test("live session metrics expose only what each harness's events prove", () => {
   const codexEvents = [
     { type: "thread.started", thread_id: "t" },
     { type: "item.completed", item: { type: "command_execution" } },
@@ -942,26 +942,26 @@ test("live session metrics expose only what each driver's events prove", () => {
     "the protocol carries no tool events, so only a completed run proves a turn",
   );
   assert.deepEqual(liveSessionMetrics("codex", "not json at all"), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false }, "malformed input meters as zero");
-  assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false }, "unsupported drivers meter as zero");
+  assert.deepEqual(liveSessionMetrics("agy", codex), { turns: 0, cacheReadInputTokens: 0, toolCalls: 0, completed: false }, "unsupported harnesses meter as zero");
 });
 
-test("the codex driver bounds the harness preamble before the runtime's own config overrides", () => {
-  const args = providerCommand({ driver: "codex", model: "m", config: { "features.apps": true } }, "work").args;
+test("the codex harness bounds the harness preamble before the runtime's own config overrides", () => {
+  const args = providerCommand({ harness: "codex", model: "m", config: { "features.apps": true } }, "work").args;
   const pairs = [];
   for (let index = 0; index < args.length; index += 1) if (args[index] === "-c") pairs.push(args[index + 1]);
   for (const override of CODEX_PREAMBLE_OVERRIDES) assert.ok(pairs.includes(override), `${override} is emitted`);
   assert.ok(pairs.indexOf("features.apps=false") < pairs.indexOf("features.apps=true"), "runtime config comes later and therefore wins");
-  const resumed = providerCommand({ driver: "codex", model: "m" }, "work", { continuationId: "thread-1" }).args;
+  const resumed = providerCommand({ harness: "codex", model: "m" }, "work", { continuationId: "thread-1" }).args;
   assert.ok(resumed.includes("features.multi_agent=false"), "resumed sessions are bounded the same way");
 });
 
-test("claude-compatible drivers bound the harness preamble and accept a tools override", () => {
-  for (const runtime of [{ driver: "claude", model: "m" }]) {
+test("claude-compatible harnesses bound the harness preamble and accept a tools override", () => {
+  for (const runtime of [{ harness: "claude", model: "m" }]) {
     const args = providerCommand(runtime, "work").args;
     const sources = args.indexOf("--setting-sources");
-    assert.ok(args.includes("--disable-slash-commands"), `${runtime.driver} loads no skills`);
-    assert.ok(args.includes("--strict-mcp-config"), `${runtime.driver} loads no MCP servers`);
-    assert.equal(args[sources + 1], "", `${runtime.driver} loads no settings files`);
+    assert.ok(args.includes("--disable-slash-commands"), `${runtime.harness} loads no skills`);
+    assert.ok(args.includes("--strict-mcp-config"), `${runtime.harness} loads no MCP servers`);
+    assert.equal(args[sources + 1], "", `${runtime.harness} loads no settings files`);
     assert.deepEqual(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2), ["--tools", DEFAULT_CLAUDE_TOOLS.join(",")]);
     assert.equal(args.includes("--bare"), false, "--bare would disable the hook surface that enforces the tool policy");
     const custom = providerCommand({ ...runtime, tools: ["Read", "Bash"] }, "work").args;
@@ -975,10 +975,10 @@ test("claude-compatible drivers bound the harness preamble and accept a tools ov
 test("toolPolicy travels only the Claude-compatible hook settings boundary", () => {
   const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
   // Claude-compatible adapters prove enforcement by installing hook settings.
-  for (const runtime of [{ driver: "claude", model: "m" }]) {
+  for (const runtime of [{ harness: "claude", model: "m" }]) {
     const command = providerCommand(runtime, "work", { toolPolicy: policy });
     const settingsIndex = command.args.indexOf("--settings");
-    assert.ok(settingsIndex >= 0, `${runtime.driver} installs the hook settings`);
+    assert.ok(settingsIndex >= 0, `${runtime.harness} installs the hook settings`);
     const settings = JSON.parse(command.args[settingsIndex + 1]);
     assert.deepEqual(Object.keys(settings.hooks).sort(), ["PostToolUse", "PreToolUse"]);
     assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash|TaskOutput|BashOutput|Monitor");
@@ -986,21 +986,21 @@ test("toolPolicy travels only the Claude-compatible hook settings boundary", () 
     assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.includes(HOOK_PATH));
   }
   // No offered policy means no fabricated settings.
-  assert.equal(providerCommand({ driver: "claude", model: "m" }, "work").args.includes("--settings"), false);
+  assert.equal(providerCommand({ harness: "claude", model: "m" }, "work").args.includes("--settings"), false);
   // An adapter that cannot prove enforcement receives no policy to pretend with.
-  const request = JSON.parse(String(providerCommand({ driver: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "work", {
+  const request = JSON.parse(String(providerCommand({ harness: "exec-jsonl", model: "pi", executable: "pi-wrapper" }, "work", {
     toolPolicy: policy,
   }).input));
   assert.equal("toolPolicy" in request, false, "the exec-jsonl request carries no tool policy");
-  assert.equal(providerCommand({ driver: "codex", model: "m" }, "work", { toolPolicy: policy }).args.includes("--settings"), false);
+  assert.equal(providerCommand({ harness: "codex", model: "m" }, "work", { toolPolicy: policy }).args.includes("--settings"), false);
   assert.deepEqual(
-    missingCapabilities(driverCapabilities({ driver: "claude" }), { toolPolicy: true }),
+    missingCapabilities(harnessCapabilities({ harness: "claude" }), { toolPolicy: true }),
     [],
     "the claude hook surface satisfies the requirement",
   );
   assert.deepEqual(
-    missingCapabilities(driverCapabilities({ driver: "exec-jsonl" }), { toolPolicy: true }),
-    ["toolPolicy=true (driver provides toolPolicy=false)"],
+    missingCapabilities(harnessCapabilities({ harness: "exec-jsonl" }), { toolPolicy: true }),
+    ["toolPolicy=true (harness provides toolPolicy=false)"],
     "capability requirements expose the missing toolPolicy honestly",
   );
 });
@@ -1034,7 +1034,7 @@ test("truncateToolOutput bounds tool output to 8192 UTF-8 bytes keeping head and
 
 test("the repository hook behind the providerCommand settings mechanically rejects background tools and bounds output", async () => {
   const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
-  const command = providerCommand({ driver: "claude", model: "m" }, "work", { toolPolicy: policy });
+  const command = providerCommand({ harness: "claude", model: "m" }, "work", { toolPolicy: policy });
   const settings = JSON.parse(command.args[command.args.indexOf("--settings") + 1]);
   const registered = [...settings.hooks.PreToolUse[0].hooks, ...settings.hooks.PostToolUse[0].hooks];
   assert.deepEqual(registered.map((hook) => hook.type), ["command", "command"]);
@@ -1134,7 +1134,7 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
   delete process.env.INTENT_FACTORY_ZCODE_BIN;
   delete process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN;
   try {
-    const command = providerCommand({ driver: "zcode", model: "glm-5.3[1m]" }, "task");
+    const command = providerCommand({ harness: "zcode", model: "glm-5.3[1m]" }, "task");
     assert.equal(command.executable, "zcode");
     assert.equal(command.promptTransport, "argv");
     assert.equal(command.input, null);
@@ -1144,11 +1144,11 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     assert.equal(command.env?.GLM_API_KEY, "test-zai-token");
     assert.equal(command.env?.ANTHROPIC_API_KEY, null, "ambient Anthropic key must be removed: the CLI checks it first");
 
-    const judge = providerCommand({ driver: "zcode", model: "glm-5.3", permissionMode: "plan" }, "review");
+    const judge = providerCommand({ harness: "zcode", model: "glm-5.3", permissionMode: "plan" }, "review");
     assert.deepEqual(judge.args.slice(0, 4), ["--json", "--no-color", "--mode", "plan"]);
 
     const custom = providerCommand({
-      driver: "zcode",
+      harness: "zcode",
       model: "glm-5.3",
       config: {
         provider: "zai",
@@ -1162,7 +1162,7 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
 
     process.env.INTENT_FACTORY_TEST_ZCODE_TOKEN = "custom-token";
     const resolved = providerCommand({
-      driver: "zcode",
+      harness: "zcode",
       model: "glm-5.3",
       config: { provider: "zai", "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN" },
     }, "task");
@@ -1171,7 +1171,7 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     // The CLI folds non-alphanumerics in the provider id into `_` before
     // appending `_API_KEY`, so a dashed id must name the variable it reads.
     const dashed = providerCommand({
-      driver: "zcode",
+      harness: "zcode",
       model: "glm-5.3",
       config: { provider: "z-ai", "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN" },
     }, "task");
@@ -1179,7 +1179,7 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     assert.equal(dashed.env?.Z_AI_API_KEY, "custom-token");
     assert.equal("Z-AI_API_KEY" in (dashed.env ?? {}), false, "the unfolded spelling is not a variable the CLI reads");
 
-    const continued = providerCommand({ driver: "zcode", model: "glm-5.3" }, "next task", {
+    const continued = providerCommand({ harness: "zcode", model: "glm-5.3" }, "next task", {
       continuationId: "sess_zcode-1",
     });
     assert.deepEqual(continued.args.slice(0, 5), ["--json", "--no-color", "--mode", "yolo", "--resume"]);
@@ -1197,19 +1197,19 @@ test("zcode tool policy is refused honestly and the judge schema travels in the 
   const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
   // A named executable keeps this test off the real PATH: an unnamed zcode
   // runtime resolves the host's CLI and may install a shim while doing it.
-  const runtime = { driver: "zcode", model: "glm-5.3", executable: "/nonexistent/zcode" };
+  const runtime = { harness: "zcode", model: "glm-5.3", executable: "/nonexistent/zcode" };
   const command = providerCommand(runtime, "work", {
     toolPolicy: policy,
     schema: JUDGE_SCHEMA,
   });
-  assert.equal(command.args.includes("--settings"), false, "the driver sends no tool policy, so no settings payload is passed");
+  assert.equal(command.args.includes("--settings"), false, "the harness sends no tool policy, so no settings payload is passed");
   assert.deepEqual(
-    missingCapabilities(driverCapabilities({ driver: "zcode" }), { toolPolicy: true }),
-    ["toolPolicy=true (driver provides toolPolicy=false)"],
+    missingCapabilities(harnessCapabilities({ harness: "zcode" }), { toolPolicy: true }),
+    ["toolPolicy=true (harness provides toolPolicy=false)"],
   );
   assert.deepEqual(
-    missingCapabilities(driverCapabilities({ driver: "zcode" }), { structuredOutput: true }),
-    ["structuredOutput=true (driver provides structuredOutput=false)"],
+    missingCapabilities(harnessCapabilities({ harness: "zcode" }), { structuredOutput: true }),
+    ["structuredOutput=true (harness provides structuredOutput=false)"],
   );
   const bare = providerCommand(runtime, "work");
   assert.equal(bare.args.at(-2), "--prompt");
@@ -1245,7 +1245,7 @@ test("the zcode adapter installs its CLI onto the PATH when the app is bundled",
   ensureZcodeAvailable({ pathDirs, home, bundle });
   assert.equal(statSync(shim).ino, inode, "an installed shim is left in place");
 
-  // An install dir off the PATH would fix the driver and not the user, which is
+  // An install dir off the PATH would fix the harness and not the user, which is
   // the half of the request that matters.
   ensureZcodeAvailable({ pathDirs: ["/usr/bin"], home, bundle });
   assert.equal(existsSync(join(home, "bin", "zcode")), false, "nothing is installed outside the PATH");
@@ -1299,7 +1299,7 @@ test("the zcode adapter leaves the user's own zcode alone and keeps naming the c
   // depend on where this host happens to keep the CLI.
   await withEmptyPath(() => {
     assert.equal(
-      providerCommand({ driver: "zcode", model: "glm-5.3" }, "task").executable,
+      providerCommand({ harness: "zcode", model: "glm-5.3" }, "task").executable,
       "zcode",
       "the adapter names the command, it does not point at a path",
     );
@@ -1399,11 +1399,11 @@ test("accepts a zcode runtime in contracts and keeps the zhipu vendor", () => {
   const value = fixture();
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
-  runtimes.zcodeFlash = { driver: "zcode", model: "glm-5.3-flash", permissionMode: "edit" };
+  runtimes.zcodeFlash = { harness: "zcode", model: "glm-5.3-flash", permissionMode: "edit" };
   const path = writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(contract.runtimes.zcodeFlash.driver, "zcode");
-  assert.equal(contract.runtimes.zcodeFlash.vendor, "zhipu", "the driver default names the vendor");
+  assert.equal(contract.runtimes.zcodeFlash.harness, "zcode");
+  assert.equal(contract.runtimes.zcodeFlash.vendor, "zhipu", "the harness default names the vendor");
   assert.equal(routeRuntime(contract, { id: "z", type: "backend", runtime: "zcodeFlash", gate: {} }).id, "zcodeFlash");
 });
 

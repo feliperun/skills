@@ -20,7 +20,7 @@ import { SIGNAL_END, SIGNAL_START } from "../scripts/signal-block.mjs";
 import { judgePrompt } from "../scripts/lib.mjs";
 import { JUDGE_LIMITS } from "../scripts/judge-envelope.mjs";
 import { runContract } from "../scripts/runner.mjs";
-import { driverCapabilities } from "../scripts/drivers/index.mjs";
+import { harnessCapabilities } from "../scripts/harnesses/index.mjs";
 import * as helpers from "./helpers.mjs";
 
 /** @param {string} directory */
@@ -74,7 +74,7 @@ function fixture(overrides = {}) {
     goal: "validate protocol",
     cwd: ".",
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex" } },
+    runtimes: { worker: { harness: "codex", model: "test-model", executable: "/nonexistent/codex" } },
     ...overrides,
     nodes: /** @type {Record<string, unknown>[]} */ (overrides.nodes ?? [{ id: "build", type: "backend", taskPacket: packet(), gate: false }]).map((node, index) => ({
       phase: `fixture-phase-${index}`,
@@ -172,7 +172,7 @@ test("validation rejects unknown fields at every protocol layer", () => {
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, maxCostUsd: 1 }] }, /nodes\[0\] has unexpected field maxCostUsd/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, budgetProfile: budgetProfile() }] }, /nodes\[0\] has unexpected field budgetProfile/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false, progressPolicy: { graceSec: 0, intervalSec: 1, maxDryHeartbeats: 3 } }] }, /nodes\[0\] has unexpected field progressPolicy/u],
-    [{ runtimes: { worker: { driver: "codex", model: "m", executable: "/nonexistent/codex", typo: true } } }, /runtime worker has unexpected field typo/u],
+    [{ runtimes: { worker: { harness: "codex", model: "m", executable: "/nonexistent/codex", typo: true } } }, /runtime worker has unexpected field typo/u],
     [{ nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { typo: true } }] }, /nodes\[0\]\.gate has unexpected field typo/u],
   ];
   for (const [override, expected] of cases) {
@@ -194,7 +194,7 @@ test("validation rejects unsupported protocol versions and stale packet hashes",
 // fixture's single "worker" runtime cannot serve both roles once the gate is
 // enabled, so every gate-enabled fixture below adds a cross-vendor judge.
 const gatedRuntimes = {
-  runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex" }, judge: { driver: "claude", model: "judge-model", executable: "/nonexistent/claude" } },
+  runtimes: { worker: { harness: "codex", model: "test-model", executable: "/nonexistent/codex" }, judge: { harness: "claude", model: "judge-model", executable: "/nonexistent/claude" } },
   runtimeDefaults: { worker: "worker", judge: "judge" },
 };
 
@@ -300,7 +300,7 @@ test("node snapshots reject misspelled enums and invalid nested shapes", () => {
     [{ phase: "waitng" }, /node snapshot\.phase is invalid/u],
     [{ attempt: -1 }, /node snapshot\.attempt/u],
     [{ revisions: -1 }, /node snapshot\.revisions/u],
-    [{ runtime: { id: "worker" } }, /node snapshot\.runtime\.driver/u],
+    [{ runtime: { id: "worker" } }, /node snapshot\.runtime\.harness/u],
     [{ blockedBy: [7] }, /blockedBy item/u],
     [{ startedAt: "not-a-timestamp" }, /startedAt/u],
     [{ result: {} }, /worker result/u],
@@ -423,9 +423,9 @@ test("node snapshots must match the validated contract node identity and hash", 
 test("node snapshot capability budgets survive JSON serialization and validation", () => {
   const runtime = {
     id: "worker",
-    driver: "codex",
+    harness: "codex",
     model: "test-model",
-    capabilities: driverCapabilities({ driver: "codex" }),
+    capabilities: harnessCapabilities({ harness: "codex" }),
   };
   const persisted = JSON.parse(JSON.stringify(snapshot({ runtime })));
   validateNodeSnapshot(persisted);
@@ -449,11 +449,11 @@ test("validation rejects invalid runtime field types and routing match values", 
     ["requiredCapabilities", []],
   ];
   for (const [field, value] of runtimeCases) {
-    const { path } = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex", [field]: value } } });
+    const { path } = writeFixture({ runtimes: { worker: { harness: "codex", model: "test-model", executable: "/nonexistent/codex", [field]: value } } });
     assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), new RegExp(`runtime worker\\.${field}`));
   }
 
-  const unknownFallback = writeFixture({ runtimes: { worker: { driver: "codex", model: "test-model", executable: "/nonexistent/codex", fallback: "missing" } } });
+  const unknownFallback = writeFixture({ runtimes: { worker: { harness: "codex", model: "test-model", executable: "/nonexistent/codex", fallback: "missing" } } });
   assert.throws(
     () => validateContract(JSON.parse(readFileSync(unknownFallback.path, "utf8")), unknownFallback.path),
     /runtime worker\.fallback.*unknown runtime/u,
@@ -1004,8 +1004,8 @@ test("replayPolicy defaults to safe and accepts only its enumerated values", () 
 test("runtime fallback is a declared one-hop edge and rejects self-loops", () => {
   const { path } = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "backup" },
-      backup: { driver: "codex", model: "backup", executable: "/nonexistent/codex" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "backup" },
+      backup: { harness: "codex", model: "backup", executable: "/nonexistent/codex" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
   });
@@ -1016,7 +1016,7 @@ test("runtime fallback is a declared one-hop edge and rejects self-loops", () =>
 
   const invalid = writeFixture({
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker" },
     },
     runtimeDefaults: { worker: "worker", judge: "worker" },
   });
@@ -1028,7 +1028,7 @@ test("verification rejects a worker permission mode that cannot execute commands
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: {
       worker: {
-        driver: "claude",
+        harness: "claude",
         model: "worker",
         executable: "/nonexistent/claude",
         permissionMode: "bypassPermissions",
@@ -1041,7 +1041,7 @@ test("verification rejects a worker permission mode that cannot execute commands
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: {
       worker: {
-        driver: "claude",
+        harness: "claude",
         model: "worker",
         executable: "/nonexistent/claude",
         permissionMode: "acceptEdits",
@@ -1056,7 +1056,7 @@ test("verification rejects a worker permission mode that cannot execute commands
   const zcodeDefault = writeFixture({
     runtimeDefaults: { worker: "zcode", judge: "zcode" },
     runtimes: {
-      zcode: { driver: "zcode", model: "worker", executable: "/nonexistent/zcode" },
+      zcode: { harness: "zcode", model: "worker", executable: "/nonexistent/zcode" },
     },
   });
   assert.equal(validateContract(JSON.parse(readFileSync(zcodeDefault.path, "utf8")), zcodeDefault.path).nodes.length, 1);
@@ -1067,14 +1067,14 @@ test("verification rejects a non-executing worker fallback and ignores the judge
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: {
       worker: {
-        driver: "replay",
+        harness: "replay",
         model: "worker",
         vendor: "recorded-worker",
         executable: "/nonexistent/replay",
         fallback: "backup",
       },
       backup: {
-        driver: "zcode",
+        harness: "zcode",
         model: "backup",
         executable: "/nonexistent/zcode",
         permissionMode: "edit",
@@ -1089,9 +1089,9 @@ test("verification rejects a non-executing worker fallback and ignores the judge
   const judgeDenied = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "judge" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex" },
       judge: {
-        driver: "claude",
+        harness: "claude",
         model: "judge",
         executable: "/nonexistent/claude",
         permissionMode: "acceptEdits",
@@ -1106,7 +1106,7 @@ test("a gate-enabled node whose worker and judge runtime share a vendor is rejec
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "worker" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1120,9 +1120,9 @@ test("a gate-enabled node whose worker and judge have distinct vendors, and whos
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "judge" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
-      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy" },
-      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { harness: "agy", model: "worker-backup", executable: "/nonexistent/agy" },
+      judge: { harness: "claude", model: "judge", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1134,9 +1134,9 @@ test("a gate-enabled node whose worker fallback shares the judge's vendor is rej
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "judge" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
-      "worker-backup": { driver: "claude", model: "worker-backup", executable: "/nonexistent/claude" },
-      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { harness: "claude", model: "worker-backup", executable: "/nonexistent/claude" },
+      judge: { harness: "claude", model: "judge", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1150,10 +1150,10 @@ test("a gate-enabled node whose worker fallback's own fallback shares the judge'
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "judge" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
-      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker-backup-2" },
-      "worker-backup-2": { driver: "claude", model: "worker-backup-2", executable: "/nonexistent/claude" },
-      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { harness: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker-backup-2" },
+      "worker-backup-2": { harness: "claude", model: "worker-backup-2", executable: "/nonexistent/claude" },
+      judge: { harness: "claude", model: "judge", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1167,9 +1167,9 @@ test("a gate-enabled node whose worker fallback chain cycles is rejected", () =>
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "judge" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
-      "worker-backup": { driver: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker" },
-      judge: { driver: "claude", model: "judge", executable: "/nonexistent/claude" },
+      worker: { harness: "codex", model: "worker", executable: "/nonexistent/codex", fallback: "worker-backup" },
+      "worker-backup": { harness: "agy", model: "worker-backup", executable: "/nonexistent/agy", fallback: "worker" },
+      judge: { harness: "claude", model: "judge", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1183,8 +1183,8 @@ test("a codex runtime with a custom model_provider resolves to that provider's v
   const { path } = writeFixture({
     runtimeDefaults: { worker: "deepseek-flash", judge: "opus" },
     runtimes: {
-      "deepseek-flash": { driver: "codex", model: "deepseek-v4-flash", executable: "/nonexistent/codex", config: { model_provider: "deepseek" } },
-      opus: { driver: "claude", model: "opus", executable: "/nonexistent/claude" },
+      "deepseek-flash": { harness: "codex", model: "deepseek-v4-flash", executable: "/nonexistent/codex", config: { model_provider: "deepseek" } },
+      opus: { harness: "claude", model: "opus", executable: "/nonexistent/claude" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1193,12 +1193,12 @@ test("a codex runtime with a custom model_provider resolves to that provider's v
   assert.equal(contract.runtimes.opus.vendor, "anthropic");
 });
 
-test("two replay runtimes declare distinct vendors outright, since the driver has no default", () => {
+test("two replay runtimes declare distinct vendors outright, since the harness has no default", () => {
   const { path } = writeFixture({
     runtimeDefaults: { worker: "replay-a", judge: "replay-b" },
     runtimes: {
-      "replay-a": { driver: "replay", model: "a", vendor: "vendor-a", config: { "replay.recording": "a.jsonl" } },
-      "replay-b": { driver: "replay", model: "b", vendor: "vendor-b", config: { "replay.recording": "b.jsonl" } },
+      "replay-a": { harness: "replay", model: "a", vendor: "vendor-a", config: { "replay.recording": "a.jsonl" } },
+      "replay-b": { harness: "replay", model: "b", vendor: "vendor-b", config: { "replay.recording": "b.jsonl" } },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
   });
@@ -1207,11 +1207,11 @@ test("two replay runtimes declare distinct vendors outright, since the driver ha
   assert.equal(contract.runtimes["replay-b"].vendor, "vendor-b");
 });
 
-test("a replay runtime with no declared vendor is rejected: the driver names no default", () => {
+test("a replay runtime with no declared vendor is rejected: the harness names no default", () => {
   const { path } = writeFixture({
     runtimeDefaults: { worker: "replay-a", judge: "replay-a" },
     runtimes: {
-      "replay-a": { driver: "replay", model: "a", config: { "replay.recording": "a.jsonl" } },
+      "replay-a": { harness: "replay", model: "a", config: { "replay.recording": "a.jsonl" } },
     },
   });
   assert.throws(
@@ -1357,7 +1357,7 @@ test("run metadata records identity warnings and rejects a budget extension fiel
 test("the canonical contract example in the reference validates exactly as written", () => {
   // The example at the top of references/contract.md is what a contract author
   // copies first. It has drifted before: a stale contractVersion, and a judge
-  // that shared its driver-default vendor with the worker, so every gate-enabled
+  // that shared its harness-default vendor with the worker, so every gate-enabled
   // node built from it was rejected. Guard the shape, not the prose.
   const reference = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "references", "contract.md"), "utf8");
   const block = /```json\n([\s\S]*?)\n```/u.exec(reference)?.[1];

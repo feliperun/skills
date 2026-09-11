@@ -1,8 +1,8 @@
 # intent-factory evals
 
 `run.mjs` discovers deterministic eval cases and runs them with zero model
-invocations: every runtime in every case uses the `replay` driver
-(`skills/mine/intent-factory/scripts/drivers/replay.mjs`), consuming a
+invocations: every runtime in every case uses the `replay` harness
+(`skills/mine/intent-factory/scripts/harnesses/replay.mjs`), consuming a
 recorded envelope instead of calling a real provider CLI.
 
 ## Usage
@@ -14,7 +14,7 @@ node evals/run.mjs --class deterministic [--case <id>] [--assert-no-model] [--ve
 - `--class deterministic` runs every case under `evals/deterministic/`.
 - `--case <id>` narrows to one case (combine with `--class deterministic`).
 - `--assert-no-model` additionally fails if any case's contract declares a
-  runtime whose driver is not `replay`, and runs with
+  runtime whose harness is not `replay`, and runs with
   `INTENT_FACTORY_CODEX_BIN`, `INTENT_FACTORY_CLAUDE_BIN`,
   `INTENT_FACTORY_AGY_BIN`, and `INTENT_FACTORY_GLM_BIN` unset, so any code
   path that actually needed one of those to resolve a provider CLI fails
@@ -70,7 +70,7 @@ and has:
 - `expected.json` — the facts the run must show at the end.
 - one recording file per runtime the contract declares (referenced from
   `case.json`'s `recordings`), each a `.jsonl` file consumed in order by the
-  `replay` driver (see `skills/mine/intent-factory/scripts/drivers/replay.mjs`
+  `replay` harness (see `skills/mine/intent-factory/scripts/harnesses/replay.mjs`
   and `replay-bin.mjs` for the exact envelope schema).
 
 A recorded envelope's `error.resetAt` and top-level `exhaustedUntil` are both
@@ -78,8 +78,8 @@ optional, and both may carry a relative placeholder — the string
 `"+<milliseconds>"` — instead of an absolute timestamp. The harness resolves
 it to a real ISO timestamp, measured from the moment the case is
 materialized, before the recording is copied into the workspace; the
-`replay` driver itself never sees the placeholder, only the resolved literal
-string, exactly the shape a real driver would produce. Use this for a case
+`replay` harness itself never sees the placeholder, only the resolved literal
+string, exactly the shape a real harness would produce. Use this for a case
 whose scenario turns on a reset landing inside a window measured from
 whenever the suite happens to run (see D04's `primary.jsonl`); an absolute
 timestamp works too when the exact instant does not matter to the case.
@@ -90,7 +90,7 @@ role's runtime to be composed) never touches it. A case whose scenario turns
 on that probe's own classification (e.g. distinguishing an insufficient-
 balance stop from a quota stop from a missing CLI) instead sets a runtime's
 `config["replay.probe"]` to `{"exitCode": <int>, "stderr": "<text>"}`
-directly in `case.json`; the replay driver carries it to `replay-bin.mjs` as
+directly in `case.json`; the replay harness carries it to `replay-bin.mjs` as
 a `--replay-probe` argument for the `--version` invocation only, so it never
 touches or consumes a recording (see D06).
 
@@ -109,7 +109,7 @@ touches or consumes a recording (see D06).
 ```
 
 `contract` is a full intent-factory contract (schemaVersion 3). Every
-`runtimes` entry the contract declares must use `"driver": "replay"`; the
+`runtimes` entry the contract declares must use `"harness": "replay"`; the
 harness injects `config["replay.recording"]` itself, pointed at a fresh copy
 of the recording named in `recordings` for that runtime id — do not set
 `replay.recording` by hand in `case.json`. Omit `cwd`: the harness always
@@ -120,7 +120,7 @@ runs it there.
 compared to `expected.json`. When omitted (or empty), the harness runs
 exactly one step: `{"type": "run"}`. A case whose scenario needs more than a
 single clean run — a crash and its resume, a rejected concurrent resume,
-deterministic filesystem preparation the `replay` driver cannot express on its
+deterministic filesystem preparation the `replay` harness cannot express on its
 own — declares the full ordered sequence here, including the final step whose
 resulting run directory is what gets compared to `expected.json`.
 

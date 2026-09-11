@@ -1,9 +1,9 @@
-import { normalizeAgyResult, parseVersion } from "./protocol.mjs";
+import { normalizeAgyResult, parseVersion } from "../protocol.mjs";
 
 /**
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const agyDriver = {
+export const agyHarness = {
   capabilities: {
     structuredOutput: true,
     promptTransport: "argv",
@@ -24,19 +24,19 @@ export const agyDriver = {
   // command() always passes --dangerously-skip-permissions.
   permissionExecution: null,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_AGY_BIN ?? runtime.executable ?? "agy";
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const continuationId = options.continuationId ?? null;
     const args = [
@@ -58,5 +58,5 @@ export const agyDriver = {
   normalize: normalizeAgyResult,
 };
 
-export const driver = agyDriver;
-export default agyDriver;
+export const harness = agyHarness;
+export default agyHarness;

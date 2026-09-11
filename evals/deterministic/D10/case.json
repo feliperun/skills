@@ -10,9 +10,9 @@
     "goal": "prove prose takes one bounded repair, then fails over",
     "runtimeDefaults": { "worker": "replay-primary", "judge": "replay-judge" },
     "runtimes": {
-      "replay-primary": { "driver": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
-      "replay-backup": { "driver": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} },
-      "replay-judge": { "driver": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
+      "replay-primary": { "harness": "replay", "model": "replay-primary-model", "vendor": "replay-primary-vendor", "fallback": "replay-backup", "config": {} },
+      "replay-backup": { "harness": "replay", "model": "replay-backup-model", "vendor": "replay-backup-vendor", "config": {} },
+      "replay-judge": { "harness": "replay", "model": "replay-judge-model", "vendor": "replay-judge-vendor", "config": {} }
     },
     "pollIntervalMs": 10,
     "nodes": [

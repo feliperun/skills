@@ -27,11 +27,11 @@ test("run creation source identity includes resolved cwd and task-packet hashes"
       { id: "second", packetHash: "b".repeat(64) },
     ],
   };
-  const identity = captureSourceIdentity(contract, { luna: "test-driver 1" });
+  const identity = captureSourceIdentity(contract, { luna: "test-harness 1" });
   assert.equal(identity.cwd, cwd);
   assert.deepEqual(identity.packetHashes, { first: "a".repeat(64), second: "b".repeat(64) });
-  assert.ok(identity.driverVersions, "driver versions recorded");
-  assert.equal(identity.driverVersions.luna, "test-driver 1");
+  assert.ok(identity.harnessVersions, "harness versions recorded");
+  assert.equal(identity.harnessVersions.luna, "test-harness 1");
 });
 
 test("re-sealing an attempt whose only entry is the node_modules link is a no-op", () => {

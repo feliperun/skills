@@ -125,8 +125,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -183,8 +183,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -237,8 +237,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -300,8 +300,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -358,8 +358,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -423,8 +423,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -494,8 +494,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -576,8 +576,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 250,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",

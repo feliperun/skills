@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseVersion } from "./protocol.mjs";
+import { parseVersion } from "../protocol.mjs";
 
 /** Envelope statuses a recording may carry. */
 const REPLAY_STATUSES = Object.freeze(new Set([
@@ -19,9 +19,9 @@ const REPLAY_STATUSES = Object.freeze(new Set([
  * so the controller exercises everything after provider normalization with
  * zero model invocations.
  *
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const replayDriver = {
+export const replayHarness = {
   capabilities: {
     structuredOutput: true,
     promptTransport: "stdin",
@@ -34,7 +34,7 @@ export const replayDriver = {
     cost: true,
     // A recording cannot prove mechanical tool-policy enforcement.
     toolPolicy: false,
-    // replay-bin.mjs writes its one envelope line after the recorded delay,
+    // replay/bin.mjs writes its one envelope line after the recorded delay,
     // never incrementally.
     streamsOutput: false,
   },
@@ -42,22 +42,22 @@ export const replayDriver = {
   // A recording exposes no permission mode.
   permissionExecution: null,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_REPLAY_BIN
       ?? runtime.executable
-      ?? fileURLToPath(new URL("./replay-bin.mjs", import.meta.url));
+      ?? fileURLToPath(new URL("./bin.mjs", import.meta.url));
   },
 
   /**
    * A recording only stands in for a prompt invocation; the live version
    * probe (`probeRuntime`) never touches it, so a deterministic case that
    * needs to prove a probe's own balance/quota/missing-CLI classification
-   * declares `config["replay.probe"]` instead — carried to replay-bin.mjs as
+   * declares `config["replay.probe"]` instead — carried to replay/bin.mjs as
    * a `--replay-probe` argument, the same way a recorded envelope carries
    * `error.resetAt` to prove a reset instant.
    *
-   * @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]}
+   * @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]}
    */
   versionArgs(runtime) {
     const probe = runtime.config?.["replay.probe"];
@@ -70,7 +70,7 @@ export const replayDriver = {
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const recording = runtime.config?.["replay.recording"];
     if (typeof recording !== "string" || recording.length === 0) {
@@ -90,14 +90,14 @@ export const replayDriver = {
   normalize: normalizeReplayResult,
 };
 
-export const driver = replayDriver;
-export default replayDriver;
+export const harness = replayHarness;
+export default replayHarness;
 
 /**
  * Parse the last non-empty stdout line as an already-normalized provider
  * envelope. Canonical fields are kept — including the optional
  * `error.resetAt` and `exhaustedUntil`, in exactly the shape
- * `ProviderEnvelope` declares for a real driver — and unknown fields are
+ * `ProviderEnvelope` declares for a real harness — and unknown fields are
  * dropped; anything else (prose, an empty stream, a non-zero exit with no
  * envelope) normalizes to a `failed` envelope with error code
  * `invalid_output`. Never throws.
@@ -105,7 +105,7 @@ export default replayDriver;
  * @param {string} stdout
  * @param {number|null} exitCode
  * @param {string|null} signal
- * @returns {import("./index.mjs").ProviderEnvelope}
+ * @returns {import("../index.mjs").ProviderEnvelope}
  */
 function normalizeReplayResult(stdout, exitCode, signal) {
   const envelope = parseLastEnvelope(stdout);
@@ -129,7 +129,7 @@ function normalizeReplayResult(stdout, exitCode, signal) {
 
 /**
  * @param {string} stdout
- * @returns {import("./index.mjs").ProviderEnvelope|null}
+ * @returns {import("../index.mjs").ProviderEnvelope|null}
  */
 function parseLastEnvelope(stdout) {
   const line = lastNonEmpty(stdout);
@@ -162,7 +162,7 @@ function lastNonEmpty(stdout) {
  * not a well-formed envelope.
  *
  * @param {unknown} value
- * @returns {import("./index.mjs").ProviderEnvelope|null}
+ * @returns {import("../index.mjs").ProviderEnvelope|null}
  */
 function canonicalEnvelope(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;

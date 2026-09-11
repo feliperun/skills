@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalUsage, extractJson, failed, isQuotaText, isVerdictCandidate, parseJsonLines, parseVersion } from "./protocol.mjs";
+import { canonicalUsage, extractJson, failed, isQuotaText, isVerdictCandidate, parseJsonLines, parseVersion } from "../protocol.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -11,7 +11,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * `executable()` is the harness the client drives, and probing it is what
  * preflight means by "the provider binary exists".
  */
-const RUNNER = join(HERE, "dsh-runner.mjs");
+const RUNNER = join(HERE, "runner.mjs");
 
 /**
  * Every runtime gets the closed-packet profile: the shipped harness advertises
@@ -23,12 +23,12 @@ const RUNNER = join(HERE, "dsh-runner.mjs");
  * worker's instructions come from its packet, not from whatever `AGENTS.md`
  * sits above the worktree.
  */
-const CLOSED_PACKET_PATCH = join(HERE, "dsh-closed-packet.patch.yml");
+const CLOSED_PACKET_PATCH = join(HERE, "closed-packet.patch.yml");
 
 /**
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const dshDriver = {
+export const dshHarness = {
   capabilities: {
     // The schema rides in the prompt and the verdict is extracted from the
     // final message, exactly as `agy` does; nothing in the wire enforces it.
@@ -46,7 +46,7 @@ export const dshDriver = {
     usage: true,
     cost: false,
     toolPolicy: false,
-    // Measured 2026-09-10: dsh-runner.mjs writeSync's each dsh.message as the
+    // Measured 2026-09-10: runner.mjs writeSync's each dsh.message as the
     // session emits it, not just at the end. A three-tool-call turn against
     // deepseek-official/deepseek-flash grew the redirected stdout file from
     // 67 to 1,380 to 1,441 to 2,084 bytes across a 14s turn.
@@ -63,12 +63,12 @@ export const dshDriver = {
   // `danger-full-access` is the mode for a packet with effects beyond it.
   permissionExecution: { field: "sandbox", executingModes: ["workspace-write", "danger-full-access"], defaultMode: "workspace-write" },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_DSH_BIN ?? runtime.executable ?? "dsh";
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
@@ -76,10 +76,10 @@ export const dshDriver = {
   parseVersion,
 
   /**
-   * @param {import("./index.mjs").DriverRuntime} runtime
+   * @param {import("../index.mjs").HarnessRuntime} runtime
    * @param {string} prompt
-   * @param {import("./index.mjs").CommandOptions} options
-   * @returns {import("./index.mjs").DriverCommand}
+   * @param {import("../index.mjs").CommandOptions} options
+   * @returns {import("../index.mjs").HarnessCommand}
    */
   command(runtime, prompt, options = {}) {
     const args = [
@@ -105,8 +105,8 @@ export const dshDriver = {
    * @param {string} stdout
    * @param {number|null} exitCode
    * @param {string|null} signal
-   * @param {import("./index.mjs").NormalizeOptions} [options]
-   * @returns {import("./index.mjs").ProviderEnvelope}
+   * @param {import("../index.mjs").NormalizeOptions} [options]
+   * @returns {import("../index.mjs").ProviderEnvelope}
    */
   normalize(stdout, exitCode, signal, options = {}) {
     if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
@@ -206,5 +206,5 @@ function resetTimestamp(retryAfterMs) {
   return new Date(Date.now() + retryAfterMs).toISOString();
 }
 
-export const driver = dshDriver;
-export default dshDriver;
+export const harness = dshHarness;
+export default dshHarness;

@@ -47,7 +47,7 @@ if (process.argv.includes("--version")) {
   return path;
 }
 
-test("resume retries a transient driver probe failure instead of refusing as drift", async () => {
+test("resume retries a transient harness probe failure instead of refusing as drift", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-probe-transient-"));
   const path = writeContract(directory, fixture({ id: "probe-transient-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
@@ -67,7 +67,7 @@ test("resume retries a transient driver probe failure instead of refusing as dri
   }
 });
 
-test("resume refuses with probe unavailability when the driver version stays unknown", async () => {
+test("resume refuses with probe unavailability when the harness version stays unknown", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-probe-unavailable-"));
   const path = writeContract(directory, fixture({ id: "probe-unavailable-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
@@ -75,11 +75,11 @@ test("resume refuses with probe unavailability when the driver version stays unk
 
   await assert.rejects(
     () => withFakeCodex(directory, "version-fail", () => resumeRun(runDir)),
-    /driver probe unavailable for luna; resume refused/u,
+    /harness probe unavailable for luna; resume refused/u,
   );
 });
 
-test("resume still refuses concrete driver version changes as drift", async () => {
+test("resume still refuses concrete harness version changes as drift", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-probe-drift-"));
   const path = writeContract(directory, fixture({ id: "probe-drift-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
@@ -91,7 +91,7 @@ test("resume still refuses concrete driver version changes as drift", async () =
   try {
     await assert.rejects(
       () => resumeRun(runDir),
-      /source drift detected in driverVersions/u,
+      /source drift detected in harnessVersions/u,
     );
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;

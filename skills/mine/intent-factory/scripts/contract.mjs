@@ -15,14 +15,14 @@ import { VERIFICATION_LIMITS } from "./verification.mjs";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
-  driverCapabilities,
+  harnessCapabilities,
   resolvePermissionExecution,
   resolveVendor,
   validateCapabilityRequirements,
-} from "./drivers/index.mjs";
+} from "./harnesses/index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "./runtime-discovery.mjs";
 
-export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./drivers/index.mjs";
+export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "./harnesses/index.mjs";
 
 const CONTRACT_FIELDS = new Set([
   "schemaVersion", "contractVersion", "id", "campaignId", "goal", "cwd", "sourceIdentity",
@@ -37,14 +37,14 @@ const NODE_FIELDS = new Set([
 ]);
 const REPLAY_POLICIES = new Set(["safe", "reconcile", "never"]);
 const RUNTIME_FIELDS = new Set([
-  "driver", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
+  "harness", "model", "reasoning", "sandbox", "permissionMode", "config", "printTimeout", "tools",
   "executable", "args", "versionArgs", "maxArgvPromptBytes", "requiredCapabilities", "costRank",
   "fallback", "vendor", "tier",
 ]);
 const GATE_FIELDS = new Set(["enabled", "runtime", "review", "failOn", "maxRevisions", "requiredCapabilities"]);
 const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
 const GATE_VERDICTS = new Set(["pass", "fail", "invalid_judge_output"]);
-const RUNTIME_DRIVERS = new Set(["claude", "codex", "agy", "dsh", "zcode", "exec-jsonl", "replay"]);
+const RUNTIME_HARNESSES = new Set(["claude", "codex", "agy", "dsh", "zcode", "exec-jsonl", "replay"]);
 const NODE_STATUSES = new Set(["pending", "running", "done", "no-op", "blocked", "failed", "exhausted", "stalled", "canceled"]);
 const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependency", "canceled"]);
 const SNAPSHOT_RUNTIME_FIELDS = new Set(["id", ...RUNTIME_FIELDS, "capabilities"]);
@@ -62,13 +62,13 @@ const MAX_ROUTING_HISTORY = 64;
 
 /** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean}} CapabilityRequirements */
 
-/** @typedef {{kind: string, id?: string, campaignId?: string, contractId?: string, nodeId?: string, cwd?: string, gitHead?: string|null, dirtyTreeFingerprint?: string|null, packetHashes?: Record<string, string>, driverVersions?: Record<string, string|null>}} SourceIdentity */
+/** @typedef {{kind: string, id?: string, campaignId?: string, contractId?: string, nodeId?: string, cwd?: string, gitHead?: string|null, dirtyTreeFingerprint?: string|null, packetHashes?: Record<string, string>, harnessVersions?: Record<string, string|null>}} SourceIdentity */
 
 /** @typedef {{argv: string[], cwd?: string, timeoutSec?: number, repeat?: number, env?: string[]}} VerificationCommand */
 
 /** @typedef {{mode: "execution"|"discovery"|"autonomous", objective: string, instructions: string[], readFiles: string[], writeFiles?: string[], writeRoots?: string[], symbols: string[], decisions: string[], nonGoals: string[], verification: VerificationCommand[]}} TaskPacket */
 
-/** @typedef {{driver: "claude"|"codex"|"agy"|"dsh"|"zcode"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number, fallback?: string, vendor: string, tier?: number|string}} ValidatedRuntime */
+/** @typedef {{harness: "claude"|"codex"|"agy"|"dsh"|"zcode"|"exec-jsonl"|"replay", model: string, reasoning?: string, sandbox?: "read-only"|"workspace-write"|"danger-full-access", permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, costRank?: number, fallback?: string, vendor: string, tier?: number|string}} ValidatedRuntime */
 
 /** @typedef {{enabled: boolean, review?: ("none"|"advisory"|"blocking"), runtime?: string, failOn?: ("minor"|"major"|"critical")[], maxRevisions?: number, requiredCapabilities?: CapabilityRequirements}} ValidatedGate */
 
@@ -82,7 +82,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{verdict: "pass"|"fail"|"invalid_judge_output", maxSeverity: "none"|"minor"|"major"|"critical", summary: string, findings: Finding[]}} GateResult */
 /** @typedef {{code: string, message: string, exhaustedUntil?: string|null}} SnapshotError */
 /** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} Usage */
-/** @typedef {ValidatedRuntime & {id: string, capabilities: import("./drivers/index.mjs").DriverCapabilities}} RuntimeSnapshot */
+/** @typedef {ValidatedRuntime & {id: string, capabilities: import("./harnesses/index.mjs").HarnessCapabilities}} RuntimeSnapshot */
 /** @typedef {import("./node.mjs").Invocation} Invocation */
 /** @typedef {import("./verification.mjs").VerificationCommandResult} VerificationCommandResult */
 /** @typedef {import("./verification.mjs").VerificationAttempt} VerificationAttempt */
@@ -197,7 +197,7 @@ export function validateContract(raw, contractPath, options = {}) {
       },
     );
     const requiredCapabilities = validateCapabilityRequirements(
-      /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (node.requiredCapabilities),
+      /** @type {import("./harnesses/index.mjs").CapabilityRequirements|undefined} */ (node.requiredCapabilities),
       `nodes[${index}].requiredCapabilities`,
     );
     const gate = validateGate(node.gate, runtimes, index, /** @type {string} */ (node.id));
@@ -319,7 +319,7 @@ export function routeRuntime(contract, node, role = "worker", event = {}) {
   const runtimeId = event.currentRuntime ?? node.currentRuntime ?? event.assignment ?? composed ?? initialRuntimeId;
   requireRuntime(contract.runtimes, runtimeId, "routing current runtime");
   const runtime = contract.runtimes[/** @type {string} */ (runtimeId)];
-  return { id: runtimeId, ...runtime, capabilities: driverCapabilities(runtime) };
+  return { id: runtimeId, ...runtime, capabilities: harnessCapabilities(runtime) };
 }
 
 /**
@@ -476,8 +476,8 @@ function validateRuntime(id, runtime) {
   requireId(id, `runtime ${id}`);
   assertObject(runtime, `runtime ${id}`);
   rejectUnknown(runtime, RUNTIME_FIELDS, `runtime ${id}`);
-  validateRuntimeValues(runtime, `runtime ${id}`, runtime.driver === "exec-jsonl");
-  const vendor = resolveVendor(/** @type {{driver: string, vendor?: string, config?: Record<string, unknown>}} */ (runtime));
+  validateRuntimeValues(runtime, `runtime ${id}`, runtime.harness === "exec-jsonl");
+  const vendor = resolveVendor(/** @type {{harness: string, vendor?: string, config?: Record<string, unknown>}} */ (runtime));
   if (!vendor) throw new TypeError(`runtime ${id} has no resolvable vendor`);
   return /** @type {ValidatedRuntime} */ ({ ...runtime, vendor });
 }
@@ -488,8 +488,8 @@ function validateRuntime(id, runtime) {
  * @param {boolean} executableRequired
  */
 function validateRuntimeValues(runtime, label, executableRequired) {
-  const driver = runtime.driver;
-  if (typeof driver !== "string" || !RUNTIME_DRIVERS.has(driver)) throw new TypeError(`${label}.driver is invalid`);
+  const harness = runtime.harness;
+  if (typeof harness !== "string" || !RUNTIME_HARNESSES.has(harness)) throw new TypeError(`${label}.harness is invalid`);
   requireString(runtime.model, `${label}.model`);
   if (runtime.reasoning !== undefined) requireString(runtime.reasoning, `${label}.reasoning`);
   if (runtime.sandbox !== undefined && !["read-only", "workspace-write", "danger-full-access"].includes(/** @type {string} */ (runtime.sandbox))) {
@@ -513,12 +513,13 @@ function validateRuntimeValues(runtime, label, executableRequired) {
   if (runtime.fallback !== undefined) requireString(runtime.fallback, `${label}.fallback`);
   if (runtime.vendor !== undefined) requireString(runtime.vendor, `${label}.vendor`);
   validateCapabilityRequirements(
-    /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (runtime.requiredCapabilities),
+    /** @type {import("./harnesses/index.mjs").CapabilityRequirements|undefined} */ (runtime.requiredCapabilities),
     `${label}.requiredCapabilities`,
   );
-  // The harness route is driver state, not provider config: `sdk` hands it to
-  // `initialize` verbatim, so a dsh runtime without one cannot start a turn.
-  if (driver === "dsh") requireString(/** @type {Record<string, unknown>|undefined} */ (runtime.config)?.provider, `${label}.config.provider`);
+  // The provider route belongs to the adapter, not to arbitrary provider
+  // config: `sdk` hands it to `initialize` verbatim, so a dsh runtime without
+  // one cannot start a turn.
+  if (harness === "dsh") requireString(/** @type {Record<string, unknown>|undefined} */ (runtime.config)?.provider, `${label}.config.provider`);
   if (executableRequired && runtime.executable === undefined) requireString(runtime.executable, `${label}.executable`);
 }
 
@@ -534,7 +535,7 @@ function assertRuntimeExecutesCommands(runtimes, runtimeId, index, nodeId, label
   const execution = resolvePermissionExecution(runtime);
   if (execution.executes) return;
   throw new TypeError(
-    `nodes[${index}] (${nodeId}) has verification but ${label} ${runtimeId} uses ${execution.field}=${execution.mode}; ${runtime.driver} executes commands only in ${execution.executingModes.join(", ")}`,
+    `nodes[${index}] (${nodeId}) has verification but ${label} ${runtimeId} uses ${execution.field}=${execution.mode}; ${runtime.harness} executes commands only in ${execution.executingModes.join(", ")}`,
   );
 }
 
@@ -585,7 +586,7 @@ function validateGate(gate, runtimes, index, nodeId) {
     failOn,
     maxRevisions: nonNegativeInteger(gate.maxRevisions ?? 1, `nodes[${index}].gate.maxRevisions`),
     requiredCapabilities: validateCapabilityRequirements(
-      /** @type {import("./drivers/index.mjs").CapabilityRequirements|undefined} */ (gate.requiredCapabilities),
+      /** @type {import("./harnesses/index.mjs").CapabilityRequirements|undefined} */ (gate.requiredCapabilities),
       `nodes[${index}].gate.requiredCapabilities`,
     ),
   };
@@ -628,7 +629,7 @@ function validateSourceIdentity(value, label, expected = null) {
   assertObject(value, label);
   const allowed = new Set([
     "kind", "id", "campaignId", "contractId", "nodeId", "cwd", "gitHead",
-    "dirtyTreeFingerprint", "packetHashes", "driverVersions",
+    "dirtyTreeFingerprint", "packetHashes", "harnessVersions",
   ]);
   rejectUnknown(value, allowed, label);
   requireString(value.kind, `${label}.kind`);
@@ -640,11 +641,11 @@ function validateSourceIdentity(value, label, expected = null) {
     if (value[key] !== undefined && value[key] !== null) requireString(value[key], `${label}.${key}`);
   }
   if (value.packetHashes !== undefined) validateHashMap(value.packetHashes, `${label}.packetHashes`);
-  if (value.driverVersions !== undefined) {
-    assertObject(value.driverVersions, `${label}.driverVersions`);
-    for (const [key, version] of Object.entries(value.driverVersions)) {
-      requireId(key, `${label}.driverVersions key`);
-      if (version !== null) requireString(version, `${label}.driverVersions.${key}`);
+  if (value.harnessVersions !== undefined) {
+    assertObject(value.harnessVersions, `${label}.harnessVersions`);
+    for (const [key, version] of Object.entries(value.harnessVersions)) {
+      requireId(key, `${label}.harnessVersions key`);
+      if (version !== null) requireString(version, `${label}.harnessVersions.${key}`);
     }
   }
   if (expected) {
@@ -657,10 +658,10 @@ function validateSourceIdentity(value, label, expected = null) {
 
 /**
  * @param {{id: string, campaignId: string, cwd: string, nodes: {id: string, packetHash: string}[]}} contract
- * @param {Record<string, string|null>} driverVersions
+ * @param {Record<string, string|null>} harnessVersions
  * @param {{ignorePaths?: string[], ignoreRoots?: string[]}} options
  */
-export function captureSourceIdentity(contract, driverVersions = {}, options = {}) {
+export function captureSourceIdentity(contract, harnessVersions = {}, options = {}) {
   const git = gitIdentity(contract.cwd, options);
   return validateSourceIdentity({
     kind: "run",
@@ -670,7 +671,7 @@ export function captureSourceIdentity(contract, driverVersions = {}, options = {
     gitHead: git.gitHead,
     dirtyTreeFingerprint: git.dirtyTreeFingerprint,
     packetHashes: Object.fromEntries(contract.nodes.map((node) => [node.id, node.packetHash])),
-    driverVersions,
+    harnessVersions,
   }, "run source identity", { kind: "run", contractId: contract.id, campaignId: contract.campaignId });
 }
 
@@ -678,7 +679,7 @@ export function captureSourceIdentity(contract, driverVersions = {}, options = {
  * @param {JsonObject} value
  */
 function validateCompleteSourceIdentity(value) {
-  for (const key of ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "driverVersions"]) {
+  for (const key of ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "harnessVersions"]) {
     if (!Object.hasOwn(value, key)) throw new TypeError(`run metadata.sourceIdentity.${key} is required for resume`);
   }
 }
@@ -705,7 +706,7 @@ function validateInvocations(value, label) {
   for (const [index, invocation] of invocations.entries()) {
     assertObject(invocation, `${label}[${index}]`);
     const allowed = new Set([
-      "id", "pid", "processGroupId", "processStartToken", "driver", "runtimeId", "phase",
+      "id", "pid", "processGroupId", "processStartToken", "harness", "runtimeId", "phase",
       "promptPath", "stdoutPath", "stderrPath", "startedAt", "updatedAt", "closedAt", "deadlineAt",
       "exitCode", "signal", "status", "executable", "usage", "usageEstimated", "costUsd", "snapshotPath", "revision",
       "runId", "campaignId", "planPhase", "role", "runtimeFingerprint", "model", "reasoning", "sandbox", "continuationId", "continuationMode",
@@ -716,7 +717,7 @@ function validateInvocations(value, label) {
     requireInteger(invocation.pid, `${label}[${index}].pid`);
     if (invocation.processGroupId !== null) requireInteger(invocation.processGroupId, `${label}[${index}].processGroupId`);
     if (invocation.processStartToken !== null) requireString(invocation.processStartToken, `${label}[${index}].processStartToken`);
-    requireString(invocation.driver, `${label}[${index}].driver`);
+    requireString(invocation.harness, `${label}[${index}].harness`);
     requireString(invocation.phase, `${label}[${index}].phase`);
     requireId(invocation.runId, `${label}[${index}].runId`);
     requireId(invocation.campaignId, `${label}[${index}].campaignId`);
@@ -888,11 +889,11 @@ function validateSnapshotRuntime(value, label) {
   assertObject(value, label);
   rejectUnknown(value, SNAPSHOT_RUNTIME_FIELDS, label);
   requireId(value.id, `${label}.id`);
-  validateRuntimeValues(value, label, value.driver === "exec-jsonl");
+  validateRuntimeValues(value, label, value.harness === "exec-jsonl");
   validateCapabilities(/** @type {JsonObject} */ (value.capabilities), `${label}.capabilities`);
-  const expected = driverCapabilities(/** @type {{driver: string}} */ (value));
+  const expected = harnessCapabilities(/** @type {{harness: string}} */ (value));
   if (canonicalJson(value.capabilities) !== canonicalJson(expected)) {
-    throw new TypeError(`${label}.capabilities does not match its driver`);
+    throw new TypeError(`${label}.capabilities does not match its harness`);
   }
 }
 

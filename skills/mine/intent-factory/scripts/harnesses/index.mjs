@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { claudeDriver } from "./claude.mjs";
-import { codexDriver } from "./codex.mjs";
-import { agyDriver } from "./agy.mjs";
-import { dshDriver } from "./dsh.mjs";
-import { zcodeDriver } from "./zcode.mjs";
-import { execJsonlDriver } from "./exec-jsonl.mjs";
-import { replayDriver } from "./replay.mjs";
+import { claudeHarness } from "./claude/index.mjs";
+import { codexHarness } from "./codex/index.mjs";
+import { agyHarness } from "./agy/index.mjs";
+import { dshHarness } from "./dsh/index.mjs";
+import { zcodeHarness } from "./zcode/index.mjs";
+import { execJsonlHarness } from "./exec-jsonl/index.mjs";
+import { replayHarness } from "./replay/index.mjs";
 
 /** Current wire-contract version for runner protocol artifacts. */
 export const PROTOCOL_SCHEMA_VERSION = 3;
@@ -13,14 +13,14 @@ export const PROTOCOL_SCHEMA_VERSION = 3;
 /** Version of the runner protocol implementation. */
 export const INTENT_FACTORY_VERSION = "0.3.0";
 
-const DRIVERS = new Map([
-  ["claude", claudeDriver],
-  ["codex", codexDriver],
-  ["agy", agyDriver],
-  ["dsh", dshDriver],
-  ["zcode", zcodeDriver],
-  ["exec-jsonl", execJsonlDriver],
-  ["replay", replayDriver],
+const HARNESSES = new Map([
+  ["claude", claudeHarness],
+  ["codex", codexHarness],
+  ["agy", agyHarness],
+  ["dsh", dshHarness],
+  ["zcode", zcodeHarness],
+  ["exec-jsonl", execJsonlHarness],
+  ["replay", replayHarness],
 ]);
 
 const CAPABILITY_NAMES = new Set([
@@ -39,17 +39,17 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {"structuredOutput"|"promptTransport"|"sandbox"|"permissions"|"continuation"|"tokenBudget"|"costBudget"|"usage"|"cost"|"toolPolicy"|"streamsOutput"} CapabilityName */
 
-/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, toolPolicy: boolean, streamsOutput: boolean, maxArgvPromptBytes?: number}} DriverCapabilities */
+/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, toolPolicy: boolean, streamsOutput: boolean, maxArgvPromptBytes?: number}} HarnessCapabilities */
 
 /** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean, toolPolicy?: boolean, streamsOutput?: boolean}} CapabilityRequirements */
 
-/** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null, env?: Record<string, string|null>}} DriverCommand */
+/** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null, env?: Record<string, string|null>}} HarnessCommand */
 
-/** @typedef {DriverCommand & {driver: string, model: string, capabilities: DriverCapabilities}} ProviderCommand */
+/** @typedef {HarnessCommand & {harness: string, model: string, capabilities: HarnessCapabilities}} ProviderCommand */
 
 /**
  * Which runtime field controls command execution, which values execute, and
- * the value used when the contract omits that field. `null` means the driver
+ * the value used when the contract omits that field. `null` means the harness
  * has no permission mode that can deny command execution.
  *
  * @typedef {{field: "permissionMode"|"sandbox", executingModes: string[], defaultMode: string}|null} PermissionExecutionPolicy
@@ -58,13 +58,13 @@ const CAPABILITY_NAMES = new Set([
 /** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string, resetAt?: string|null}|null, exhaustedUntil?: string|null, judgeCandidates?: number}} ProviderEnvelope */
 
 /**
- * One declared runtime. `driver` names the harness adapter that runs the turn
- * (`claude`, `codex`, `agy`, `dsh`, `zcode`, `exec-jsonl`, or `replay`) and
- * `model` names what that harness asks; the two are independent. replay requires
+ * One declared runtime. `harness` names a registered adapter (`claude`,
+ * `codex`, `agy`, `dsh`, `zcode`, `exec-jsonl`, or `replay`) and `model` names
+ * what that harness asks; the two are independent. replay requires
  * `config["replay.recording"]` for commands, and dsh requires
- * `config.provider` for the harness route every attempt runs on.
+ * `config.provider` for the provider route every attempt runs on.
  *
- * @typedef {{id?: string, driver: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, tier?: number|string, vendor?: string}} DriverRuntime
+ * @typedef {{id?: string, harness: string, model: string, reasoning?: string, sandbox?: string, permissionMode?: string, config?: Record<string, unknown>, printTimeout?: string, tools?: string[], executable?: string, args?: string[], versionArgs?: string[], maxArgvPromptBytes?: number, requiredCapabilities?: CapabilityRequirements, tier?: number|string, vendor?: string}} HarnessRuntime
  */
 
 /**
@@ -85,64 +85,64 @@ const CAPABILITY_NAMES = new Set([
  * One provider adapter: capabilities plus executable, version, command, and
  * result-normalization behavior.
  *
- * @typedef {{capabilities: DriverCapabilities, permissionExecution: PermissionExecutionPolicy, executable: (runtime: DriverRuntime) => string, versionArgs: (runtime: DriverRuntime) => string[], parseVersion: (stdout: string, stderr?: string) => string|null, command: (runtime: DriverRuntime, prompt: string, options: CommandOptions) => DriverCommand, normalize: (stdout: string, exitCode: number|null, signal: string|null, options?: NormalizeOptions) => ProviderEnvelope}} DriverAdapter
+ * @typedef {{capabilities: HarnessCapabilities, permissionExecution: PermissionExecutionPolicy, executable: (runtime: HarnessRuntime) => string, versionArgs: (runtime: HarnessRuntime) => string[], parseVersion: (stdout: string, stderr?: string) => string|null, command: (runtime: HarnessRuntime, prompt: string, options: CommandOptions) => HarnessCommand, normalize: (stdout: string, exitCode: number|null, signal: string|null, options?: NormalizeOptions) => ProviderEnvelope}} HarnessAdapter
  */
 
 /**
  * Result of a read-only runtime probe.
  *
- * @typedef {{id: string|null, driver: string, executable: string, model: string, version: string|null, capabilities: DriverCapabilities, requiredCapabilities: CapabilityRequirements, requiredCapabilitySets: CapabilityRequirements[], ok: boolean, detail: string|null, availability?: {available: boolean, exhaustedUntil: string|null, reason: string}, live?: boolean, liveStatus?: string, usage?: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd?: number|null}} ProbeResult
+ * @typedef {{id: string|null, harness: string, executable: string, model: string, version: string|null, capabilities: HarnessCapabilities, requiredCapabilities: CapabilityRequirements, requiredCapabilitySets: CapabilityRequirements[], ok: boolean, detail: string|null, availability?: {available: boolean, exhaustedUntil: string|null, reason: string}, live?: boolean, liveStatus?: string, usage?: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd?: number|null}} ProbeResult
  */
 
 /** @typedef {{id?: string}} RuntimeIdentity */
 
 /**
- * Every registered driver name, for callers that must account for the whole
- * registry. Declaration order only — callers that display drivers sort it
+ * Every registered harness name, for callers that must account for the whole
+ * registry. Declaration order only — callers that display harnesses sort it
  * themselves.
  *
  * @returns {string[]}
  */
-export function registeredDrivers() {
-  return [...DRIVERS.keys()];
+export function registeredHarnesses() {
+  return [...HARNESSES.keys()];
 }
 
 /**
  * @param {string} name
- * @returns {DriverAdapter}
+ * @returns {HarnessAdapter}
  */
-export function getDriver(name) {
-  const driver = DRIVERS.get(name);
-  if (!driver) throw new TypeError(`unknown driver: ${name}`);
-  return driver;
+export function getHarness(name) {
+  const harness = HARNESSES.get(name);
+  if (!harness) throw new TypeError(`unknown harness: ${name}`);
+  return harness;
 }
 
 /**
- * @param {{driver: string}} runtime
- * @returns {DriverCapabilities}
+ * @param {{harness: string}} runtime
+ * @returns {HarnessCapabilities}
  */
-export function driverCapabilities(runtime) {
-  return { ...getDriver(runtime.driver).capabilities };
+export function harnessCapabilities(runtime) {
+  return { ...getHarness(runtime.harness).capabilities };
 }
 
 /**
- * @param {{driver: string, permissionMode?: string, sandbox?: string}} runtime
+ * @param {{harness: string, permissionMode?: string, sandbox?: string}} runtime
  * @returns {{executes: boolean, field: "permissionMode"|"sandbox"|null, mode: string|null, executingModes: string[]}}
  */
 export function resolvePermissionExecution(runtime) {
-  const policy = getDriver(runtime.driver).permissionExecution;
+  const policy = getHarness(runtime.harness).permissionExecution;
   if (!policy) return { executes: true, field: null, mode: null, executingModes: [] };
   const mode = /** @type {string} */ (runtime[policy.field] ?? policy.defaultMode);
   return { executes: policy.executingModes.includes(mode), field: policy.field, mode, executingModes: policy.executingModes };
 }
 
 /**
- * The vendor a driver talks to when no provider configuration says
+ * The vendor a harness talks to when no provider configuration says
  * otherwise. `replay` and `exec-jsonl` stand in for whatever the recording or
  * the exec'd binary actually is, so neither gets a default here — a contract
  * using either must declare `vendor` outright.
  */
-const DEFAULT_DRIVER_VENDORS = Object.freeze({
+const DEFAULT_HARNESS_VENDORS = Object.freeze({
   claude: "anthropic",
   codex: "openai",
   agy: "google",
@@ -153,17 +153,17 @@ const DEFAULT_DRIVER_VENDORS = Object.freeze({
  * Resolve one runtime's vendor identity: an explicit `vendor` wins outright,
  * then a provider-configuration override (the codex `model_provider` trap —
  * a codex runtime configured for deepseek is a deepseek vendor, not openai),
- * then the driver's own default. `null` means the caller must reject the
+ * then the harness's own default. `null` means the caller must reject the
  * runtime: nothing here named a vendor for it.
  *
- * @param {{driver: string, vendor?: string, config?: Record<string, unknown>}} runtime
+ * @param {{harness: string, vendor?: string, config?: Record<string, unknown>}} runtime
  * @returns {string|null}
  */
 export function resolveVendor(runtime) {
   if (typeof runtime.vendor === "string" && runtime.vendor.length) return runtime.vendor;
   const provider = runtime.config?.model_provider;
   if (typeof provider === "string" && provider.length) return provider;
-  return /** @type {Record<string, string>} */ (DEFAULT_DRIVER_VENDORS)[runtime.driver] ?? null;
+  return /** @type {Record<string, string>} */ (DEFAULT_HARNESS_VENDORS)[runtime.harness] ?? null;
 }
 
 /**
@@ -172,60 +172,60 @@ export function resolveVendor(runtime) {
  * optional `env` overlay is merged over the runner environment at spawn time;
  * a null value removes the ambient variable.
  *
- * @param {DriverRuntime} runtime
+ * @param {HarnessRuntime} runtime
  * @param {string} prompt
  * @param {CommandOptions} options
  * @returns {ProviderCommand}
  */
 export function providerCommand(runtime, prompt, options = {}) {
-  const driver = getDriver(runtime.driver);
-  const command = driver.command(runtime, prompt, options);
+  const harness = getHarness(runtime.harness);
+  const command = harness.command(runtime, prompt, options);
   if (command.promptTransport === "argv") {
-    const limit = runtime.maxArgvPromptBytes ?? driver.capabilities.maxArgvPromptBytes;
+    const limit = runtime.maxArgvPromptBytes ?? harness.capabilities.maxArgvPromptBytes;
     if (typeof limit === "number" && Number.isFinite(limit) && Buffer.byteLength(prompt, "utf8") > limit) {
-      const error = /** @type {Error & {code: string}} */ (new Error(`prompt exceeds argv limit of ${limit} bytes for ${runtime.driver}`));
+      const error = /** @type {Error & {code: string}} */ (new Error(`prompt exceeds argv limit of ${limit} bytes for ${runtime.harness}`));
       error.code = "prompt_too_large";
       throw error;
     }
   }
   return {
     ...command,
-    driver: runtime.driver,
+    harness: runtime.harness,
     model: runtime.model,
-    capabilities: driverCapabilities(runtime),
+    capabilities: harnessCapabilities(runtime),
   };
 }
 
 /**
- * @param {string|{driver: string}} runtimeOrDriver
+ * @param {string|{harness: string}} runtimeOrHarness
  * @param {string} stdout
  * @param {number|null} exitCode
  * @param {string|null} signal
  * @param {NormalizeOptions} options
  * @returns {ProviderEnvelope}
  */
-export function normalizeProviderResult(runtimeOrDriver, stdout, exitCode, signal, options = {}) {
-  const runtime = typeof runtimeOrDriver === "string" ? { driver: runtimeOrDriver } : runtimeOrDriver;
-  const driver = getDriver(runtime.driver);
-  return driver.normalize(stdout, exitCode, signal, options);
+export function normalizeProviderResult(runtimeOrHarness, stdout, exitCode, signal, options = {}) {
+  const runtime = typeof runtimeOrHarness === "string" ? { harness: runtimeOrHarness } : runtimeOrHarness;
+  const harness = getHarness(runtime.harness);
+  return harness.normalize(stdout, exitCode, signal, options);
 }
 
 /**
  * Normalize a provider envelope or recorded response into the availability
  * shape used by doctor and runtime assignment.
  *
- * @param {string|{driver: string}} runtimeOrDriver
+ * @param {string|{harness: string}} runtimeOrHarness
  * @param {unknown} response
  * @param {number|null} [exitCode]
  * @param {string|null} [signal]
  * @returns {{available: boolean, exhaustedUntil: string|null, reason: string}}
  */
-export function normalizeProviderAvailability(runtimeOrDriver, response, exitCode = 0, signal = null) {
+export function normalizeProviderAvailability(runtimeOrHarness, response, exitCode = 0, signal = null) {
   let envelope;
   try {
     envelope = response && typeof response === "object" && !Array.isArray(response) && typeof /** @type {Record<string, unknown>} */ (response).status === "string"
       ? /** @type {ProviderEnvelope} */ (response)
-      : normalizeProviderResult(runtimeOrDriver, String(response ?? ""), exitCode, signal);
+      : normalizeProviderResult(runtimeOrHarness, String(response ?? ""), exitCode, signal);
   } catch (error) {
     return { available: false, exhaustedUntil: null, reason: error instanceof Error ? error.message : "provider_unavailable" };
   }
@@ -325,7 +325,7 @@ export function validateCapabilityRequirements(requirements, label = "requiredCa
 }
 
 /**
- * @param {DriverCapabilities} capabilities
+ * @param {HarnessCapabilities} capabilities
  * @param {CapabilityRequirements} requirements
  * @returns {string[]}
  */
@@ -335,7 +335,7 @@ export function missingCapabilities(capabilities, requirements = {}) {
     const required = requirements[name];
     return capabilities[name] === required
       ? []
-      : [`${name}=${String(required)} (driver provides ${name}=${String(capabilities[name])})`];
+      : [`${name}=${String(required)} (harness provides ${name}=${String(capabilities[name])})`];
   });
 }
 
@@ -344,7 +344,7 @@ function isCapabilityName(name) {
   return CAPABILITY_NAMES.has(name);
 }
 
-/** @param {DriverCapabilities} capabilities @param {CapabilityRequirements[]} requirementSets */
+/** @param {HarnessCapabilities} capabilities @param {CapabilityRequirements[]} requirementSets */
 function missingCapabilitySets(capabilities, requirementSets) {
   return requirementSets.flatMap((requirements, index) =>
     missingCapabilities(capabilities, requirements).map((missing) => `requirement ${index + 1}: ${missing}`),
@@ -354,24 +354,24 @@ function missingCapabilitySets(capabilities, requirementSets) {
 /**
  * Probe an executable version without sending a prompt or exposing secrets.
  *
- * @param {DriverRuntime} runtime
+ * @param {HarnessRuntime} runtime
  * @param {{cwd?: string, timeoutSec?: number, requiredCapabilities?: CapabilityRequirements, requiredCapabilitySets?: CapabilityRequirements[]}} options
  * @returns {Promise<ProbeResult>}
  */
 export function probeRuntime(runtime, options = {}) {
-  const driver = getDriver(runtime.driver);
-  const executable = driver.executable(runtime);
+  const harness = getHarness(runtime.harness);
+  const executable = harness.executable(runtime);
   const requirementSets = (options.requiredCapabilitySets ?? [options.requiredCapabilities])
     .filter((requirements) => requirements !== undefined)
     .map((requirements, index) => validateCapabilityRequirements(requirements, `requiredCapabilitySets[${index}]`));
   const missingEnvironment = missingEnvironmentVariables(runtime);
   const base = {
     id: runtime.id ?? null,
-    driver: runtime.driver,
+    harness: runtime.harness,
     executable,
     model: runtime.model,
     version: null,
-    capabilities: driverCapabilities(runtime),
+    capabilities: harnessCapabilities(runtime),
     requiredCapabilities: requirementSets.length === 1 ? requirementSets[0] : {},
     requiredCapabilitySets: requirementSets,
     ok: false,
@@ -379,9 +379,9 @@ export function probeRuntime(runtime, options = {}) {
     availability: { available: false, exhaustedUntil: null, reason: "provider_unavailable" },
   };
   const missing = missingCapabilitySets(base.capabilities, requirementSets);
-  const args = driver.versionArgs(runtime);
+  const args = harness.versionArgs(runtime);
   const timeoutSec = options.timeoutSec ?? 120;
-  const identity = (/** @type {string|null} */ version) => `${runtime.driver} · ${executable} · ${runtime.model} · ${version ?? "version unavailable"}`;
+  const identity = (/** @type {string|null} */ version) => `${runtime.harness} · ${executable} · ${runtime.model} · ${version ?? "version unavailable"}`;
   const missingEnvironmentDetail = missingEnvironment.length
     ? `missing environment variable ${missingEnvironment.join(", ")}`
     : null;
@@ -433,7 +433,7 @@ export function probeRuntime(runtime, options = {}) {
       });
     });
     child.once("close", (exitCode, signal) => {
-      const version = driver.parseVersion(redactSecrets(stdout), redactSecrets(stderr));
+      const version = harness.parseVersion(redactSecrets(stdout), redactSecrets(stderr));
       const withVersion = { ...base, version };
       if (signal || exitCode !== 0) {
         finish({
@@ -467,7 +467,7 @@ export function probeRuntime(runtime, options = {}) {
 }
 
 /**
- * @param {DriverRuntime} runtime
+ * @param {HarnessRuntime} runtime
  * @returns {string[]}
  */
 function missingEnvironmentVariables(runtime) {

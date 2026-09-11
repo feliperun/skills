@@ -1,5 +1,5 @@
-import { normalizeClaudeResult, parseVersion } from "./protocol.mjs";
-import { hookSettings } from "../tool-policy-hook.mjs";
+import { normalizeClaudeResult, parseVersion } from "../protocol.mjs";
+import { hookSettings } from "../../tool-policy-hook.mjs";
 
 /** Built-in tools a closed-packet worker needs; every other tool is preamble. */
 export const DEFAULT_CLAUDE_TOOLS = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"];
@@ -12,7 +12,7 @@ export const DEFAULT_CLAUDE_TOOLS = ["Read", "Edit", "Write", "Bash", "Glob", "G
  * with the ambient configuration, about 4,300 per turn with these flags.
  * `--bare` would cut further but disables hooks, so it is never used.
  *
- * @param {import("./index.mjs").DriverRuntime} runtime
+ * @param {import("../index.mjs").HarnessRuntime} runtime
  * @returns {string[]}
  */
 function claudePreambleArgs(runtime) {
@@ -27,9 +27,9 @@ function claudePreambleArgs(runtime) {
 }
 
 /**
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const claudeDriver = {
+export const claudeHarness = {
   capabilities: {
     structuredOutput: true,
     promptTransport: "stdin",
@@ -50,19 +50,19 @@ export const claudeDriver = {
   // Headless acceptEdits denies Bash; bypassPermissions executes commands.
   permissionExecution: { field: "permissionMode", executingModes: ["bypassPermissions"], defaultMode: "acceptEdits" },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_CLAUDE_BIN ?? runtime.executable ?? "claude";
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const continuationId = options.continuationId ?? null;
     const args = [
@@ -86,5 +86,5 @@ export const claudeDriver = {
   normalize: normalizeClaudeResult,
 };
 
-export const driver = claudeDriver;
-export default claudeDriver;
+export const harness = claudeHarness;
+export default claudeHarness;

@@ -28,9 +28,9 @@ import {
   finite,
   parseJsonLines,
   parseVersion,
-} from "./protocol.mjs";
+} from "../protocol.mjs";
 
-export { DRIVER_OUTPUT_LIMIT_BYTES } from "./protocol.mjs";
+export { HARNESS_OUTPUT_LIMIT_BYTES } from "../protocol.mjs";
 
 export const EXEC_JSONL_PROTOCOL = Object.freeze({
   schemaVersion: 1,
@@ -51,12 +51,12 @@ const EVENT_FIELDS = Object.freeze({
 
 const EVENT_TYPES = new Set(Object.keys(EVENT_FIELDS));
 
-/** @typedef {import("./index.mjs").DriverAdapter} DriverAdapter */
+/** @typedef {import("../index.mjs").HarnessAdapter} HarnessAdapter */
 
 /**
- * @type {DriverAdapter}
+ * @type {HarnessAdapter}
  */
-export const execJsonlDriver = {
+export const execJsonlHarness = {
   capabilities: {
     structuredOutput: true,
     promptTransport: "stdin",
@@ -78,19 +78,19 @@ export const execJsonlDriver = {
   // The wrapper protocol exposes no permission mode.
   permissionExecution: null,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_EXEC_JSONL_BIN ?? runtime.executable ?? "exec-jsonl";
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const request = {
       schemaVersion: 1,
@@ -113,14 +113,14 @@ export const execJsonlDriver = {
   normalize: normalizeExecJsonlResult,
 };
 
-export const driver = execJsonlDriver;
-export default execJsonlDriver;
+export const harness = execJsonlHarness;
+export default execJsonlHarness;
 
 /**
  * @param {string} stdout
  * @param {number|null} exitCode
  * @param {string|null} signal
- * @returns {import("./index.mjs").ProviderEnvelope}
+ * @returns {import("../index.mjs").ProviderEnvelope}
  */
 export function normalizeExecJsonlResult(stdout, exitCode, signal) {
   if (signal) return failed("canceled", `provider ended after ${signal}`, "canceled");
@@ -274,18 +274,18 @@ function validateError(value, label) {
  * design: unparsable or partial lines count as zero, and providers that only
  * report usage at completion (agy, exec-jsonl, replay) meter as 0 mid-run.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {string} stdout bounded transcript tail
  * @returns {{inputTokens: number|null, cacheReadInputTokens: number|null}}
  */
-export function liveUsage(driver, stdout) {
-  if (driver === "exec-jsonl" || driver === "replay") {
-    // Completion-only drivers: usage arrives in the terminal envelope, which
+export function liveUsage(harness, stdout) {
+  if (harness === "exec-jsonl" || harness === "replay") {
+    // Completion-only harnesses: usage arrives in the terminal envelope, which
     // the close path normalizes, never in a mid-run live observation.
     return { inputTokens: null, cacheReadInputTokens: null };
   }
   const events = parsedEvents(stdout);
-  if (driver === "codex") {
+  if (harness === "codex") {
     // turn.completed usage is cumulative for the session; the last one wins.
     // Codex counts input_tokens with their cached portion included, so the
     // uncached total is what the ledger calls `inputTokens`.
@@ -305,7 +305,7 @@ export function liveUsage(driver, stdout) {
       record.inputTokens + record.cacheReadInputTokens > best.inputTokens + best.cacheReadInputTokens ? record : best
     ));
   }
-  if (driver === "claude") {
+  if (harness === "claude") {
     // The terminal result event carries the session total; before it lands,
     // sum per-request assistant usage (each request re-reads full context).
     // Claude's input_tokens already exclude cache reads.
@@ -337,13 +337,13 @@ export function liveUsage(driver, stdout) {
  * policy so it is comparable with the persisted ledger. A provider that only
  * reports usage at completion (agy, exec-jsonl, replay) meters as 0 mid-run.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {string} stdout bounded transcript tail
  * @param {number} [cacheReadWeight] cached-to-uncached rate ratio, default 1
  * @returns {number}
  */
-export function liveInputTokens(driver, stdout, cacheReadWeight = 1) {
-  const usage = liveUsage(driver, stdout);
+export function liveInputTokens(harness, stdout, cacheReadWeight = 1) {
+  const usage = liveUsage(harness, stdout);
   if (usage.inputTokens === null) return 0;
   const weighted = usage.inputTokens + (usage.cacheReadInputTokens ?? 0) * cacheReadWeight;
   return Math.round(weighted * 1000) / 1000;
@@ -371,16 +371,16 @@ const CODEX_TOOL_ITEM_TYPES = new Set(["tool_call", "command_execution", "mcp_to
 
 /**
  * Session evidence from a bounded live transcript: completed turns, cache-read
- * input, tool invocations, and whether the driver's terminal record has been
- * folded. Each driver exposes only what its own events prove, and anything
+ * input, tool invocations, and whether the harness's terminal record has been
+ * folded. Each harness exposes only what its own events prove, and anything
  * unparsable or unsupported meters as zero — a live observation never throws.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {string} stdout bounded transcript tail
  * @returns {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}}
  */
-export function liveSessionMetrics(driver, stdout) {
-  const parser = new SessionMetricsParser(driver);
+export function liveSessionMetrics(harness, stdout) {
+  const parser = new SessionMetricsParser(harness);
   parser.push(String(stdout));
   parser.flush();
   return parser.metrics();
@@ -395,7 +395,7 @@ const SESSION_FRAGMENT_BYTES = SESSION_RECORD_MAX_BYTES / 2;
 /** Claude-family content-block needle proving one tool invocation. */
 const TOOL_USE_NEEDLE = Buffer.from('"type":"tool_use"', "utf8");
 
-/** Cache-read evidence spellings across driver streams. */
+/** Cache-read evidence spellings across harness streams. */
 const CACHE_READ_PATTERN = /"(?:cache_read_input_tokens|cached_input_tokens|cacheReadInputTokens)":(\d+)/gu;
 
 /**
@@ -408,11 +408,11 @@ const CACHE_READ_PATTERN = /"(?:cache_read_input_tokens|cached_input_tokens|cach
  */
 export class SessionMetricsParser {
   /**
-   * @param {string} driver
+   * @param {string} harness
    * @param {{turns?: number, cacheReadInputTokens?: number, toolCalls?: number, completed?: boolean}} [previous]
    */
-  constructor(driver, previous = {}) {
-    this.driver = driver;
+  constructor(harness, previous = {}) {
+    this.harness = harness;
     this.totals = {
       turns: previous.turns ?? 0,
       cacheReadInputTokens: previous.cacheReadInputTokens ?? 0,
@@ -479,7 +479,7 @@ export class SessionMetricsParser {
       const window = Buffer.concat([this.oversized.tail, piece]);
       const keep = window.subarray(Math.max(0, window.length - SESSION_FRAGMENT_BYTES));
       const dropped = window.subarray(0, window.length - keep.length);
-      if (this.driver === "claude") {
+      if (this.harness === "claude") {
         const counted = countWithCarry(dropped, this.oversized.carry, TOOL_USE_NEEDLE);
         this.oversized.streamedToolUse += counted.hits;
         this.oversized.carry = counted.carry;
@@ -499,7 +499,7 @@ export class SessionMetricsParser {
     const tail = whole.subarray(Math.max(0, whole.length - SESSION_FRAGMENT_BYTES));
     /** @type {{head: Buffer, tail: Buffer, streamedToolUse: number, carry: Buffer}} */
     const oversized = { head, tail, streamedToolUse: 0, carry: Buffer.alloc(0) };
-    if (this.driver === "claude") {
+    if (this.harness === "claude") {
       // Count from the record start up to where the rolling tail takes over,
       // so a needle straddling any region boundary is counted exactly once.
       const counted = countWithCarry(whole.subarray(0, Math.max(0, whole.length - tail.length)), oversized.carry, TOOL_USE_NEEDLE);
@@ -516,7 +516,7 @@ export class SessionMetricsParser {
       this.oversized = null;
       /** @type {{head: string, tail: string, toolUse: number}} */
       let fragments;
-      if (this.driver === "claude") {
+      if (this.harness === "claude") {
         const counted = countWithCarry(oversized.tail, oversized.carry, TOOL_USE_NEEDLE);
         fragments = {
           head: decodeFragment(oversized.head),
@@ -526,8 +526,8 @@ export class SessionMetricsParser {
       } else {
         fragments = { head: decodeFragment(oversized.head), tail: decodeFragment(oversized.tail), toolUse: 0 };
       }
-      foldFragmentRecord(this.driver, this.totals, fragments);
-      this.continuationId ??= fragmentContinuationId(this.driver, fragments);
+      foldFragmentRecord(this.harness, this.totals, fragments);
+      this.continuationId ??= fragmentContinuationId(this.harness, fragments);
       return;
     }
     const line = this.pending.toString("utf8");
@@ -540,14 +540,14 @@ export class SessionMetricsParser {
     }
     if (!event || typeof event !== "object" || Array.isArray(event)) return;
     const record = /** @type {Record<string, unknown>} */ (event);
-    foldRecord(this.driver, this.totals, record);
-    this.continuationId ??= recordContinuationId(this.driver, record);
+    foldRecord(this.harness, this.totals, record);
+    this.continuationId ??= recordContinuationId(this.harness, record);
     this.foldCompletionEvidence(record);
   }
 
   /**
    * Fold the completion evidence one parsed record proves into the sticky
-   * totals. A driver is completed when its terminal record was folded; for
+   * totals. A harness is completed when its terminal record was folded; for
    * codex that means a turn.completed that ends the turn with the
    * result-carrying final agent message, so a live observation never treats a
    * still-working or already-answered session ambiguously.
@@ -556,16 +556,16 @@ export class SessionMetricsParser {
    */
   foldCompletionEvidence(record) {
     const totals = this.totals;
-    if (this.driver === "codex") {
+    if (this.harness === "codex") {
       if (record.type === "turn.completed" && this.lastItemType === "agent_message"
         && extractJson(this.lastAgentText) !== null) {
         totals.completed = true;
       }
-    } else if (this.driver === "claude" && record.type === "result") {
+    } else if (this.harness === "claude" && record.type === "result") {
       totals.completed = true;
-    } else if (this.driver === "exec-jsonl" && record.type === "run.completed") {
+    } else if (this.harness === "exec-jsonl" && record.type === "run.completed") {
       totals.completed = true;
-    } else if (this.driver === "replay" && typeof record.status === "string") {
+    } else if (this.harness === "replay" && typeof record.status === "string") {
       // The replay envelope is the terminal record: the bin emits exactly one
       // envelope line per invocation, so folding one proves completion.
       totals.completed = true;
@@ -589,12 +589,12 @@ export class SessionMetricsParser {
  * counter is already cumulative) and additive for claude-style streams until
  * a terminal result event carries the authoritative session total.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}} totals
  * @param {Record<string, unknown>} record
  */
-function foldRecord(driver, totals, record) {
-  if (driver === "codex") {
+function foldRecord(harness, totals, record) {
+  if (harness === "codex") {
     if (record.type === "turn.completed") {
       totals.turns += 1;
       totals.cacheReadInputTokens = Math.max(totals.cacheReadInputTokens, canonicalUsage(record.usage).cacheReadInputTokens ?? 0);
@@ -603,7 +603,7 @@ function foldRecord(driver, totals, record) {
     }
     return;
   }
-  if (driver === "claude") {
+  if (harness === "claude") {
     if (record.type === "assistant") {
       const message = /** @type {Record<string, unknown>} */ (record.message ?? {});
       totals.turns += 1;
@@ -617,12 +617,12 @@ function foldRecord(driver, totals, record) {
     }
     return;
   }
-  if (driver === "exec-jsonl" && record.type === "run.completed") {
+  if (harness === "exec-jsonl" && record.type === "run.completed") {
     // The protocol carries no tool events; only a completed run proves a turn.
     totals.turns += 1;
     totals.cacheReadInputTokens += canonicalUsage(record.usage).cacheReadInputTokens ?? 0;
   }
-  if (driver === "replay" && typeof record.status === "string") {
+  if (harness === "replay" && typeof record.status === "string") {
     // A replayed envelope is the whole invocation: one completed turn, no
     // tool events, usage only in the terminal record.
     totals.turns += 1;
@@ -635,13 +635,13 @@ function foldRecord(driver, totals, record) {
  * bound: the same evidence foldRecord extracts, read as fragments so an
  * oversized record is never silently skipped.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {{turns: number, cacheReadInputTokens: number, toolCalls: number, completed: boolean}} totals
  * @param {{head: string, tail: string, toolUse: number}} fragments
  */
-function foldFragmentRecord(driver, totals, fragments) {
+function foldFragmentRecord(harness, totals, fragments) {
   const text = `${fragments.head}\n${fragments.tail}`;
-  if (driver === "claude") {
+  if (harness === "claude") {
     if (text.includes('"type":"assistant"')) {
       totals.turns += 1;
       totals.toolCalls += fragments.toolUse;
@@ -654,7 +654,7 @@ function foldFragmentRecord(driver, totals, fragments) {
     }
     return;
   }
-  if (driver === "codex") {
+  if (harness === "codex") {
     if (text.includes('"type":"turn.completed"')) {
       totals.turns += 1;
       const cacheRead = lastCacheRead(text);
@@ -669,7 +669,7 @@ function foldFragmentRecord(driver, totals, fragments) {
     }
     return;
   }
-  if (driver === "exec-jsonl" && text.includes('"type":"run.completed"')) {
+  if (harness === "exec-jsonl" && text.includes('"type":"run.completed"')) {
     totals.turns += 1;
     const cacheRead = lastCacheRead(text);
     if (cacheRead !== null) totals.cacheReadInputTokens += cacheRead;
@@ -680,18 +680,18 @@ function foldFragmentRecord(driver, totals, fragments) {
 /**
  * The provider session identity one record proves.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {Record<string, unknown>} record
  * @returns {string|null}
  */
-function recordContinuationId(driver, record) {
-  if (driver === "codex") {
+function recordContinuationId(harness, record) {
+  if (harness === "codex") {
     return record.type === "thread.started" && typeof record.thread_id === "string" ? record.thread_id : null;
   }
-  if (driver === "claude") {
+  if (harness === "claude") {
     return record.type === "result" && typeof record.session_id === "string" ? record.session_id : null;
   }
-  if (driver === "exec-jsonl" && (record.type === "run.started" || record.type === "run.completed")) {
+  if (harness === "exec-jsonl" && (record.type === "run.started" || record.type === "run.completed")) {
     return typeof record.continuationId === "string" ? record.continuationId : null;
   }
   return null;
@@ -700,15 +700,15 @@ function recordContinuationId(driver, record) {
 /**
  * The provider session identity one record's fragments prove.
  *
- * @param {string} driver
+ * @param {string} harness
  * @param {{head: string, tail: string}} fragments
  * @returns {string|null}
  */
-function fragmentContinuationId(driver, fragments) {
+function fragmentContinuationId(harness, fragments) {
   const text = `${fragments.head}\n${fragments.tail}`;
-  const pattern = driver === "codex"
+  const pattern = harness === "codex"
     ? /"thread_id":"([^"]+)"/u
-    : driver === "claude"
+    : harness === "claude"
       ? /"session_id":"([^"]+)"/u
       : /"continuationId":"([^"]+)"/u;
   const match = pattern.exec(text);

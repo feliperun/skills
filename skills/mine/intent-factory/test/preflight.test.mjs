@@ -29,7 +29,7 @@ import { writeJsonAtomic } from "../scripts/store.mjs";
 
 const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 
-const EXPECTED_CHECK_KEYS = ["costUsd", "detail", "driver", "executable", "id", "live", "liveStatus", "model", "ok", "usage", "version"];
+const EXPECTED_CHECK_KEYS = ["costUsd", "detail", "executable", "harness", "id", "live", "liveStatus", "model", "ok", "usage", "version"];
 
 /**
  * @param {string} directory
@@ -107,7 +107,7 @@ function gitRepo(prefix, commands = []) {
 function routedRuntimes(executable) {
   const runtime = /** @type {import("../scripts/contract.mjs").RuntimeSnapshot} */ ({
     id: "luna",
-    driver: "codex",
+    harness: "codex",
     executable,
     model: "gpt-5.6-luna",
   });
@@ -176,14 +176,14 @@ test("preflight environment report blocks only on non-advisory failures", () => 
   const directory = gitRepo("env-preflight-report-");
   writeFileSync(join(directory, "note.txt"), "dirt\n");
   const runtimes = routedRuntimes(fakeCodex(directory));
-  const ready = environmentPreflight({ cwd: directory, runtimes, driverVersions: { luna: "1.0.0" }, env: {} });
+  const ready = environmentPreflight({ cwd: directory, runtimes, harnessVersions: { luna: "1.0.0" }, env: {} });
   assert.deepEqual(ready.checks.map((check) => check.name), ["disk", "git", "worktree", "runtime binaries"]);
   assert.equal(ready.ok, true, "a dirty worktree alone stays dispatchable");
   assert.deepEqual(blockingChecks(ready), []);
   const starved = environmentPreflight({
     cwd: directory,
     runtimes,
-    driverVersions: { luna: null },
+    harnessVersions: { luna: null },
     env: { INTENT_FACTORY_MIN_FREE_DISK_BYTES: String(Number.MAX_SAFE_INTEGER) },
   });
   assert.equal(starved.ok, false);
@@ -221,9 +221,9 @@ test("preflight's reachable-state enumeration stops at one hop and never probes 
   const contractPath = writeContract(directory, fixture({
     runtimeDefaults: { worker: "a", judge: "a" },
     runtimes: {
-      a: { driver: "codex", model: "a", executable: "/nonexistent/codex", fallback: "b" },
-      b: { driver: "codex", model: "b", executable: "/nonexistent/codex", fallback: "c" },
-      c: { driver: "codex", model: "c", executable: "/nonexistent/codex" },
+      a: { harness: "codex", model: "a", executable: "/nonexistent/codex", fallback: "b" },
+      b: { harness: "codex", model: "b", executable: "/nonexistent/codex", fallback: "c" },
+      c: { harness: "codex", model: "c", executable: "/nonexistent/codex" },
     },
     nodes: [{ id: "build", type: "backend", runtime: "a", taskPacket: packet(), gate: false }],
   }));

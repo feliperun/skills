@@ -181,7 +181,7 @@ function buildStatusPayload(runDir, contract, nodes, identityWarnings, usage) {
       status: node.status,
       phase: contract.nodes.find((candidate) => candidate.id === node.id)?.phase ?? null,
       executionPhase: node.phase,
-      runtime: node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : null,
+      runtime: node.runtime ? `${node.runtime.harness}/${node.runtime.model}` : null,
       continuation: continuationMode(node),
       attempt: node.attempt,
       revisions: node.revisions,
@@ -247,7 +247,7 @@ function derivePointer(payload, nodes, generatedAt) {
     state,
     checkpoints: { done, total: nodes.length },
     activeNode: active ? truncateChars(active.id, POINTER_STRING_CHARS) : null,
-    runtime: active?.runtime ? truncateChars(`${active.runtime.driver}/${active.runtime.model}`, POINTER_STRING_CHARS) : null,
+    runtime: active?.runtime ? truncateChars(`${active.runtime.harness}/${active.runtime.model}`, POINTER_STRING_CHARS) : null,
     elapsedSec: activeStartedAt !== null && Number.isFinite(activeStartedAt) ? Math.max(0, generatedAt - activeStartedAt) : null,
     costUsd: typeof usage.costUsd === "number" ? Math.round(usage.costUsd * 100) / 100 : null,
     needsYou: attentionNodes.length,
@@ -350,7 +350,7 @@ export function renderReport(runDir) {
     const usage = node.usage ?? { inputTokens: null, outputTokens: null, cacheReadInputTokens: null };
     for (const key of /** @type {("inputTokens"|"outputTokens"|"cacheReadInputTokens")[]} */ (Object.keys(totals).filter((key) => key !== "costUsd"))) totals[key] = (totals[key] ?? 0) + (usage[key] ?? 0);
     const cost = costs[index];
-    const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
+    const runtime = node.runtime ? `${node.runtime.harness}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
     const note = scopeFindingsNote(node.scopeFindings)
       ? nodeNote(node)
@@ -384,7 +384,7 @@ export function renderReportJson(runDir) {
       status: node.status,
       phase: contract.nodes.find((candidate) => candidate.id === node.id)?.phase ?? null,
       executionPhase: node.phase,
-      runtime: node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : null,
+      runtime: node.runtime ? `${node.runtime.harness}/${node.runtime.model}` : null,
       attempt: node.attempt,
       revisions: node.revisions,
       usage,

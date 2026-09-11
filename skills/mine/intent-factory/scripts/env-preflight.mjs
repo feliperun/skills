@@ -17,14 +17,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statfsSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, getDriver, probeRuntime } from "./drivers/index.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, getHarness, probeRuntime } from "./harnesses/index.mjs";
 import { addRuntimeRequirement, failoverTargets, runtimeSnapshot } from "./failover.mjs";
 import { routeRuntime, validateContract } from "./contract.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, discoverRuntimes } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract.mjs").RuntimeSnapshot} RuntimeSnapshot */
-/** @typedef {import("./drivers/index.mjs").CapabilityRequirements} CapabilityRequirements */
+/** @typedef {import("./harnesses/index.mjs").CapabilityRequirements} CapabilityRequirements */
 /** @typedef {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: CapabilityRequirements[]}>} ReachableRuntimes */
 /** @typedef {{name: string, ok: boolean, advisory: boolean, detail: string}} EnvCheck */
 /** @typedef {{schemaVersion: number, ok: boolean, checks: EnvCheck[]}} EnvReport */
@@ -149,22 +149,22 @@ export function checkWorktree(cwd, requireClean) {
  * up front because a resume refuses a runtime whose probe came back null.
  *
  * @param {ReachableRuntimes} runtimes
- * @param {Record<string, string|null>} driverVersions
+ * @param {Record<string, string|null>} harnessVersions
  * @param {string} [cwd] the run cwd a relative executable is resolved against
  * @returns {EnvCheck}
  */
-export function checkRuntimeBinaries(runtimes, driverVersions, cwd = ".") {
+export function checkRuntimeBinaries(runtimes, harnessVersions, cwd = ".") {
   /** @type {string[]} */
   const problems = [];
   /** @type {string[]} */
   const resolved = [];
   for (const [id, { runtime }] of runtimes) {
-    // The driver owns the resolution: a per-runtime executable, an
-    // INTENT_FACTORY_*_BIN override, and each driver's default binary all
+    // The harness owns the resolution: a per-runtime executable, an
+    // INTENT_FACTORY_*_BIN override, and each harness's default binary all
     // land here, and a relative path belongs to the run cwd, not to ours.
-    const executable = getDriver(runtime.driver).executable(runtime);
+    const executable = getHarness(runtime.harness).executable(runtime);
     const found = findExecutable(executable.includes("/") || executable.includes("\\") ? resolve(cwd, executable) : executable);
-    const version = driverVersions[id] ?? null;
+    const version = harnessVersions[id] ?? null;
     if (found === null) problems.push(`${id}: ${executable} not found on PATH`);
     else if (version === null) problems.push(`${id}: ${executable} reported no version`);
     else resolved.push(`${id} ${version}`);
@@ -174,7 +174,7 @@ export function checkRuntimeBinaries(runtimes, driverVersions, cwd = ".") {
 }
 
 /**
- * @param {{cwd: string, runtimes: ReachableRuntimes, driverVersions?: Record<string, string|null>, env?: NodeJS.ProcessEnv}} options
+ * @param {{cwd: string, runtimes: ReachableRuntimes, harnessVersions?: Record<string, string|null>, env?: NodeJS.ProcessEnv}} options
  * @returns {EnvReport}
  */
 export function environmentPreflight(options) {
@@ -184,7 +184,7 @@ export function environmentPreflight(options) {
     checkDisk(cwd, minFreeDiskBytes(env)),
     checkGit(cwd),
     checkWorktree(cwd, env.INTENT_FACTORY_REQUIRE_CLEAN_WORKTREE === "1"),
-    checkRuntimeBinaries(options.runtimes, options.driverVersions ?? {}, cwd),
+    checkRuntimeBinaries(options.runtimes, options.harnessVersions ?? {}, cwd),
   ];
   return { schemaVersion: ENV_PREFLIGHT_SCHEMA_VERSION, ok: checks.every((check) => check.ok || check.advisory), checks };
 }
@@ -294,10 +294,10 @@ export function timeVerificationCommands(contract, probes = {}) {
  * can take only one hop, and its reachable set stops at B.
  *
  * @param {ValidatedContract} contract
- * @returns {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./drivers/index.mjs").CapabilityRequirements[]}>}
+ * @returns {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./harnesses/index.mjs").CapabilityRequirements[]}>}
  */
 export function reachableRuntimes(contract) {
-  /** @type {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./drivers/index.mjs").CapabilityRequirements[]}>} */
+  /** @type {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./harnesses/index.mjs").CapabilityRequirements[]}>} */
   const runtimes = new Map();
   for (const node of contract.nodes) {
     for (const role of /** @type {("worker"|"judge")[]} */ (["worker", ...(node.gate.enabled ? ["judge"] : [])])) {
@@ -313,7 +313,7 @@ export function reachableRuntimes(contract) {
       // The judge role carries no extra capability set: the verdict contract
       // is enforced at the review boundary (judgePrompt embeds the schema in
       // the prompt text, parseJudge validates, the bounded re-ask arbiters),
-      // so a driver without a schema channel — zcode — can still judge.
+      // so a harness without a schema channel — zcode — can still judge.
       const required = role === "judge"
         ? [runtime.requiredCapabilities, node.gate.requiredCapabilities]
         : [runtime.requiredCapabilities, node.requiredCapabilities];
@@ -333,7 +333,7 @@ export function reachableRuntimes(contract) {
   return runtimes;
 }
 
-const DRIVER_BIN_OVERRIDES = Object.freeze({
+const HARNESS_BIN_OVERRIDES = Object.freeze({
   codex: "INTENT_FACTORY_CODEX_BIN",
   claude: "INTENT_FACTORY_CLAUDE_BIN",
   agy: "INTENT_FACTORY_AGY_BIN",
@@ -344,7 +344,7 @@ const DRIVER_BIN_OVERRIDES = Object.freeze({
 /**
  * Mutation-free environment doctor: repository prerequisites, ignored .runs,
  * required binaries, the dispatch environment gate, and (when a contract is
- * given) schema and driver versions.
+ * given) schema and harness versions.
  *
  * @param {string|undefined} contractPath
  * @param {{cwd?: string, json?: boolean, discover?: boolean}} values
@@ -368,13 +368,13 @@ export async function doctorCommand(contractPath, values) {
   }
   checks.push({ name: "runner schema", ok: true, detail: `protocol ${PROTOCOL_SCHEMA_VERSION} · runner ${INTENT_FACTORY_VERSION}` });
   /** @type {Set<string>} */
-  let usedDrivers = new Set();
+  let usedHarnesses = new Set();
   /** @type {Set<string>} */
-  const overriddenDrivers = new Set();
+  const overriddenHarnesses = new Set();
   /** @type {ReachableRuntimes} */
   let routedRuntimes = new Map();
   /** @type {Record<string, string|null>} */
-  const driverVersions = {};
+  const harnessVersions = {};
   /** @type {Record<string, import("./runtime-discovery.mjs").RuntimeAvailability>} */
   let discovered = {};
   let dispatchCwd = repoDir;
@@ -386,14 +386,14 @@ export async function doctorCommand(contractPath, values) {
       const runtimes = reachableRuntimes(contract);
       routedRuntimes = runtimes;
       dispatchCwd = contract.cwd;
-      usedDrivers = new Set([...runtimes.values()].map(({ runtime }) => runtime.driver));
+      usedHarnesses = new Set([...runtimes.values()].map(({ runtime }) => runtime.harness));
       for (const runtime of Object.values(contract.runtimes)) {
-        if (typeof runtime.executable === "string") overriddenDrivers.add(runtime.driver);
+        if (typeof runtime.executable === "string") overriddenHarnesses.add(runtime.harness);
       }
       for (const [id, { runtime, requiredCapabilitySets }] of runtimes) {
         const probe = await probeRuntime(runtime, { cwd: contract.cwd, requiredCapabilitySets });
-        driverVersions[id] = probe.version;
-        checks.push({ name: `driver ${probe.id ?? runtime.driver}`, ok: probe.ok, detail: probe.detail ?? (probe.ok ? "ok" : "probe failed") });
+        harnessVersions[id] = probe.version;
+        checks.push({ name: `harness ${probe.id ?? runtime.harness}`, ok: probe.ok, detail: probe.detail ?? (probe.ok ? "ok" : "probe failed") });
       }
     } catch (error) {
       checks.push({ name: "contract", ok: false, detail: errorMessage(error) });
@@ -416,23 +416,23 @@ export async function doctorCommand(contractPath, values) {
     });
   }
   // A PATH-only check must not fail a runtime whose binary is supplied through
-  // an explicit executable or a INTENT_FACTORY_*_BIN override; the driver probe above
+  // an explicit executable or a INTENT_FACTORY_*_BIN override; the harness probe above
   // already validated whatever the runtime actually resolves to. `zcode` is
-  // absent on purpose — its binary is a shim the driver writes on first use, so
+  // absent on purpose — its binary is a shim the harness writes on first use, so
   // a PATH miss here is the normal state of a fresh machine, not a missing
   // dependency; `dsh` runs through its own SDK client, not a PATH binary.
   for (const binary of ["codex", "claude", "agy", "exec-jsonl"]) {
-    const overrideName = /** @type {Record<string, string>} */ (DRIVER_BIN_OVERRIDES)[binary];
-    const overridden = overriddenDrivers.has(binary) || Boolean(process.env[overrideName]);
+    const overrideName = /** @type {Record<string, string>} */ (HARNESS_BIN_OVERRIDES)[binary];
+    const overridden = overriddenHarnesses.has(binary) || Boolean(process.env[overrideName]);
     const found = findExecutable(binary);
-    const required = usedDrivers.has(binary) && !overridden;
+    const required = usedHarnesses.has(binary) && !overridden;
     checks.push({
       name: `binary ${binary}`,
       ok: !required || found !== null,
       detail: overridden && !found ? "resolved via executable or env override" : required ? (found ?? "required by contract but not found on PATH") : (found ? "present" : "not on PATH (not required by this contract)"),
     });
   }
-  for (const check of environmentPreflight({ cwd: dispatchCwd, runtimes: routedRuntimes, driverVersions }).checks) {
+  for (const check of environmentPreflight({ cwd: dispatchCwd, runtimes: routedRuntimes, harnessVersions }).checks) {
     checks.push({ name: check.name, ok: check.ok || check.advisory, detail: check.ok ? check.detail : `${check.detail} (advisory)` });
   }
   const ok = checks.every((check) => check.ok);

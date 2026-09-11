@@ -24,7 +24,7 @@ test("fixtures stub every runtime", () => {
   assert.deepEqual(
     findings,
     [],
-    `runtime fixtures missing executable:\n${findings.map((f) => `${f.fileName}: ${f.runtimeId} (${f.driver})`).join("\n")}`,
+    `runtime fixtures missing executable:\n${findings.map((f) => `${f.fileName}: ${f.runtimeId} (${f.harness})`).join("\n")}`,
   );
 });
 
@@ -32,20 +32,20 @@ test("fixture runtime guard catches a runtime without executable", () => {
   const source = `
     const contract = {
       runtimes: {
-        stubbed: { driver: "codex", model: "test", executable: "/nonexistent/codex" },
-        bare: { driver: "codex", model: "test" },
+        stubbed: { harness: "codex", model: "test", executable: "/nonexistent/codex" },
+        bare: { harness: "codex", model: "test" },
       },
     };
   `;
   assert.deepEqual(runtimesMissingExecutable(source, "synthetic.mjs"), [
-    { fileName: "synthetic.mjs", runtimeId: "bare", driver: "codex" },
+    { fileName: "synthetic.mjs", runtimeId: "bare", harness: "codex" },
   ]);
 
   const exempted = `
     const contract = {
       runtimes: {
         // guard-exempt: schema-only
-        bare: { driver: "codex", model: "test" },
+        bare: { harness: "codex", model: "test" },
       },
     };
   `;

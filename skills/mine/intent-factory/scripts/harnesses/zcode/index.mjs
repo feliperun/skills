@@ -1,7 +1,7 @@
 import { accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { normalizeZcodeResult, parseVersion } from "./protocol.mjs";
+import { normalizeZcodeResult, parseVersion } from "../protocol.mjs";
 
 /** Default Z.ai Anthropic-compatible endpoint serving GLM models. */
 const ZCODE_DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic";
@@ -27,7 +27,7 @@ const ZCODE_DEFAULT_PROVIDER = "glm";
 const ZCODE_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
 
 /**
- * ZCode driver: drives Z.ai's own harness CLI headlessly (`--prompt --json`),
+ * ZCode harness: drives Z.ai's own harness CLI headlessly (`--prompt --json`),
  * so a contract can route GLM 5.x nodes through the native ZCode protocol
  * instead of a Claude-Code-compatible shim. The CLI 0.16.5 headless surface is
  * `--prompt`, `--json`, `--mode`, `--resume`, and `--no-color`; model and
@@ -37,7 +37,7 @@ const ZCODE_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
  * `ANTHROPIC_AUTH_TOKEN`) into the provider-derived `${PROVIDER}_API_KEY`
  * variable the CLI resolves. Values never travel in the contract.
  *
- * The harness has no schema flag, and this driver sends no tool policy, so
+ * The harness has no schema flag, and this harness sends no tool policy, so
  * `structuredOutput` and `toolPolicy` stay `false`: a judge's schema travels
  * inside the prompt text (enforcement remains parseJudge at the review
  * boundary), and the CLI's `--settings`/hooks surface stays unwired.
@@ -49,9 +49,9 @@ const ZCODE_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
  * describes as the install story: the CLI lives inside the app bundle and has
  * to be reached through a shim on PATH.
  *
- * @type {import("./index.mjs").DriverAdapter}
+ * @type {import("../index.mjs").HarnessAdapter}
  */
-export const zcodeDriver = {
+export const zcodeHarness = {
   capabilities: {
     structuredOutput: false,
     promptTransport: "argv",
@@ -68,14 +68,14 @@ export const zcodeDriver = {
     // once at exit: a live worker node was killed at 420s stall_timeout with
     // its stdout/stderr at zero bytes, while a completed 1m26s invocation's
     // log held its full 26 lines only once the process exited. Stall
-    // detection must not watch this driver's stdout/stderr mtime.
+    // detection must not watch this harness's stdout/stderr mtime.
     streamsOutput: false,
   },
 
   // build/edit/plan do not execute commands; command() defaults to yolo.
   permissionExecution: { field: "permissionMode", executingModes: ["yolo"], defaultMode: "yolo" },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string} */
   executable(runtime) {
     const declared = process.env.INTENT_FACTORY_ZCODE_BIN ?? runtime.executable;
     if (declared) return declared;
@@ -89,14 +89,14 @@ export const zcodeDriver = {
     return ZCODE_BIN_NAME;
   },
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string[]} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @returns {string[]} */
   versionArgs(runtime) {
     return runtime.versionArgs ?? ["--version"];
   },
 
   parseVersion,
 
-  /** @param {import("./index.mjs").DriverRuntime} runtime @param {string} prompt @param {import("./index.mjs").CommandOptions} options @returns {import("./index.mjs").DriverCommand} */
+  /** @param {import("../index.mjs").HarnessRuntime} runtime @param {string} prompt @param {import("../index.mjs").CommandOptions} options @returns {import("../index.mjs").HarnessCommand} */
   command(runtime, prompt, options) {
     const continuationId = options.continuationId ?? null;
     const provider = typeof runtime.config?.provider === "string" && runtime.config.provider
@@ -104,7 +104,7 @@ export const zcodeDriver = {
       : ZCODE_DEFAULT_PROVIDER;
     // No schema flag exists, so the schema travels inside the prompt: the
     // judge prompt names "the output schema" but only carries its text when
-    // the driver puts it there.
+    // the harness puts it there.
     const fullPrompt = options.schema
       ? `${prompt}\n\nThe output schema (return exactly one JSON object matching it, as the only content of your final message):\n${JSON.stringify(options.schema)}`
       : prompt;
@@ -153,7 +153,7 @@ function providerApiKeyVar(provider) {
 }
 
 /**
- * @param {import("./index.mjs").DriverRuntime} runtime
+ * @param {import("../index.mjs").HarnessRuntime} runtime
  * @returns {string|null}
  */
 function authToken(runtime) {
@@ -168,11 +168,11 @@ function authToken(runtime) {
  * shell: when the name resolves to nothing on PATH and the app bundle is
  * installed, write the shim that reaches the bundled CLI through Electron's own
  * node. The install dir has to be on PATH already — a shim somewhere the shell
- * does not look would fix the driver and not the user, which is the half of the
+ * does not look would fix the harness and not the user, which is the half of the
  * request that matters here.
  *
  * Total by design: `executable()` is called by surfaces that have no error path
- * around it (`models` reports every registered driver, runtime discovery probes
+ * around it (`models` reports every registered harness, runtime discovery probes
  * each one, `doctor` checks binaries), so a permissions or disk failure has to
  * degrade into "not found" — never into an aborted run or a crashed report.
  *
@@ -209,7 +209,7 @@ export function ensureZcodeAvailable(options = {}) {
 function zcodeShim(bundle) {
   return `#!/usr/bin/env bash
 set -euo pipefail
-# Written by the intent-factory zcode driver; the ZCode app owns both paths.
+# Written by the intent-factory zcode harness; the ZCode app owns both paths.
 ELECTRON_RUN_AS_NODE=1 exec ${bundle.electron} \\
   ${bundle.cli} "$@"
 `;
@@ -272,5 +272,5 @@ function settleShim(target, body) {
   return true;
 }
 
-export const driver = zcodeDriver;
-export default zcodeDriver;
+export const harness = zcodeHarness;
+export default zcodeHarness;

@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acknowledgeJournalEvent, campaignDir, readJournal } from "../scripts/campaign.mjs";
-import { driverCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/drivers/index.mjs";
-import { liveInputTokens, liveSessionMetrics, liveUsage } from "../scripts/drivers/exec-jsonl.mjs";
-import { replayDriver } from "../scripts/drivers/replay.mjs";
+import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/harnesses/index.mjs";
+import { liveInputTokens, liveSessionMetrics, liveUsage } from "../scripts/harnesses/exec-jsonl/index.mjs";
+import { replayHarness } from "../scripts/harnesses/replay/index.mjs";
 import { JUDGE_SCHEMA } from "../scripts/lib.mjs";
 import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
 import { runContract, resumeRun } from "../scripts/runner.mjs";
@@ -17,18 +17,18 @@ import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt }
 import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
 import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
-const bin = fileURLToPath(new URL("../scripts/drivers/replay-bin.mjs", import.meta.url));
+const bin = fileURLToPath(new URL("../scripts/harnesses/replay/bin.mjs", import.meta.url));
 const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
 const zeroUsage = Object.freeze({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 });
 
 /**
  * The runner spawns the replay executable directly (never through
- * process.execPath), so replay-bin.mjs must stay executable in git
+ * process.execPath), so replay/bin.mjs must stay executable in git
  * (mode 0o755) for every replay test below to run.
  */
 function assertExecutable() {
-  assert.ok(existsSync(bin), "replay-bin.mjs must exist");
-  assert.notEqual(statSync(bin).mode & 0o111, 0, "replay-bin.mjs must be executable (mode 0o755)");
+  assert.ok(existsSync(bin), "replay/bin.mjs must exist");
+  assert.notEqual(statSync(bin).mode & 0o111, 0, "replay/bin.mjs must be executable (mode 0o755)");
 }
 
 /** @param {string} summary @returns {Record<string, unknown>} */
@@ -108,20 +108,20 @@ test("replay adapter declares explicit capabilities and builds stdin commands", 
     toolPolicy: false,
     streamsOutput: false,
   };
-  assert.deepEqual(replayDriver.capabilities, expectedCapabilities);
-  assert.deepEqual(driverCapabilities({ driver: "replay" }), expectedCapabilities);
-  assert.equal(replayDriver.executable({ driver: "replay", model: "m" }), bin, "the sibling replay-bin.mjs is the default executable");
-  assert.equal(replayDriver.executable({ driver: "replay", model: "m", executable: "/tmp/custom-replay" }), "/tmp/custom-replay");
-  assert.deepEqual(replayDriver.versionArgs({ driver: "replay", model: "m" }), ["--version"]);
-  assert.equal(replayDriver.parseVersion("replay 1.0.0"), "replay 1.0.0");
+  assert.deepEqual(replayHarness.capabilities, expectedCapabilities);
+  assert.deepEqual(harnessCapabilities({ harness: "replay" }), expectedCapabilities);
+  assert.equal(replayHarness.executable({ harness: "replay", model: "m" }), bin, "the sibling replay/bin.mjs is the default executable");
+  assert.equal(replayHarness.executable({ harness: "replay", model: "m", executable: "/tmp/custom-replay" }), "/tmp/custom-replay");
+  assert.deepEqual(replayHarness.versionArgs({ harness: "replay", model: "m" }), ["--version"]);
+  assert.equal(replayHarness.parseVersion("replay 1.0.0"), "replay 1.0.0");
 
   const recording = join(mkdtempSync(join(tmpdir(), "replay-command-")), "recording.jsonl");
-  const runtime = { driver: "replay", model: "replay-model", executable: bin, config: { "replay.recording": recording } };
+  const runtime = { harness: "replay", model: "replay-model", executable: bin, config: { "replay.recording": recording } };
   const command = providerCommand(runtime, "prompt with spaces", {
     continuationId: "thread-1",
     schema: JUDGE_SCHEMA,
   });
-  assert.equal(command.driver, "replay");
+  assert.equal(command.harness, "replay");
   assert.equal(command.model, "replay-model");
   assert.equal(command.executable, bin);
   assert.equal(command.promptTransport, "stdin");
@@ -137,7 +137,7 @@ test("replay adapter declares explicit capabilities and builds stdin commands", 
   ]);
   assert.deepEqual(providerCommand(runtime, "p", { schemaPath: "/tmp/judge.schema.json" }).args, ["--recording", recording, "--schema"]);
   assert.deepEqual(providerCommand(runtime, "p").args, ["--recording", recording]);
-  assert.throws(() => providerCommand({ driver: "replay", model: "m", executable: bin }, "p"), /replay\.recording/u);
+  assert.throws(() => providerCommand({ harness: "replay", model: "m", executable: bin }, "p"), /replay\.recording/u);
 });
 
 test("version probe and live preflight bypass never consume the recording", async () => {
@@ -167,15 +167,15 @@ test("version probe and live preflight bypass never consume the recording", asyn
 test("replay.probe config carries a simulated version-probe outcome to --replay-probe, distinct reasons for balance and quota", async () => {
   const directory = mkdtempSync(join(tmpdir(), "replay-probe-"));
 
-  assert.deepEqual(replayDriver.versionArgs({ driver: "replay", model: "m" }), ["--version"]);
-  const balanceArgs = replayDriver.versionArgs({
-    driver: "replay",
+  assert.deepEqual(replayHarness.versionArgs({ harness: "replay", model: "m" }), ["--version"]);
+  const balanceArgs = replayHarness.versionArgs({
+    harness: "replay",
     model: "m",
     config: { "replay.probe": { exitCode: 1, stderr: "Error: Insufficient Balance" } },
   });
   assert.deepEqual(balanceArgs, ["--version", "--replay-probe", JSON.stringify({ exitCode: 1, stderr: "Error: Insufficient Balance" })]);
   assert.throws(
-    () => replayDriver.versionArgs({ driver: "replay", model: "m", config: { "replay.probe": "not-an-object" } }),
+    () => replayHarness.versionArgs({ harness: "replay", model: "m", config: { "replay.probe": "not-an-object" } }),
     /replay\.probe.*must be an object/u,
   );
 
@@ -183,8 +183,8 @@ test("replay.probe config carries a simulated version-probe outcome to --replay-
   assert.equal(balance.code, 1);
   assert.match(balance.stderr, /Insufficient Balance/u);
 
-  const quotaArgs = replayDriver.versionArgs({
-    driver: "replay",
+  const quotaArgs = replayHarness.versionArgs({
+    harness: "replay",
     model: "m",
     config: { "replay.probe": { exitCode: 1, stderr: "Rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00" } },
   });
@@ -193,7 +193,7 @@ test("replay.probe config carries a simulated version-probe outcome to --replay-
   assert.match(quota.stderr, /reset at 2026-01-01/u);
 
   const balanceProbe = await probeRuntime({
-    driver: "replay",
+    harness: "replay",
     model: "m",
     executable: bin,
     config: { "replay.probe": { exitCode: 1, stderr: "Error: Insufficient Balance" } },
@@ -201,7 +201,7 @@ test("replay.probe config carries a simulated version-probe outcome to --replay-
   assert.deepEqual(balanceProbe.availability, { available: false, exhaustedUntil: null, reason: "insufficient_balance" });
 
   const quotaProbe = await probeRuntime({
-    driver: "replay",
+    harness: "replay",
     model: "m",
     executable: bin,
     config: { "replay.probe": { exitCode: 1, stderr: "Rate limit exceeded. Your limit will reset at 2026-01-01 00:00:00" } },
@@ -209,7 +209,7 @@ test("replay.probe config carries a simulated version-probe outcome to --replay-
   assert.deepEqual(quotaProbe.availability, { available: false, exhaustedUntil: "2026-01-01T00:00:00.000Z", reason: "quota_exhausted" });
 
   const missingProbe = await probeRuntime({
-    driver: "replay",
+    harness: "replay",
     model: "m",
     executable: join(directory, "does-not-exist-replay-bin"),
   });
@@ -369,7 +369,7 @@ test("normalize keeps error.resetAt and exhaustedUntil in exactly the ProviderEn
 
   // A recorded envelope that carries neither field must not grow them: the
   // canonical shape declares both optional, and normalize must not invent an
-  // `undefined`-valued key no real driver would ever emit.
+  // `undefined`-valued key no real harness would ever emit.
   const withoutReset = envelope({ status: "failed", result: null, error: { code: "provider_exhausted", message: "no reset announced" } });
   assert.deepEqual(normalizeProviderResult("replay", JSON.stringify(withoutReset), 0, null), withoutReset);
   assert.ok(!Object.hasOwn(normalizeProviderResult("replay", JSON.stringify(withoutReset), 0, null), "exhaustedUntil"));
@@ -484,8 +484,8 @@ test("runContract drives a two-node dependsOn chain through replay worker and ju
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "replay-worker", judge: "replay-judge" },
     runtimes: {
-      "replay-worker": { driver: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
-      "replay-judge": { driver: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
+      "replay-worker": { harness: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
+      "replay-judge": { harness: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
     },
     nodes: [
       { id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: { failOn: ["critical"] } },
@@ -526,7 +526,7 @@ test("three independent replay nodes run concurrently under maxParallel and each
       files: [{ path: `${id}.txt`, content: `${id}\n` }],
       delayMs,
     }], `${id}.jsonl`);
-    runtimes[id] = { driver: "replay", model: `${id}-model`, vendor: `${id}-vendor`, config: { "replay.recording": recording } };
+    runtimes[id] = { harness: "replay", model: `${id}-model`, vendor: `${id}-vendor`, config: { "replay.recording": recording } };
     nodes.push({ id, type: "backend", runtime: id, taskPacket: packet({ writeFiles: [`${id}.txt`] }), gate: false });
   }
   const path = writeContract(directory, fixture({
@@ -576,8 +576,8 @@ test("a worker exhaustion fails over its declared one-hop fallback, and the atte
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
-      backup: { driver: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
+      primary: { harness: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
+      backup: { harness: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -611,8 +611,8 @@ test("a quota exhaustion carrying a scheduled reset resumes the same runtime ins
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "primary", judge: "primary" },
     runtimes: {
-      primary: { driver: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
-      backup: { driver: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
+      primary: { harness: "replay", model: "primary-model", vendor: "vendor-primary", fallback: "backup", config: { "replay.recording": primaryRecording } },
+      backup: { harness: "replay", model: "backup-model", vendor: "vendor-backup", config: { "replay.recording": backupRecording } },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -648,9 +648,9 @@ test("a judge fallback to a runtime of a different vendor than the worker that r
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "worker", judge: "judge-primary" },
     runtimes: {
-      worker: { driver: "replay", model: "worker-model", vendor: "vendor-worker", config: { "replay.recording": workerRecording } },
-      "judge-primary": { driver: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
-      "judge-fallback": { driver: "replay", model: "judge-fallback-model", vendor: "vendor-judge-fallback", config: { "replay.recording": fallbackJudgeRecording } },
+      worker: { harness: "replay", model: "worker-model", vendor: "vendor-worker", config: { "replay.recording": workerRecording } },
+      "judge-primary": { harness: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
+      "judge-fallback": { harness: "replay", model: "judge-fallback-model", vendor: "vendor-judge-fallback", config: { "replay.recording": fallbackJudgeRecording } },
     },
     nodes: [{
       id: "build", type: "backend", taskPacket: packet(),
@@ -683,9 +683,9 @@ test("a judge fallback that would share the vendor of the worker that actually r
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "worker", judge: "judge-primary" },
     runtimes: {
-      worker: { driver: "replay", model: "worker-model", vendor: "shared-vendor", config: { "replay.recording": workerRecording } },
-      "judge-primary": { driver: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
-      "judge-fallback": { driver: "replay", model: "judge-fallback-model", vendor: "shared-vendor", config: { "replay.recording": fallbackJudgeRecording } },
+      worker: { harness: "replay", model: "worker-model", vendor: "shared-vendor", config: { "replay.recording": workerRecording } },
+      "judge-primary": { harness: "replay", model: "judge-primary-model", vendor: "vendor-judge-primary", fallback: "judge-fallback", config: { "replay.recording": primaryJudgeRecording } },
+      "judge-fallback": { harness: "replay", model: "judge-fallback-model", vendor: "shared-vendor", config: { "replay.recording": fallbackJudgeRecording } },
     },
     nodes: [{
       id: "build", type: "backend", taskPacket: packet(),
@@ -705,7 +705,7 @@ test("a judge fallback that would share the vendor of the worker that actually r
 
 /**
  * The deterministic cases of the release-1 eval set (TECH-SPEC section 8.3).
- * Every case below is a replay of recorded envelopes through the replay driver
+ * Every case below is a replay of recorded envelopes through the replay harness
  * — worker and judge alike — so a case can never reach a live provider and two
  * runs of the suite measure the same facts.
  */
@@ -716,7 +716,7 @@ const passVerdict = Object.freeze({ verdict: "pass", findings: [], maxSeverity: 
 const provenItem = (id, text) => ({ id, text, proof: { kind: "path", ref: "README.md" } });
 
 /**
- * Drive one contract end to end over the replay driver and return the run, the
+ * Drive one contract end to end over the replay harness and return the run, the
  * campaign it registered with, and the recordings both runtimes read from.
  *
  * @param {{id: string, nodes: Record<string, unknown>[], worker: unknown[], judge?: unknown[]}} options
@@ -731,8 +731,8 @@ async function driveReplayedContract({ id, nodes, worker, judge = [{ envelope: e
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "replay-worker", judge: "replay-judge" },
     runtimes: {
-      "replay-worker": { driver: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
-      "replay-judge": { driver: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
+      "replay-worker": { harness: "replay", model: "replay-worker-model", vendor: "replay-worker-vendor", config: { "replay.recording": workerRecording } },
+      "replay-judge": { harness: "replay", model: "replay-judge-model", vendor: "replay-judge-vendor", config: { "replay.recording": judgeRecording } },
     },
     nodes,
   }));

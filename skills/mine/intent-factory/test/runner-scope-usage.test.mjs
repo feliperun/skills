@@ -370,8 +370,8 @@ test("provider exhaustion follows the declared one-hop fallback without consumin
     id: "failover-one-hop-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
-      second: { driver: "codex", model: "second", executable: second },
+      first: { harness: "codex", model: "first", executable: first, fallback: "second" },
+      second: { harness: "codex", model: "second", executable: second },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -394,9 +394,9 @@ test("a second exhaustion after the one declared hop blocks at the hop cap", asy
     id: "failover-hop-cap-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
-      second: { driver: "codex", model: "second", executable: second, fallback: "third" },
-      third: { driver: "codex", model: "third", executable: third },
+      first: { harness: "codex", model: "first", executable: first, fallback: "second" },
+      second: { harness: "codex", model: "second", executable: second, fallback: "third" },
+      third: { harness: "codex", model: "third", executable: third },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -413,7 +413,7 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
   const terminalPath = writeContract(terminalDirectory, fixture({
     id: "failover-no-rule-run",
     runtimeDefaults: { worker: "first", judge: "first" },
-    runtimes: { first: { driver: "codex", model: "first", executable: exhausted } },
+    runtimes: { first: { harness: "codex", model: "first", executable: exhausted } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const terminal = nodeState(await runContract(terminalPath));
@@ -427,8 +427,8 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
     id: "failover-cycle-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: cycleFirst, fallback: "second" },
-      second: { driver: "codex", model: "second", executable: cycleSecond, fallback: "first" },
+      first: { harness: "codex", model: "first", executable: cycleFirst, fallback: "second" },
+      second: { harness: "codex", model: "second", executable: cycleSecond, fallback: "first" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -447,8 +447,8 @@ test("a declared fallback reschedules immediately with no backoff", async () => 
     id: "failover-backoff-run",
     runtimeDefaults: { worker: "first", judge: "first" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
-      second: { driver: "codex", model: "second", executable: second },
+      first: { harness: "codex", model: "first", executable: first, fallback: "second" },
+      second: { harness: "codex", model: "second", executable: second },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
@@ -465,7 +465,7 @@ test("recovered provider exhaustion does not charge persisted usage or cost twic
   const path = writeContract(directory, fixture({
     id: "failover-no-double-charge-run",
     runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimes: { worker: { driver: "codex", model: "worker", executable } },
+    runtimes: { worker: { harness: "codex", model: "worker", executable } },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const runDir = (await runContract(path)).runDir;
@@ -518,9 +518,9 @@ test("judge provider failover preserves the completed worker result", async () =
     id: "failover-judge-run",
     runtimeDefaults: { worker: "worker", judge: "judge-first" },
     runtimes: {
-      worker: { driver: "codex", model: "worker", executable: worker },
-      "judge-first": { driver: "codex", model: "judge-first", executable: judgeFirst, vendor: "openai-judge", fallback: "judge-second" },
-      "judge-second": { driver: "codex", model: "judge-second", executable: judgeSecond, vendor: "openai-judge" },
+      worker: { harness: "codex", model: "worker", executable: worker },
+      "judge-first": { harness: "codex", model: "judge-first", executable: judgeFirst, vendor: "openai-judge", fallback: "judge-second" },
+      "judge-second": { harness: "codex", model: "judge-second", executable: judgeSecond, vendor: "openai-judge" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "It works", judgment: true }], gate: {} }],
   }));
@@ -543,8 +543,8 @@ test("persists and recovers cost exactly once and reports totals", async () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: {} }],
   }));

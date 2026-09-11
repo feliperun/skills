@@ -10,25 +10,25 @@
     "goal": "prove the live probe classifies insufficient balance, quota exhaustion, and a missing CLI as three distinct reasons",
     "runtimes": {
       "replay-worker-balance": {
-        "driver": "replay",
+        "harness": "replay",
         "model": "replay-worker-balance-model",
         "vendor": "replay-worker-balance-vendor",
         "config": { "replay.probe": { "exitCode": 1, "stderr": "Error: Insufficient Balance" } }
       },
       "replay-worker-quota": {
-        "driver": "replay",
+        "harness": "replay",
         "model": "replay-worker-quota-model",
         "vendor": "replay-worker-quota-vendor",
         "config": { "replay.probe": { "exitCode": 1, "stderr": "Rate limit exceeded. Your limit will reset at 2099-01-01 00:00:00" } }
       },
       "replay-worker-missing": {
-        "driver": "replay",
+        "harness": "replay",
         "model": "replay-worker-missing-model",
         "vendor": "replay-worker-missing-vendor",
         "executable": "/nonexistent/replay-missing-binary"
       },
       "replay-worker-ready": {
-        "driver": "replay",
+        "harness": "replay",
         "model": "replay-worker-ready-model",
         "vendor": "replay-worker-ready-vendor",
         "config": {}

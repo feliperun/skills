@@ -6,18 +6,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { validateContract } from "../scripts/contract.mjs";
-import { dshDriver } from "../scripts/drivers/dsh.mjs";
-import { normalizeProviderAvailability, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/drivers/index.mjs";
+import { dshHarness } from "../scripts/harnesses/dsh/index.mjs";
+import { normalizeProviderAvailability, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/harnesses/index.mjs";
 import { closeResult, fixture, withFakeDsh, writeContract } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PATCH = join(HERE, "..", "scripts", "drivers", "dsh-closed-packet.patch.yml");
+const PATCH = join(HERE, "..", "scripts", "harnesses", "dsh", "closed-packet.patch.yml");
 
 /** @param {Record<string, unknown>} [patch] */
 function runtime(patch = {}) {
   return {
     id: "dsh",
-    driver: "dsh",
+    harness: "dsh",
     model: "deepseek-flash",
     executable: "dsh",
     vendor: "deepseek",
@@ -32,19 +32,19 @@ function scratch(prefix) {
 }
 
 test("the dsh adapter probes the harness binary the contract names", () => {
-  assert.equal(dshDriver.executable(runtime()), "dsh");
-  assert.equal(dshDriver.executable(runtime({ executable: "/opt/dsh" })), "/opt/dsh");
+  assert.equal(dshHarness.executable(runtime()), "dsh");
+  assert.equal(dshHarness.executable(runtime({ executable: "/opt/dsh" })), "/opt/dsh");
   const previous = process.env.INTENT_FACTORY_DSH_BIN;
   process.env.INTENT_FACTORY_DSH_BIN = "/env/dsh";
   try {
-    assert.equal(dshDriver.executable(runtime()), "/env/dsh");
+    assert.equal(dshHarness.executable(runtime()), "/env/dsh");
   } finally {
     if (previous === undefined) delete process.env.INTENT_FACTORY_DSH_BIN;
     else process.env.INTENT_FACTORY_DSH_BIN = previous;
   }
-  assert.deepEqual(dshDriver.versionArgs(runtime()), ["--version"]);
-  assert.equal(dshDriver.parseVersion("dsh 0.1.5-rc.1\n"), "dsh 0.1.5-rc.1");
-  assert.equal(dshDriver.parseVersion('{"version":"0.1.5"}'), null);
+  assert.deepEqual(dshHarness.versionArgs(runtime()), ["--version"]);
+  assert.equal(dshHarness.parseVersion("dsh 0.1.5-rc.1\n"), "dsh 0.1.5-rc.1");
+  assert.equal(dshHarness.parseVersion('{"version":"0.1.5"}'), null);
 });
 
 test("the dsh command runs the JSON-RPC client under this node, never the harness directly", () => {
@@ -53,7 +53,7 @@ test("the dsh command runs the JSON-RPC client under this node, never the harnes
   assert.equal(command.promptTransport, "stdin");
   assert.equal(command.input, "hello");
   assert.deepEqual(command.args.slice(0, 7), [
-    join(HERE, "..", "scripts", "drivers", "dsh-runner.mjs"),
+    join(HERE, "..", "scripts", "harnesses", "dsh", "runner.mjs"),
     "--dsh", "dsh",
     "--provider", "deepseek-official",
     "--model", "deepseek-flash",
@@ -183,7 +183,7 @@ test("a dsh runtime without a provider route is rejected before anything runs", 
   const value = fixture();
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
-  runtimes.solo = { driver: "dsh", model: "deepseek-flash", executable: "dsh", vendor: "deepseek", config: {} };
+  runtimes.solo = { harness: "dsh", model: "deepseek-flash", executable: "dsh", vendor: "deepseek", config: {} };
   value.runtimeDefaults = { worker: "solo" };
   const path = writeContract(directory, value);
   assert.throws(() => validateContract(JSON.parse(readFileSync(path, "utf8")), path), /config\.provider must be a non-empty string/u);
@@ -195,7 +195,7 @@ test("a dsh runtime with a provider route and an explicit vendor validates and r
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
   runtimes.flash = {
-    driver: "dsh",
+    harness: "dsh",
     model: "deepseek-flash",
     reasoning: "high",
     sandbox: "workspace-write",
@@ -205,7 +205,7 @@ test("a dsh runtime with a provider route and an explicit vendor validates and r
   };
   const path = writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(contract.runtimes.flash.driver, "dsh");
+  assert.equal(contract.runtimes.flash.harness, "dsh");
   assert.equal(contract.runtimes.flash.vendor, "deepseek");
 });
 
@@ -224,7 +224,7 @@ test("the closed-packet profile disables the rows a closed packet cannot use", (
  *
  * @param {string} directory
  * @param {"pass"|"no-usage"|"quota"|"two-verdicts"|"silent"|"blocked"} mode
- * @param {import("../scripts/drivers/index.mjs").CommandOptions & {preferStructured?: boolean}} [options]
+ * @param {import("../scripts/harnesses/index.mjs").CommandOptions & {preferStructured?: boolean}} [options]
  */
 async function runClient(directory, mode, options = {}) {
   return withFakeDsh(directory, mode, async () => {

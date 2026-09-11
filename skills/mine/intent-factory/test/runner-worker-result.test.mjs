@@ -30,7 +30,7 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
 });
 
 
-test("runs a full contract through the generic exec-jsonl driver end to end", async () => {
+test("runs a full contract through the generic exec-jsonl harness end to end", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-jsonl-run-"));
   const fake = join(directory, "fake-jsonl.mjs");
   writeFileSync(fake, `#!/usr/bin/env node
@@ -59,8 +59,8 @@ process.stdin.on("end", () => {
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "jsonl", judge: "jsonl-judge" },
     runtimes: {
-      jsonl: { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
-      "jsonl-judge": { driver: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
+      jsonl: { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-worker", executable: fake },
+      "jsonl-judge": { harness: "exec-jsonl", model: "fake", vendor: "exec-jsonl-judge", executable: fake },
     },
     nodes: [{
       id: "build",
@@ -406,9 +406,9 @@ test("a second unparseable worker result takes the failover edge before it block
     pollIntervalMs: 10,
     runtimeDefaults: { worker: "first", judge: "judge" },
     runtimes: {
-      first: { driver: "codex", model: "first", executable: first, fallback: "second" },
-      second: { driver: "codex", model: "second", executable: second },
-      judge: { driver: "codex", model: "judge", executable: judge, vendor: "openai-judge" },
+      first: { harness: "codex", model: "first", executable: first, fallback: "second" },
+      second: { harness: "codex", model: "second", executable: second },
+      judge: { harness: "codex", model: "judge", executable: judge, vendor: "openai-judge" },
     },
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { maxRevisions: 0 } }],
   }));
@@ -440,7 +440,7 @@ test("provider diagnostics stay bounded and recovery consumes only a bounded tai
   const boundedInput = `${"x".repeat(700000)}\n${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "done", summary: "tail", changedFiles: [], verification: [], artifacts: [], missingContext: [] }) } })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })}\n`;
   const recoveryPath = join(directory, "recovery.jsonl");
   writeFileSync(recoveryPath, boundedInput);
-  const recovered = invocationResult({ stdoutPath: recoveryPath }, { driver: "codex", model: "test" }, { preferStructured: false });
+  const recovered = invocationResult({ stdoutPath: recoveryPath }, { harness: "codex", model: "test" }, { preferStructured: false });
   assert.ok(recovered, "recovery returns an envelope");
   assert.equal(recovered.status, "done");
 });

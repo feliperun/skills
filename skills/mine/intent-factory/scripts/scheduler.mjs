@@ -10,8 +10,8 @@ import {
   applyRejection,
   applyVerificationFailure,
 } from "./review.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, probeRuntime } from "./drivers/index.mjs";
-import { extractJson } from "./drivers/protocol.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, probeRuntime } from "./harnesses/index.mjs";
+import { extractJson } from "./harnesses/protocol.mjs";
 import { routingBackoffActive } from "./failover.mjs";
 import { blockingChecks, environmentPreflight, reachableRuntimes } from "./env-preflight.mjs";
 import { composeAssignments, discoverRuntimes } from "./runtime-discovery.mjs";
@@ -134,8 +134,8 @@ import {
 /** @typedef {import("./contract.mjs").BoundedScope} BoundedScope */
 /** @typedef {import("./lock.mjs").LockRecord} LockRecord */
 /** @typedef {ReturnType<typeof acquireLock>} LockHandle */
-/** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
-/** @typedef {import("./drivers/index.mjs").ProviderEnvelope} ProviderEnvelope */
+/** @typedef {import("./harnesses/index.mjs").HarnessRuntime} HarnessRuntime */
+/** @typedef {import("./harnesses/index.mjs").ProviderEnvelope} ProviderEnvelope */
 /** @typedef {import("./campaign.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
 /** @typedef {import("./lib.mjs").JudgeVerdict} JudgeVerdict */
@@ -1009,31 +1009,31 @@ export function readRunNodes(runDir, contract) {
   });
 }
 
-const DRIVER_PROBE_RETRIES = 2;
+const HARNESS_PROBE_RETRIES = 2;
 
-const DRIVER_PROBE_RETRY_BACKOFF_MS = 250;
+const HARNESS_PROBE_RETRY_BACKOFF_MS = 250;
 
 /**
  * Probe a runtime version, retrying transient unavailability so a loaded host
- * is never misread as a changed driver. Only a concrete version or final
+ * is never misread as a changed harness. Only a concrete version or final
  * unavailability leaves this function.
  *
- * @param {import("./drivers/index.mjs").DriverRuntime & {capabilities?: unknown}} runtime
+ * @param {import("./harnesses/index.mjs").HarnessRuntime & {capabilities?: unknown}} runtime
  * @param {string} cwd
  * @returns {Promise<string|null>}
  */
 async function probeRuntimeVersionStable(runtime, cwd) {
   for (let attempt = 0; ; attempt += 1) {
     const result = await probeRuntime(runtime, { cwd, timeoutSec: 5 });
-    if (result.version !== null || attempt >= DRIVER_PROBE_RETRIES) return result.version ?? null;
-    await new Promise((resolveRetry) => setTimeout(resolveRetry, DRIVER_PROBE_RETRY_BACKOFF_MS * 2 ** attempt));
+    if (result.version !== null || attempt >= HARNESS_PROBE_RETRIES) return result.version ?? null;
+    await new Promise((resolveRetry) => setTimeout(resolveRetry, HARNESS_PROBE_RETRY_BACKOFF_MS * 2 ** attempt));
   }
 }
 
 /**
  * Capture the run's source identity, including one version-only probe per
  * distinct routed runtime (a local binary call, no model tokens) so a later
- * resume can refuse a driver that was upgraded or broke mid-campaign.
+ * resume can refuse a harness that was upgraded or broke mid-campaign.
  *
  * @param {ValidatedContract} contract
  * @param {Map<string, import("./verification.mjs").WorkspaceScopeBoundary>} scopeBoundaries
@@ -1048,7 +1048,7 @@ async function captureRunIdentity(contract, scopeBoundaries) {
   const ignoreRoots = [...new Set([...scopeBoundaries.values()].flatMap((boundary) => boundary.roots))];
   const identity = captureSourceIdentity(contract, {}, { ignorePaths, ignoreRoots });
   const versions = await versionsPromise;
-  return { ...identity, driverVersions: Object.fromEntries(versions) };
+  return { ...identity, harnessVersions: Object.fromEntries(versions) };
 }
 
 /**
@@ -1064,14 +1064,14 @@ async function captureRunIdentity(contract, scopeBoundaries) {
  * @returns {{warnings: string[]}} warnings to surface in status
  */
 function assertSourceUnchanged(expected, actual) {
-  const fields = ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "driverVersions"];
+  const fields = ["cwd", "gitHead", "dirtyTreeFingerprint", "packetHashes", "harnessVersions"];
   /** @type {string[]} */
   const warnings = [];
   for (const field of fields) {
     const expectedRecord = /** @type {Record<string, unknown>|undefined} */ (expected);
     const actualRecord = /** @type {Record<string, unknown>|undefined} */ (actual);
     if (expectedRecord?.[field] === undefined) throw new Error(`source identity is incomplete; resume refused`);
-    if (field === "driverVersions") {
+    if (field === "harnessVersions") {
       const expectedVersions = /** @type {Record<string, string|null>} */ (expectedRecord?.[field] ?? {});
       const actualVersions = /** @type {Record<string, string|null>} */ (actualRecord?.[field] ?? {});
       const ids = new Set([...Object.keys(expectedVersions), ...Object.keys(actualVersions)]);
@@ -1080,9 +1080,9 @@ function assertSourceUnchanged(expected, actual) {
         const actualVersion = actualVersions[id] ?? null;
         if (expectedVersion === actualVersion) continue;
         if (expectedVersion === null || actualVersion === null) {
-          throw new Error(`driver probe unavailable for ${id}; resume refused`);
+          throw new Error(`harness probe unavailable for ${id}; resume refused`);
         }
-        throw new Error("source drift detected in driverVersions; resume refused");
+        throw new Error("source drift detected in harnessVersions; resume refused");
       }
       continue;
     }
@@ -1311,7 +1311,7 @@ function assertEnvironmentReady(contract, runDir, sourceIdentity) {
   const report = environmentPreflight({
     cwd: contract.cwd,
     runtimes: reachableRuntimes(contract),
-    driverVersions: sourceIdentity?.driverVersions ?? {},
+    harnessVersions: sourceIdentity?.harnessVersions ?? {},
   });
   const evidence = {
     schemaVersion: report.schemaVersion,

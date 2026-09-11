@@ -9,7 +9,7 @@
  * names. contract.mjs validates the field is never a self-loop; because a
  * hop is bounded at one, a multi-runtime cycle is structurally impossible.
  */
-import { driverCapabilities } from "./drivers/index.mjs";
+import { harnessCapabilities } from "./harnesses/index.mjs";
 import { nextSameTierRuntime } from "./runtime-discovery.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
@@ -127,9 +127,9 @@ export function failoverEdges(contract) {
  * The first snapshot wins; every later requirement set is accumulated, so a
  * runtime reached twice is still checked against both callers' demands.
  *
- * @param {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./drivers/index.mjs").CapabilityRequirements[]}>} runtimes
+ * @param {Map<string, {runtime: RuntimeSnapshot, requiredCapabilitySets: import("./harnesses/index.mjs").CapabilityRequirements[]}>} runtimes
  * @param {RuntimeSnapshot} runtime
- * @param {import("./drivers/index.mjs").CapabilityRequirements[]} requiredCapabilitySets
+ * @param {import("./harnesses/index.mjs").CapabilityRequirements[]} requiredCapabilitySets
  */
 export function addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets) {
   const incoming = requiredCapabilitySets.filter((requirements) => requirements && Object.keys(requirements).length);
@@ -149,7 +149,7 @@ export function addRuntimeRequirement(runtimes, runtime, requiredCapabilitySets)
 export function runtimeSnapshot(contract, id) {
   const runtime = contract.runtimes[id];
   if (!runtime) throw new Error(`unknown persisted runtime: ${id}`);
-  return { id, ...runtime, capabilities: driverCapabilities(runtime) };
+  return { id, ...runtime, capabilities: harnessCapabilities(runtime) };
 }
 
 /**

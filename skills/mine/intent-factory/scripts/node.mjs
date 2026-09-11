@@ -47,11 +47,11 @@ import {
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
-  driverCapabilities,
+  harnessCapabilities,
   providerCommand,
-} from "./drivers/index.mjs";
-import { liveUsage, SessionMetricsParser, TOOL_OUTPUT_LIMIT_BYTES } from "./drivers/exec-jsonl.mjs";
-import { extractJson } from "./drivers/protocol.mjs";
+} from "./harnesses/index.mjs";
+import { liveUsage, SessionMetricsParser, TOOL_OUTPUT_LIMIT_BYTES } from "./harnesses/exec-jsonl/index.mjs";
+import { extractJson } from "./harnesses/protocol.mjs";
 import { routingBackoffActive, runtimeSnapshot } from "./failover.mjs";
 import {
   NON_FAILOVER_CODES,
@@ -112,9 +112,9 @@ import { integrateAttempt } from "./integrate.mjs";
 /** @typedef {import("./verification.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
 /** @typedef {import("./lock.mjs").LockRecord} LockRecord */
 /** @typedef {ReturnType<typeof acquireLock>} LockHandle */
-/** @typedef {import("./drivers/index.mjs").DriverRuntime} DriverRuntime */
-/** @typedef {import("./drivers/index.mjs").ProbeResult} ProbeResult */
-/** @typedef {import("./drivers/index.mjs").ProviderEnvelope} ProviderEnvelope */
+/** @typedef {import("./harnesses/index.mjs").HarnessRuntime} HarnessRuntime */
+/** @typedef {import("./harnesses/index.mjs").ProbeResult} ProbeResult */
+/** @typedef {import("./harnesses/index.mjs").ProviderEnvelope} ProviderEnvelope */
 /** @typedef {import("./verification.mjs").VerificationAttempt} VerificationAttempt */
 /** @typedef {import("./verification.mjs").VerificationAttemptResult} VerificationAttemptResult */
 /** @typedef {import("./verification.mjs").VerificationResult} VerificationResult */
@@ -229,7 +229,7 @@ export function childEnv() {
     else merged[key] = value;
   }
   // Worker providers are not a notification surface: strip the controller-only
-  // transport after the driver overlay so no driver can reintroduce it.
+  // transport after the harness overlay so no harness can reintroduce it.
   delete merged.INTENT_FACTORY_NOTIFY_BIN;
   return merged;
 }
@@ -253,7 +253,7 @@ export const timer = setInterval(() => {
   }
   provider.once("error", () => process.exitCode = 127);
   provider.once("close", (code) => {
-    capLog(config.stdoutPath, config.driver === "codex");
+    capLog(config.stdoutPath, config.harness === "codex");
     capLog(config.stderrPath);
     process.exit(code ?? 1);
   });
@@ -269,13 +269,13 @@ const MONITOR_CHUNK_BYTES = 64 * 1024;
 const MONITOR_CALL_BUDGET_BYTES = 1024 * 1024;
 
 /** @typedef {{prompt: string|null, stdout: string, stderr: string}} PathSet */
-/** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, driver: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, nodeId?: string, attempt?: number, workspace?: string, worktreeBranch?: string|null, worktreeBaseSha?: string|null, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
+/** @typedef {{id: string, pid: number, processGroupId: number|null, processStartToken: string|null, harness: string, runtimeId: string|null, runtimeFingerprint?: string, revision?: number, phase: string, promptPath: string|null, stdoutPath: string, stderrPath: string, startedAt: string, deadlineAt: string|null, updatedAt: string, closedAt: string|null, exitCode: number|null, signal: string|null, status: "active"|"closed"|"terminated", executable: string, snapshotPath?: string, usage?: Usage, usageEstimated?: boolean, costUsd?: number|null, runId?: string, campaignId?: string, nodeId?: string, attempt?: number, workspace?: string, worktreeBranch?: string|null, worktreeBaseSha?: string|null, planPhase?: string, role?: "worker"|"judge", model?: string, reasoning?: string|null, sandbox?: string|null, continuationId?: string|null, continuationMode?: "fresh"|"reuse"|"rotate"}} Invocation */
 /** @typedef {import("node:child_process").ChildProcess} ChildProcess */
 /** @typedef {{pid: number|null, processGroupId?: number|null, processStartToken?: string|null}} InvocationProbe */
-/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./drivers/exec-jsonl.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
+/** @typedef {{child: ChildProcess, node: ValidatedNode, state: NodeSnapshot, runtime: HarnessRuntime & {id: string|null}, cwd: string, paths: PathSet, phase: string, invocation: Invocation, startedAt: string, startedTicks: bigint, progressTicks: bigint, lastOutputAt: number, closed: boolean, exitCode: number|null, signal: string|null, spawnError: Error|null, terminating: Promise<void>|null, gateConfigPath: string, gateReleasePath: string, scopeBaseline?: unknown, scopeChecked?: boolean, scopeViolation?: boolean, resultMaterialization?: boolean, recoveryBaseline?: unknown, observeTimer?: ReturnType<typeof setInterval>, monitorOffset?: number, monitorParser?: import("./harnesses/exec-jsonl/index.mjs").SessionMetricsParser, onClose?: (invocation: Invocation) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} Job */
 
 /**
- * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: DriverRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, workspace?: string, commandOptions?: import("./drivers/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
+ * @param {{contract: ValidatedContract, node: ValidatedNode, state: NodeSnapshot, runtime: HarnessRuntime & {id: string|null}, prompt: string, paths: PathSet, phase: string, workspace?: string, commandOptions?: import("./harnesses/index.mjs").CommandOptions, onInvocation: (invocation: Invocation, job: Job) => void, onInvocationUpdate?: (invocation: Invocation) => void, onProgress?: (state: NodeSnapshot) => void}} args
  * @returns {Job}
  */
 export function startProcess({ contract, node, state, runtime, prompt, paths, phase, workspace = contract.cwd, commandOptions = {}, onInvocation, onInvocationUpdate, onProgress }) {
@@ -288,7 +288,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
     executable: command.executable,
     args: command.args,
     promptTransport: command.promptTransport,
-    driver: runtime.driver,
+    harness: runtime.harness,
     env: command.env ?? null,
     stdoutPath: paths.stdout,
     stderrPath: paths.stderr,
@@ -319,7 +319,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
     pid: /** @type {number} */ (child.pid),
     processGroupId: process.platform === "win32" ? null : /** @type {number} */ (child.pid),
     processStartToken: processStartToken(/** @type {number} */ (child.pid)),
-    driver: runtime.driver,
+    harness: runtime.harness,
     runtimeId: runtime.id ?? null,
     revision: state.revisions ?? 0,
     phase,
@@ -408,7 +408,7 @@ function closeInvocation(job) {
 }
 
 /**
- * Observe a bounded prefix while the provider is live. Driver normalizers know
+ * Observe a bounded prefix while the provider is live. Harness normalizers know
  * how to recognize a continuation-start event without runner-specific parsing.
  *
  * @param {Job} job
@@ -443,7 +443,7 @@ function observeInvocation(job) {
  */
 export function monitorInvocation(job) {
   try {
-    const parser = job.monitorParser ?? (job.monitorParser = new SessionMetricsParser(job.runtime.driver));
+    const parser = job.monitorParser ?? (job.monitorParser = new SessionMetricsParser(job.runtime.harness));
     const size = statSync(job.paths.stdout).size;
     let offset = job.monitorOffset ?? 0;
     let budget = MONITOR_CALL_BUDGET_BYTES;
@@ -552,10 +552,10 @@ export async function detectStalls(contract, running, onTimeout, onProgress) {
       });
       continue;
     }
-    // A driver that never writes output until it exits (zcode's `--json`,
+    // A harness that never writes output until it exits (zcode's `--json`,
     // replay's single envelope line) cannot prove liveness through mtime: the
     // wall-clock check above is the only budget it is held to.
-    if (!driverCapabilities(job.runtime).streamsOutput) continue;
+    if (!harnessCapabilities(job.runtime).streamsOutput) continue;
     let observed = 0;
     for (const path of [job.paths.stdout, job.paths.stderr]) {
       try {
@@ -611,9 +611,9 @@ function processGroupAlive(processGroupId) {
 
 /**
  * @param {{stdoutPath: string}} invocation
- * @param {DriverRuntime} runtime
- * @param {import("./drivers/index.mjs").NormalizeOptions} options
- * @returns {import("./drivers/index.mjs").ProviderEnvelope|null}
+ * @param {HarnessRuntime} runtime
+ * @param {import("./harnesses/index.mjs").NormalizeOptions} options
+ * @returns {import("./harnesses/index.mjs").ProviderEnvelope|null}
  */
 export function invocationResult(invocation, runtime, options = {}) {
   try {
@@ -856,12 +856,12 @@ function routeRuntimeForState(contract, node, state, role) {
   const override = state.routing?.currentOverride;
   if (override?.role === role && contract.runtimes[override.runtime]) {
     const runtime = contract.runtimes[override.runtime];
-    return { id: override.runtime, ...runtime, capabilities: driverCapabilities(runtime) };
+    return { id: override.runtime, ...runtime, capabilities: harnessCapabilities(runtime) };
   }
   const assigned = state.routing?.assignments?.[role];
   if (assigned && contract.runtimes[assigned]) {
     const runtime = contract.runtimes[assigned];
-    return { id: assigned, ...runtime, capabilities: driverCapabilities(runtime) };
+    return { id: assigned, ...runtime, capabilities: harnessCapabilities(runtime) };
   }
   return /** @type {RuntimeSnapshot} */ (routeRuntime(contract, node, role));
 }
@@ -886,7 +886,7 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
     && session.invocation.campaignId === contract.campaignId
     && session.invocation.planPhase === node.phase
     && session.invocation.role === role
-    && session.invocation.driver === runtime.driver
+    && session.invocation.harness === runtime.harness
     && session.invocation.runtimeId === runtime.id
     && session.invocation.runtimeFingerprint === fingerprintRuntime(runtime)
     && session.invocation.model === runtime.model
@@ -896,7 +896,7 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
   if (identityMatches && canContinue) {
     return { prompt, continuationId: session.invocation.continuationId ?? null, mode: "reuse" };
   }
-  // A driver that cannot continue at all, or a session picked up from a
+  // A harness that cannot continue at all, or a session picked up from a
   // different phase-sibling node whose identity does not match this one, has
   // no native continuity: the fresh attempt carries the prior nodes'
   // structured summaries forward instead of starting blind.
@@ -907,7 +907,7 @@ function phaseInvocationPlan(contract, node, state, runDir, role, prompt) {
       mode: "rotate",
     };
   }
-  // A capable driver continuing its own node whose identity merely drifted
+  // A capable harness continuing its own node whose identity merely drifted
   // (the run directory moved, or a runtime edge) still gets the caller's own
   // prompt — already carrying the node's bounded "Previous attempt" section —
   // in a fresh session, never a synthesized handoff.
@@ -1006,7 +1006,7 @@ function phaseHandoffPrompt(contract, node, state, runDir, role) {
  * enforcement.
  *
  * @param {RuntimeSnapshot} runtime
- * @returns {import("./drivers/index.mjs").ToolPolicy|undefined}
+ * @returns {import("./harnesses/index.mjs").ToolPolicy|undefined}
  */
 function workerToolPolicy(runtime) {
   if (runtime.capabilities.toolPolicy !== true) return undefined;
@@ -1025,8 +1025,8 @@ function workerToolPolicy(runtime) {
  * @param {{prompt: string, continuationId: string|null, mode: "fresh"|"reuse"|"rotate"}} phasePlan
  * @param {string} runDir
  * @param {LockHandle} lock
- * @param {import("./drivers/index.mjs").CommandOptions} [extra]
- * @returns {import("./drivers/index.mjs").CommandOptions}
+ * @param {import("./harnesses/index.mjs").CommandOptions} [extra]
+ * @returns {import("./harnesses/index.mjs").CommandOptions}
  */
 function invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, extra = {}) {
   return {
@@ -1230,7 +1230,7 @@ export function startWorker(contract, node, state, runDir, running, prompt, lock
  * @param {string} runDir
  * @param {Map<string, Job>} running
  * @param {Invocation} sourceInvocation
- * @param {DriverRuntime & {id: string|null}} runtime
+ * @param {HarnessRuntime & {id: string|null}} runtime
  * @param {string|null} continuationId
  * @param {LockHandle} lock
  */
@@ -2655,7 +2655,7 @@ export function recordInvocationUsage(job, options = {}) {
   // normalized usage components from the live meter so kills, timeouts, and
   // scope failures still report what they spent, cache reads separated.
   if (envelope.usage.inputTokens === null && boundedStdout) {
-    const observed = liveUsage(job.runtime.driver, boundedStdout);
+    const observed = liveUsage(job.runtime.harness, boundedStdout);
     if (observed.inputTokens !== null) {
       envelope = { ...envelope, usage: { ...envelope.usage, inputTokens: observed.inputTokens, cacheReadInputTokens: observed.cacheReadInputTokens } };
     }
@@ -3163,7 +3163,7 @@ function renderFinalStatus(runDir, contract, states) {
     row(widths.map((width) => "-".repeat(width))),
   ];
   for (const node of nodes) {
-    const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
+    const runtime = node.runtime ? `${node.runtime.harness}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
     const detail = statusNote(node) ?? "-";
     // A scope finding leads the note and drops the phase boilerplate: the
@@ -3219,7 +3219,7 @@ export function renderFinalReport(runDir, contract, states) {
     totals.outputTokens += usage.outputTokens ?? 0;
     totals.cacheReadInputTokens += usage.cacheReadInputTokens ?? 0;
     if (typeof node.costUsd === "number" && Number.isFinite(node.costUsd)) totalCostUsd = (totalCostUsd ?? 0) + node.costUsd;
-    const runtime = node.runtime ? `${node.runtime.driver}/${node.runtime.model}` : "-";
+    const runtime = node.runtime ? `${node.runtime.harness}/${node.runtime.model}` : "-";
     const planNode = contract.nodes.find((candidate) => candidate.id === node.id);
     const detail = node.gate?.summary ?? node.error?.message ?? (node.blockedBy?.length ? node.blockedBy.join(", ") : null) ?? (typeof node.result === "string" && node.result.trim() ? node.result.trim() : node.phase ?? "-");
     // The advisory scope finding leads the note, as it does in STATUS.md.

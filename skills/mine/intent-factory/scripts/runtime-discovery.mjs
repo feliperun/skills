@@ -1,23 +1,23 @@
-import { normalizeProviderAvailability, probeRuntime } from "./drivers/index.mjs";
+import { normalizeProviderAvailability, probeRuntime } from "./harnesses/index.mjs";
 
 // Availability normalization belongs to the adapter registry, which is where
 // each provider's own exhaustion, balance, and authentication wording is
 // already classified. Re-exported here so discovery callers keep one import
 // site; a second copy of these two functions is how they drift apart.
-export { exhaustedUntilOf, normalizeProviderAvailability } from "./drivers/index.mjs";
+export { exhaustedUntilOf, normalizeProviderAvailability } from "./harnesses/index.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
-/** @typedef {{driver?: string, model?: string, vendor: string, tier?: number|string, costRank?: number, [key: string]: unknown}} RuntimeLike */
+/** @typedef {{harness?: string, model?: string, vendor: string, tier?: number|string, costRank?: number, [key: string]: unknown}} RuntimeLike */
 /** @typedef {{runtimes: Record<string, RuntimeLike>, runtimeDefaults?: {worker?: string, judge?: string}, nodes?: {id: string, runtime?: string, gate: {enabled: boolean, runtime?: string}}[]}} RuntimeContract */
 /** @typedef {{available: boolean, exhaustedUntil: string|null, reason: string}} RuntimeAvailability */
-/** @typedef {{driver: string, model: string, vendor: string, tier: number, costRank: number, config?: Record<string, unknown>}} DiscoveryRuntime */
+/** @typedef {{harness: string, model: string, vendor: string, tier: number, costRank: number, config?: Record<string, unknown>}} DiscoveryRuntime */
 
 /**
  * Candidates used when a contract omits its runtime catalogue. The catalogue
  * only names harnesses; availability still comes from the installed binary.
  *
  * Every id is `<harness>-<model>`, saying out loud what the fields already
- * say: `driver` is the harness that runs the turn, `model` is what that
+ * say: `harness` is the harness that runs the turn, `model` is what that
  * harness asks, and the two vary independently — DeepSeek answers through the
  * `dsh` harness, GLM through `zcode`. An id naming only one half (the bare
  * `glm` this catalogue used to carry, which was at once a model family, a
@@ -34,7 +34,7 @@ export const DISCOVERY_RUNTIME_DEFINITIONS = Object.freeze({
   // `dsh` defaults no vendor and no provider route, so both are declared here
   // or nothing can build a command from this entry.
   "dsh-deepseek": {
-    driver: "dsh",
+    harness: "dsh",
     model: "deepseek-flash",
     vendor: "deepseek",
     config: { provider: "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" },
@@ -42,23 +42,23 @@ export const DISCOVERY_RUNTIME_DEFINITIONS = Object.freeze({
     costRank: 1,
   },
   "zcode-glm": {
-    driver: "zcode",
+    harness: "zcode",
     model: "glm-5.3",
     vendor: "zhipu",
     config: { "auth_token.env_key": "ZAI_API_KEY" },
     tier: 1,
     costRank: 1,
   },
-  "agy-gemini": { driver: "agy", model: "gemini-3.8-flash-low", vendor: "google", tier: 1, costRank: 1 },
-  "codex-gpt": { driver: "codex", model: "gpt-5.6", vendor: "openai", tier: 2, costRank: 2 },
-  "claude-sonnet": { driver: "claude", model: "claude-sonnet-5", vendor: "anthropic", tier: 2, costRank: 2 },
+  "agy-gemini": { harness: "agy", model: "gemini-3.8-flash-low", vendor: "google", tier: 1, costRank: 1 },
+  "codex-gpt": { harness: "codex", model: "gpt-5.6", vendor: "openai", tier: 2, costRank: 2 },
+  "claude-sonnet": { harness: "claude", model: "claude-sonnet-5", vendor: "anthropic", tier: 2, costRank: 2 },
 });
 
 /**
  * Discover runtime binaries without sending a model prompt. Tests can pass
  * recorded responses so no network call is needed.
  *
- * @param {Record<string, import("./drivers/index.mjs").DriverRuntime>} runtimes
+ * @param {Record<string, import("./harnesses/index.mjs").HarnessRuntime>} runtimes
  * @param {{cwd?: string, responses?: Record<string, unknown>, exitCodes?: Record<string, number|null>, signals?: Record<string, string|null>}} [options]
  * @returns {Promise<Record<string, RuntimeAvailability>>}
  */

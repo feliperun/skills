@@ -10,7 +10,7 @@
     "goal": "prove finalVerification runs only on the phase-terminal node",
     "runtimeDefaults": { "worker": "replay-worker" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
     },
     "finalVerification": [
       { "argv": ["false"] }

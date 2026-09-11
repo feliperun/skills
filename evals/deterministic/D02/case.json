@@ -10,7 +10,7 @@
     "goal": "prove a concurrent resume is rejected by the controller lock",
     "runtimeDefaults": { "worker": "replay-worker" },
     "runtimes": {
-      "replay-worker": { "driver": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
+      "replay-worker": { "harness": "replay", "model": "replay-worker-model", "vendor": "replay-worker-vendor", "config": {} }
     },
     "nodes": [
       {
