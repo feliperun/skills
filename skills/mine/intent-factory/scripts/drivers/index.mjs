@@ -36,13 +36,14 @@ const CAPABILITY_NAMES = new Set([
   "usage",
   "cost",
   "toolPolicy",
+  "streamsOutput",
 ]);
 
-/** @typedef {"structuredOutput"|"promptTransport"|"sandbox"|"permissions"|"continuation"|"tokenBudget"|"costBudget"|"usage"|"cost"|"toolPolicy"} CapabilityName */
+/** @typedef {"structuredOutput"|"promptTransport"|"sandbox"|"permissions"|"continuation"|"tokenBudget"|"costBudget"|"usage"|"cost"|"toolPolicy"|"streamsOutput"} CapabilityName */
 
-/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, toolPolicy: boolean, maxArgvPromptBytes?: number}} DriverCapabilities */
+/** @typedef {{structuredOutput: boolean, promptTransport: "stdin"|"argv", sandbox: boolean, permissions: boolean, continuation: boolean, tokenBudget: boolean, costBudget: boolean, usage: boolean, cost: boolean, toolPolicy: boolean, streamsOutput: boolean, maxArgvPromptBytes?: number}} DriverCapabilities */
 
-/** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean, toolPolicy?: boolean}} CapabilityRequirements */
+/** @typedef {{structuredOutput?: boolean, promptTransport?: "stdin"|"argv", sandbox?: boolean, permissions?: boolean, continuation?: boolean, tokenBudget?: boolean, costBudget?: boolean, usage?: boolean, cost?: boolean, toolPolicy?: boolean, streamsOutput?: boolean}} CapabilityRequirements */
 
 /** @typedef {{executable: string, args: string[], promptTransport: "stdin"|"argv", input: string|null, env?: Record<string, string|null>}} DriverCommand */
 

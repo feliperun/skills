@@ -34,6 +34,9 @@ export const replayDriver = {
     cost: true,
     // A recording cannot prove mechanical tool-policy enforcement.
     toolPolicy: false,
+    // replay-bin.mjs writes its one envelope line after the recorded delay,
+    // never incrementally.
+    streamsOutput: false,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

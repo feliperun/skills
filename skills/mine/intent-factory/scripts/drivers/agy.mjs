@@ -16,6 +16,9 @@ export const agyDriver = {
     usage: true,
     cost: false,
     toolPolicy: false,
+    // `--output-format=stream-json` writes one JSON line per event as the
+    // turn runs, not one dump at exit.
+    streamsOutput: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

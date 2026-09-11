@@ -38,6 +38,9 @@ export const codexDriver = {
     usage: true,
     cost: false,
     toolPolicy: false,
+    // `--json` writes one JSONL event per item/turn as it happens, not one
+    // dump at exit.
+    streamsOutput: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

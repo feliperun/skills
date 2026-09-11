@@ -38,10 +38,11 @@ function lockRecord(runDir) {
 
 /**
  * @param {string} runDir
+ * @param {Record<string, unknown>} [overrides]
  * @returns {{contract: import("../scripts/contract.mjs").ValidatedContract, node: import("../scripts/contract.mjs").ValidatedNode}}
  */
-function validatedRun(runDir) {
-  const contractPath = writeContract(runDir, fixture({ pollIntervalMs: 10 }));
+function validatedRun(runDir, overrides = {}) {
+  const contractPath = writeContract(runDir, fixture({ pollIntervalMs: 10, ...overrides }));
   const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
   const node = contract.nodes[0];
   if (!node) throw new Error("fixture has no build node");
@@ -588,6 +589,112 @@ test("stall supervision uses the latest persisted timeout override", async () =>
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
     if (previousMarker === undefined) delete process.env.INTENT_FACTORY_MARKER;
     else process.env.INTENT_FACTORY_MARKER = previousMarker;
+    try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
+  }
+});
+
+test("stall supervision kills a runtime whose driver declares streamed output once it goes quiet past stallTimeoutSec", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "lock-stall-streaming-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const provider = join(runDir, "provider.mjs");
+  // Writes once, immediately, then never again: codex declares streamsOutput
+  // (confirmed by reading its adapter's `--json` transport), so this alone
+  // must be enough for the stall clock to start and then expire.
+  writeFileSync(provider, "#!/usr/bin/env node\nprocess.stdout.write(\"{}\\n\"); process.stdin.resume(); setInterval(() => {}, 1000);\n");
+  chmodSync(provider, 0o755);
+  const previous = process.env.INTENT_FACTORY_CODEX_BIN;
+  process.env.INTENT_FACTORY_CODEX_BIN = provider;
+  const { contract, node } = validatedRun(runDir, { stallTimeoutSec: 0.05 });
+  const state = nodeSnapshot(node, []);
+  const job = startProcess({
+    contract,
+    node,
+    state,
+    runtime: { id: "luna", driver: "codex", model: "test" },
+    prompt: "task",
+    paths: {
+      prompt: join(logs, "worker.prompt"),
+      stdout: join(logs, "worker.jsonl"),
+      stderr: join(logs, "worker.err"),
+    },
+    phase: "worker",
+    onInvocation: () => {},
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.ok(statSync(job.paths.stdout).size > 0, "the provider must have written its one line by now");
+    // A poll loop calls detectStalls repeatedly; the first call after output
+    // appears only records it as progress; a stall is only real once a later
+    // poll finds nothing new.
+    await detectStalls(contract, new Map([["build", job]]), async () => {});
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    let timeout;
+    await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
+      timeout = { currentJob, status, error };
+    });
+    assert.ok(timeout, "stall supervisor reported a timeout");
+    assert.equal(timeout.status, "stalled");
+    assert.match(timeout.error.message, /no provider output/u);
+  } finally {
+    if (previous === undefined) delete process.env.INTENT_FACTORY_CODEX_BIN;
+    else process.env.INTENT_FACTORY_CODEX_BIN = previous;
+    try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
+  }
+});
+
+test("stall supervision never kills a runtime whose driver declares no streamed output; it is bounded by timeoutSec instead", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "lock-stall-non-streaming-"));
+  const logs = join(runDir, "logs");
+  mkdirSync(logs);
+  const recording = join(runDir, "recording.jsonl");
+  // replay declares streamsOutput: false (measured: replay-bin.mjs writes its
+  // one envelope line only after delayMs). 5s comfortably outlasts every
+  // wait below, so the process is still silent-on-disk at both checkpoints.
+  writeFileSync(recording, `${JSON.stringify({
+    envelope: {
+      status: "done", result: "late", continuationId: null,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 },
+      costUsd: null, error: null,
+    },
+    delayMs: 5_000,
+  })}\n`);
+  const { contract, node } = validatedRun(runDir, { stallTimeoutSec: 0.05, timeoutSec: 0.3 });
+  const state = nodeSnapshot(node, []);
+  const job = startProcess({
+    contract,
+    node,
+    state,
+    runtime: { id: "replayed", driver: "replay", model: "test", config: { "replay.recording": recording } },
+    prompt: "task",
+    paths: {
+      prompt: join(logs, "worker.prompt"),
+      stdout: join(logs, "worker.jsonl"),
+      stderr: join(logs, "worker.err"),
+    },
+    phase: "worker",
+    onInvocation: () => {},
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(statSync(job.paths.stdout, { throwIfNoEntry: false })?.size ?? 0, 0, "the replay process has written nothing yet");
+    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    let firstTimeout;
+    await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
+      firstTimeout = { currentJob, status, error };
+    });
+    assert.equal(firstTimeout, undefined, "silence alone must not kill a driver that never reports streamed output");
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    let secondTimeout;
+    await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
+      secondTimeout = { currentJob, status, error };
+    });
+    assert.ok(secondTimeout, "the wall-clock budget still applies");
+    assert.equal(secondTimeout.status, "exhausted", "the same silent runtime is bounded by timeoutSec, never by the stall clock");
+  } finally {
     try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
   }
 });

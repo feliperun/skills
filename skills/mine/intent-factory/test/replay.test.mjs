@@ -106,6 +106,7 @@ test("replay adapter declares explicit capabilities and builds stdin commands", 
     usage: true,
     cost: true,
     toolPolicy: false,
+    streamsOutput: false,
   };
   assert.deepEqual(replayDriver.capabilities, expectedCapabilities);
   assert.deepEqual(driverCapabilities({ driver: "replay" }), expectedCapabilities);

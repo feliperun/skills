@@ -49,7 +49,7 @@ const NODE_PHASES = new Set(["waiting", "worker", "judge", "complete", "dependen
 const SNAPSHOT_RUNTIME_FIELDS = new Set(["id", ...RUNTIME_FIELDS, "capabilities"]);
 const CAPABILITY_FIELDS = new Set([
   "structuredOutput", "promptTransport", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget",
-  "usage", "cost", "toolPolicy", "maxArgvPromptBytes",
+  "usage", "cost", "toolPolicy", "streamsOutput", "maxArgvPromptBytes",
 ]);
 const GATE_RESULT_FIELDS = new Set(["verdict", "maxSeverity", "summary", "findings"]);
 const FINDING_FIELDS = new Set(["severity", "description", "evidence"]);
@@ -868,7 +868,7 @@ function validateSnapshotRuntime(value, label) {
 function validateCapabilities(value, label) {
   assertObject(value, label);
   rejectUnknown(value, CAPABILITY_FIELDS, label);
-  for (const name of ["structuredOutput", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget", "usage", "cost", "toolPolicy"]) {
+  for (const name of ["structuredOutput", "sandbox", "permissions", "continuation", "tokenBudget", "costBudget", "usage", "cost", "toolPolicy", "streamsOutput"]) {
     if (typeof value[name] !== "boolean") throw new TypeError(`${label}.${name} must be boolean`);
   }
   if (!["stdin", "argv"].includes(/** @type {string} */ (value.promptTransport))) {

@@ -51,6 +51,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: false,
       toolPolicy: false,
+      streamsOutput: true,
     },
     {
       structuredOutput: true,
@@ -63,6 +64,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: true,
       toolPolicy: true,
+      streamsOutput: true,
     },
     {
       structuredOutput: true,
@@ -76,6 +78,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: false,
       toolPolicy: false,
+      streamsOutput: true,
     },
     {
       structuredOutput: true,
@@ -88,6 +91,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: true,
       toolPolicy: true,
+      streamsOutput: true,
     },
     {
       structuredOutput: false,
@@ -101,6 +105,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: false,
       toolPolicy: false,
+      streamsOutput: false,
     },
     {
       structuredOutput: true,
@@ -113,6 +118,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: false,
       toolPolicy: false,
+      streamsOutput: true,
     },
     {
       structuredOutput: true,
@@ -125,6 +131,7 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: true,
       toolPolicy: false,
+      streamsOutput: false,
     },
   ];
   for (let index = 0; index < runtimes.length; index += 1) {

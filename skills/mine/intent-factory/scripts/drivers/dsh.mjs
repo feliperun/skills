@@ -46,6 +46,11 @@ export const dshDriver = {
     usage: true,
     cost: false,
     toolPolicy: false,
+    // Measured 2026-09-10: dsh-runner.mjs writeSync's each dsh.message as the
+    // session emits it, not just at the end. A three-tool-call turn against
+    // deepseek-official/deepseek-flash grew the redirected stdout file from
+    // 67 to 1,380 to 1,441 to 2,084 bytes across a 14s turn.
+    streamsOutput: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

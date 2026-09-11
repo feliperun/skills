@@ -34,6 +34,9 @@ export const glmDriver = {
     cost: true,
     // The Claude-compatible hook surface enforces the tool policy mechanically.
     toolPolicy: true,
+    // Same `stream-json --verbose` transport as `claude`, since this is the
+    // same CLI pointed at the Z.ai endpoint.
+    streamsOutput: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

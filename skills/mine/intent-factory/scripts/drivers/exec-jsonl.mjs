@@ -70,6 +70,9 @@ export const execJsonlDriver = {
     // An arbitrary wrapper executable cannot honestly advertise mechanical
     // tool-policy enforcement; the request carries none.
     toolPolicy: false,
+    // The protocol allows zero `message` events before the terminal one, so
+    // an arbitrary wrapper cannot honestly advertise incremental output either.
+    streamsOutput: false,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

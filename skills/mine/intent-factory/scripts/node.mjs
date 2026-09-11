@@ -552,6 +552,10 @@ export async function detectStalls(contract, running, onTimeout, onProgress) {
       });
       continue;
     }
+    // A driver that never writes output until it exits (zcode's `--json`,
+    // replay's single envelope line) cannot prove liveness through mtime: the
+    // wall-clock check above is the only budget it is held to.
+    if (!driverCapabilities(job.runtime).streamsOutput) continue;
     let observed = 0;
     for (const path of [job.paths.stdout, job.paths.stderr]) {
       try {

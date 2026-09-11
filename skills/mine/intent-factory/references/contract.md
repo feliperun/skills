@@ -267,7 +267,10 @@ failure has no reset; a quota response keeps its reset, including Z.ai code
 `dependsOn` forms a DAG; a node starts once every dependency is `done`, and a
 failed terminal dependency makes it `blocked`. Terminal states: `done`,
 `no-op`, `blocked`, `failed`, `exhausted`, `stalled`, `canceled` — every node
-ends in exactly one. `stallTimeoutSec` bounds silence on stdout/stderr;
+ends in exactly one. `stallTimeoutSec` bounds silence on stdout/stderr, but
+only for a driver declaring `streamsOutput` (true for `codex`, `claude`,
+`glm`, `agy`, `dsh`; false for `zcode`, which dumps its turn at exit);
+others fall back to `timeoutSec` alone.
 `timeoutSec` (default 2400s) caps one invocation and may be overridden per
 node; a node is bounded by `(1 + maxRevisions) × 2 × timeoutSec`. Both clocks
 are monotonic and pause with host suspend. `maxParallel` above 1 dispatches

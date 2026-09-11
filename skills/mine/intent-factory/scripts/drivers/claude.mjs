@@ -42,6 +42,9 @@ export const claudeDriver = {
     cost: true,
     // The Claude-compatible hook surface enforces the tool policy mechanically.
     toolPolicy: true,
+    // `--output-format stream-json --verbose` writes one JSON line per event
+    // as the turn runs, not one dump at exit.
+    streamsOutput: true,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */

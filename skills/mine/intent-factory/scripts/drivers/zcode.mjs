@@ -40,6 +40,12 @@ export const zcodeDriver = {
     usage: true,
     cost: false,
     toolPolicy: false,
+    // `--json` (no streaming flag exists) buffers the whole turn and dumps it
+    // once at exit: a live worker node was killed at 420s stall_timeout with
+    // its stdout/stderr at zero bytes, while a completed 1m26s invocation's
+    // log held its full 26 lines only once the process exited. Stall
+    // detection must not watch this driver's stdout/stderr mtime.
+    streamsOutput: false,
   },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
