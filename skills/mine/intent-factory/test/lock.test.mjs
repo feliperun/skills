@@ -660,7 +660,7 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
     },
     delayMs: 5_000,
   })}\n`);
-  const { contract, node } = validatedRun(runDir, { stallTimeoutSec: 0.05, timeoutSec: 0.3 });
+  const { contract, node } = validatedRun(runDir, { stallTimeoutSec: 0.05, timeoutSec: 0.6 });
   const state = nodeSnapshot(node, []);
   const job = startProcess({
     contract,
@@ -686,14 +686,28 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
     });
     assert.equal(firstTimeout, undefined, "silence alone must not kill a driver that never reports streamed output");
 
+    // Discriminating check: the gate's stdout/stderr files exist (created
+    // empty before spawn) from the very first poll onward, so a streamsOutput
+    // implementation that still tracked mtime would record that fixed
+    // creation time as "progress" on the first poll and then, finding no
+    // further change here 250ms later, would call it stalled — well inside
+    // this 0.6s wall-clock budget. The fix must stay silent here.
     await new Promise((resolve) => setTimeout(resolve, 250));
     /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let secondTimeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       secondTimeout = { currentJob, status, error };
     });
-    assert.ok(secondTimeout, "the wall-clock budget still applies");
-    assert.equal(secondTimeout.status, "exhausted", "the same silent runtime is bounded by timeoutSec, never by the stall clock");
+    assert.equal(secondTimeout, undefined, "a driver that never reports streamed output must survive well past stallTimeoutSec");
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    let thirdTimeout;
+    await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
+      thirdTimeout = { currentJob, status, error };
+    });
+    assert.ok(thirdTimeout, "the wall-clock budget still applies");
+    assert.equal(thirdTimeout.status, "exhausted", "the same silent runtime is bounded by timeoutSec, never by the stall clock");
   } finally {
     try { await terminateInvocation(job.invocation, { graceMs: 25, killGraceMs: 500 }); } catch {}
   }
