@@ -210,7 +210,7 @@ const QUOTA_TEXT_PATTERN = /429|1310|rate.?limit|usage limit|limit exhausted|quo
  * @param {string|null|undefined} text
  * @returns {boolean}
  */
-function isQuotaText(text) {
+export function isQuotaText(text) {
   return QUOTA_TEXT_PATTERN.test(String(text ?? ""));
 }
 

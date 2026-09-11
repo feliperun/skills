@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalUsage, extractJson, failed, isVerdictCandidate, parseJsonLines, parseVersion } from "./protocol.mjs";
+import { canonicalUsage, extractJson, failed, isQuotaText, isVerdictCandidate, parseJsonLines, parseVersion } from "./protocol.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -179,7 +179,7 @@ function countVerdicts(events) {
 function statusFor(kind, text) {
   if (kind === "aborted") return "canceled";
   if (kind === "blocked") return "blocked";
-  if (/\bQUOTA\b|\bRATE_LIMIT\b|insufficient balance|quota|rate.?limit/iu.test(text)) return "exhausted";
+  if (isQuotaText(text) || /insufficient balance/iu.test(text)) return "exhausted";
   if (/permission|approval|sandbox/iu.test(text)) return "blocked";
   return "failed";
 }

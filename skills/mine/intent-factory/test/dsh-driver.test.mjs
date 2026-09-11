@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { validateContract } from "../scripts/contract.mjs";
 import { dshDriver } from "../scripts/drivers/dsh.mjs";
-import { normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/drivers/index.mjs";
+import { normalizeProviderAvailability, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/drivers/index.mjs";
 import { closeResult, fixture, withFakeDsh, writeContract } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +98,20 @@ test("a completed turn reports the final message and the token split the harness
   assert.equal(envelope.error, null);
 });
 
+test("dsh assumes harness inputTokens excludes cache reads when canonicalizing usage", () => {
+  const stdout = JSON.stringify({
+    type: "dsh.completed",
+    sessionId: "s",
+    result: "done",
+    usage: { inputTokens: 1000, outputTokens: 25, cacheReadInputTokens: 800 },
+  });
+  assert.deepEqual(normalizeProviderResult(runtime(), stdout, 0, null, {}).usage, {
+    inputTokens: 1000,
+    outputTokens: 25,
+    cacheReadInputTokens: 800,
+  });
+});
+
 test("a judge round counts every verdict-shaped message, not only the last", () => {
   /** @param {string} name */
   const verdict = (name) => JSON.stringify({ verdict: name, maxSeverity: "none", summary: name, findings: [] });
@@ -118,22 +132,23 @@ test("a verdict wrapped in prose is extracted for a judge and left alone for a w
   assert.equal(normalizeProviderResult(runtime(), stdout, 0, null, {}).result, prose);
 });
 
-test("a quota stop is exhaustion with the reset instant the failover wait needs", () => {
+test("a generic 429 stop is exhaustion with the reset instant the failover wait needs", () => {
   const stdout = JSON.stringify({
     type: "dsh.failed",
     sessionId: "s",
     kind: "error",
-    error: { code: "QUOTA", message: "429 Too Many Requests: usage limit exhausted", retryAfterMs: 60000 },
+    error: { code: "provider_error", message: "429 Too Many Requests", retryAfterMs: 60000 },
     usage: { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 },
   });
   const before = Date.now();
   const envelope = normalizeProviderResult(runtime(), stdout, 1, null, {});
   assert.equal(envelope.status, "exhausted");
-  assert.equal(envelope.error?.code, "QUOTA");
+  assert.equal(envelope.error?.code, "provider_error");
   assert.deepEqual(envelope.usage, { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0 });
   const resetAt = Date.parse(/** @type {string} */ (envelope.exhaustedUntil));
   assert.ok(resetAt >= before + 59000 && resetAt <= Date.now() + 61000, `unexpected reset instant ${envelope.exhaustedUntil}`);
   assert.equal(envelope.error?.resetAt, envelope.exhaustedUntil);
+  assert.equal(normalizeProviderAvailability(runtime(), envelope).exhaustedUntil, envelope.exhaustedUntil);
 });
 
 test("a stop with no reset hint still exhausts without inventing an instant", () => {
