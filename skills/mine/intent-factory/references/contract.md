@@ -178,7 +178,8 @@ formality.
   `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
 - `zcode`: runs GLM models through Z.ai's own harness CLI headlessly
   (`zcode --prompt --json`; install the ZCode app or point `executable` /
-  `INTENT_FACTORY_ZCODE_BIN` at the bundled CLI). Model and endpoint travel as
+  `INTENT_FACTORY_ZCODE_BIN` at the bundled CLI — full CLI reference in
+  `docs/intent-factory/ZCODE-CLI.md`). Model and endpoint travel as
   `ZCODE_MODEL` (`config.provider`/model, default `glm`/model; a `[1m]` model
   suffix is stripped — the provider reports the context window itself) and
   `ZCODE_BASE_URL` (default the Z.ai Anthropic-compatible endpoint); the token
