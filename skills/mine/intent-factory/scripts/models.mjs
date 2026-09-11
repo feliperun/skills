@@ -100,8 +100,11 @@ export const DECLARED_MODEL_CATALOGUES = Object.freeze({
   ]),
   zcode: Object.freeze([
     declaredModel("glm-5.3-flash", { contextWindowTokens: GLM_CONTEXT_WINDOW_TOKENS, efforts: NO_EFFORTS }),
-    declaredModel("glm-5.3", { contextWindowTokens: GLM_CONTEXT_WINDOW_TOKENS, efforts: NO_EFFORTS }),
-    declaredModel("glm-5.3[1m]", { contextWindowTokens: GLM_ONE_MILLION_CONTEXT_WINDOW_TOKENS, efforts: NO_EFFORTS }),
+    // No `[1m]` row: the suffix is a Claude Code convention the ZCode CLI does
+    // not know (zcode.mjs strips it before building `ZCODE_MODEL`), so a second
+    // row would name the very same invocation. The CLI resolves the window from
+    // the provider, which projected 1M for this model.
+    declaredModel("glm-5.3", { contextWindowTokens: GLM_ONE_MILLION_CONTEXT_WINDOW_TOKENS, efforts: NO_EFFORTS }),
   ]),
   "exec-jsonl": Object.freeze([]),
   replay: Object.freeze([]),
