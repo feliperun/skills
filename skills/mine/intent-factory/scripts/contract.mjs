@@ -16,6 +16,7 @@ import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
   driverCapabilities,
+  resolvePermissionExecution,
   resolveVendor,
   validateCapabilityRequirements,
 } from "./drivers/index.mjs";
@@ -261,6 +262,24 @@ export function validateContract(raw, contractPath, options = {}) {
     }
   }
 
+  // Every worker prompt tells the worker to run its packet verification.
+  // Refuse a statically known permission mode that makes that instruction
+  // impossible, including every reachable worker fallback. Judges only review
+  // captured results, so their permission mode is intentionally irrelevant.
+  for (const [index, node] of nodes.entries()) {
+    if (node.taskPacket.verification.length === 0) continue;
+    const workerRuntimeId = node.runtime ?? defaults.worker;
+    if (!workerRuntimeId) continue;
+    assertRuntimeExecutesCommands(runtimes, /** @type {string} */ (workerRuntimeId), index, node.id, "worker runtime");
+    const seenFallbacks = new Set([/** @type {string} */ (workerRuntimeId)]);
+    let fallbackId = runtimes[/** @type {string} */ (workerRuntimeId)].fallback;
+    while (fallbackId !== undefined && !seenFallbacks.has(fallbackId)) {
+      seenFallbacks.add(fallbackId);
+      assertRuntimeExecutesCommands(runtimes, fallbackId, index, node.id, "worker fallback runtime");
+      fallbackId = runtimes[fallbackId].fallback;
+    }
+  }
+
   const warnings = nodes.flatMap((node, index) => [...commandCoverageWarnings(node, index), ...unsnapshottedWriteWarnings(node, index, cwd)]);
   return /** @type {ValidatedContract} */ ({
     ...raw,
@@ -501,6 +520,22 @@ function validateRuntimeValues(runtime, label, executableRequired) {
   // `initialize` verbatim, so a dsh runtime without one cannot start a turn.
   if (driver === "dsh") requireString(/** @type {Record<string, unknown>|undefined} */ (runtime.config)?.provider, `${label}.config.provider`);
   if (executableRequired && runtime.executable === undefined) requireString(runtime.executable, `${label}.executable`);
+}
+
+/**
+ * @param {Record<string, ValidatedRuntime>} runtimes
+ * @param {string} runtimeId
+ * @param {number} index
+ * @param {string} nodeId
+ * @param {string} label
+ */
+function assertRuntimeExecutesCommands(runtimes, runtimeId, index, nodeId, label) {
+  const runtime = runtimes[runtimeId];
+  const execution = resolvePermissionExecution(runtime);
+  if (execution.executes) return;
+  throw new TypeError(
+    `nodes[${index}] (${nodeId}) has verification but ${label} ${runtimeId} uses ${execution.field}=${execution.mode}; ${runtime.driver} executes commands only in ${execution.executingModes.join(", ")}`,
+  );
 }
 
 /**

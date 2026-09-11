@@ -1004,6 +1004,85 @@ test("runtime fallback is a declared one-hop edge and rejects self-loops", () =>
   assert.throws(() => validateContract(JSON.parse(readFileSync(invalid.path, "utf8")), invalid.path), /fallback cannot name itself/u);
 });
 
+test("verification rejects a worker permission mode that cannot execute commands", () => {
+  const allowed = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimes: {
+      worker: {
+        driver: "claude",
+        model: "worker",
+        executable: "/nonexistent/claude",
+        permissionMode: "bypassPermissions",
+      },
+    },
+  });
+  assert.equal(validateContract(JSON.parse(readFileSync(allowed.path, "utf8")), allowed.path).nodes.length, 1);
+
+  const denied = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimes: {
+      worker: {
+        driver: "claude",
+        model: "worker",
+        executable: "/nonexistent/claude",
+        permissionMode: "acceptEdits",
+      },
+    },
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(denied.path, "utf8")), denied.path),
+    /\(build\).*worker runtime worker uses permissionMode=acceptEdits; claude executes commands only in bypassPermissions/u,
+  );
+
+  const zcodeDefault = writeFixture({
+    runtimeDefaults: { worker: "zcode", judge: "zcode" },
+    runtimes: {
+      zcode: { driver: "zcode", model: "worker", executable: "/nonexistent/zcode" },
+    },
+  });
+  assert.equal(validateContract(JSON.parse(readFileSync(zcodeDefault.path, "utf8")), zcodeDefault.path).nodes.length, 1);
+});
+
+test("verification rejects a non-executing worker fallback and ignores the judge permission mode", () => {
+  const deniedFallback = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "worker" },
+    runtimes: {
+      worker: {
+        driver: "replay",
+        model: "worker",
+        vendor: "recorded-worker",
+        executable: "/nonexistent/replay",
+        fallback: "backup",
+      },
+      backup: {
+        driver: "zcode",
+        model: "backup",
+        executable: "/nonexistent/zcode",
+        permissionMode: "edit",
+      },
+    },
+  });
+  assert.throws(
+    () => validateContract(JSON.parse(readFileSync(deniedFallback.path, "utf8")), deniedFallback.path),
+    /\(build\).*worker fallback runtime backup uses permissionMode=edit; zcode executes commands only in yolo/u,
+  );
+
+  const judgeDenied = writeFixture({
+    runtimeDefaults: { worker: "worker", judge: "judge" },
+    runtimes: {
+      worker: { driver: "codex", model: "worker", executable: "/nonexistent/codex" },
+      judge: {
+        driver: "claude",
+        model: "judge",
+        executable: "/nonexistent/claude",
+        permissionMode: "acceptEdits",
+      },
+    },
+    nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: { failOn: ["critical"] } }],
+  });
+  assert.equal(validateContract(JSON.parse(readFileSync(judgeDenied.path, "utf8")), judgeDenied.path).nodes[0].gate.enabled, true);
+});
+
 test("a gate-enabled node whose worker and judge runtime share a vendor is rejected by name", () => {
   const { path } = writeFixture({
     runtimeDefaults: { worker: "worker", judge: "worker" },

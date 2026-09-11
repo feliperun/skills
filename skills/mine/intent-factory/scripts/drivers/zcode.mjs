@@ -48,6 +48,9 @@ export const zcodeDriver = {
     streamsOutput: false,
   },
 
+  // build/edit/plan do not execute commands; command() defaults to yolo.
+  permissionExecution: { field: "permissionMode", executingModes: ["yolo"], defaultMode: "yolo" },
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_ZCODE_BIN ?? runtime.executable ?? "zcode";

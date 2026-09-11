@@ -43,6 +43,13 @@ export const codexDriver = {
     streamsOutput: true,
   },
 
+  // Every sandbox mode executes commands; sandbox only bounds their effects.
+  permissionExecution: {
+    field: "sandbox",
+    executingModes: ["read-only", "workspace-write", "danger-full-access"],
+    defaultMode: "workspace-write",
+  },
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_CODEX_BIN ?? runtime.executable ?? "codex";

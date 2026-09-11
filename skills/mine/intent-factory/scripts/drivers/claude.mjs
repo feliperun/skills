@@ -47,6 +47,9 @@ export const claudeDriver = {
     streamsOutput: true,
   },
 
+  // Headless acceptEdits denies Bash; bypassPermissions executes commands.
+  permissionExecution: { field: "permissionMode", executingModes: ["bypassPermissions"], defaultMode: "acceptEdits" },
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_CLAUDE_BIN ?? runtime.executable ?? "claude";

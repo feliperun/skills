@@ -49,6 +49,14 @@ const CAPABILITY_NAMES = new Set([
 
 /** @typedef {DriverCommand & {driver: string, model: string, capabilities: DriverCapabilities}} ProviderCommand */
 
+/**
+ * Which runtime field controls command execution, which values execute, and
+ * the value used when the contract omits that field. `null` means the driver
+ * has no permission mode that can deny command execution.
+ *
+ * @typedef {{field: "permissionMode"|"sandbox", executingModes: string[], defaultMode: string}|null} PermissionExecutionPolicy
+ */
+
 /** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string, resetAt?: string|null}|null, exhaustedUntil?: string|null, judgeCandidates?: number}} ProviderEnvelope */
 
 /**
@@ -78,7 +86,7 @@ const CAPABILITY_NAMES = new Set([
  * One provider adapter: capabilities plus executable, version, command, and
  * result-normalization behavior.
  *
- * @typedef {{capabilities: DriverCapabilities, executable: (runtime: DriverRuntime) => string, versionArgs: (runtime: DriverRuntime) => string[], parseVersion: (stdout: string, stderr?: string) => string|null, command: (runtime: DriverRuntime, prompt: string, options: CommandOptions) => DriverCommand, normalize: (stdout: string, exitCode: number|null, signal: string|null, options?: NormalizeOptions) => ProviderEnvelope}} DriverAdapter
+ * @typedef {{capabilities: DriverCapabilities, permissionExecution: PermissionExecutionPolicy, executable: (runtime: DriverRuntime) => string, versionArgs: (runtime: DriverRuntime) => string[], parseVersion: (stdout: string, stderr?: string) => string|null, command: (runtime: DriverRuntime, prompt: string, options: CommandOptions) => DriverCommand, normalize: (stdout: string, exitCode: number|null, signal: string|null, options?: NormalizeOptions) => ProviderEnvelope}} DriverAdapter
  */
 
 /**
@@ -105,6 +113,17 @@ export function getDriver(name) {
  */
 export function driverCapabilities(runtime) {
   return { ...getDriver(runtime.driver).capabilities };
+}
+
+/**
+ * @param {{driver: string, permissionMode?: string, sandbox?: string}} runtime
+ * @returns {{executes: boolean, field: "permissionMode"|"sandbox"|null, mode: string|null, executingModes: string[]}}
+ */
+export function resolvePermissionExecution(runtime) {
+  const policy = getDriver(runtime.driver).permissionExecution;
+  if (!policy) return { executes: true, field: null, mode: null, executingModes: [] };
+  const mode = /** @type {string} */ (runtime[policy.field] ?? policy.defaultMode);
+  return { executes: policy.executingModes.includes(mode), field: policy.field, mode, executingModes: policy.executingModes };
 }
 
 /**

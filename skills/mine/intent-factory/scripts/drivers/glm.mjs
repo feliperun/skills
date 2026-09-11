@@ -39,6 +39,9 @@ export const glmDriver = {
     streamsOutput: true,
   },
 
+  // Same Claude-compatible permission behavior as claudeDriver.
+  permissionExecution: { field: "permissionMode", executingModes: ["bypassPermissions"], defaultMode: "acceptEdits" },
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_GLM_BIN ?? runtime.executable ?? "claude";

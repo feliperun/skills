@@ -21,6 +21,9 @@ export const agyDriver = {
     streamsOutput: true,
   },
 
+  // command() always passes --dangerously-skip-permissions.
+  permissionExecution: null,
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_AGY_BIN ?? runtime.executable ?? "agy";

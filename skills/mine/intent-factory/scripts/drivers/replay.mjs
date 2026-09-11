@@ -39,6 +39,9 @@ export const replayDriver = {
     streamsOutput: false,
   },
 
+  // A recording exposes no permission mode.
+  permissionExecution: null,
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_REPLAY_BIN

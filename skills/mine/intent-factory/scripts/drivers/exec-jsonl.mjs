@@ -75,6 +75,9 @@ export const execJsonlDriver = {
     streamsOutput: false,
   },
 
+  // The wrapper protocol exposes no permission mode.
+  permissionExecution: null,
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_EXEC_JSONL_BIN ?? runtime.executable ?? "exec-jsonl";

@@ -53,6 +53,10 @@ export const dshDriver = {
     streamsOutput: true,
   },
 
+  // sandbox maps to DSH_PERMISSION_MODE. The default workspace-write needs
+  // approvals a detached run cannot answer; danger-full-access does not.
+  permissionExecution: { field: "sandbox", executingModes: ["danger-full-access"], defaultMode: "workspace-write" },
+
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
     return process.env.INTENT_FACTORY_DSH_BIN ?? runtime.executable ?? "dsh";

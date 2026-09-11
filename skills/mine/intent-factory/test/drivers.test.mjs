@@ -11,6 +11,7 @@ import {
   normalizeProviderResult,
   probeRuntime,
   providerCommand,
+  resolvePermissionExecution,
 } from "../scripts/drivers/index.mjs";
 import {
   EXEC_JSONL_PROTOCOL,
@@ -140,6 +141,50 @@ test("all provider adapters report explicit capabilities and transport", () => {
     assert.ok(Object.keys(capabilities).includes("tokenBudget"));
     assert.ok(Object.keys(capabilities).includes("costBudget"));
     assert.deepEqual(JSON.parse(JSON.stringify(capabilities)), expected[index]);
+  }
+});
+
+test("provider adapters declare the permission modes that execute commands and their defaults", () => {
+  assert.deepEqual(resolvePermissionExecution({ driver: "claude" }), {
+    executes: false,
+    field: "permissionMode",
+    mode: "acceptEdits",
+    executingModes: ["bypassPermissions"],
+  });
+  assert.equal(resolvePermissionExecution({ driver: "claude", permissionMode: "bypassPermissions" }).executes, true);
+  assert.deepEqual(resolvePermissionExecution({ driver: "glm" }), {
+    executes: false,
+    field: "permissionMode",
+    mode: "acceptEdits",
+    executingModes: ["bypassPermissions"],
+  });
+  assert.deepEqual(resolvePermissionExecution({ driver: "zcode" }), {
+    executes: true,
+    field: "permissionMode",
+    mode: "yolo",
+    executingModes: ["yolo"],
+  });
+  assert.equal(resolvePermissionExecution({ driver: "zcode", permissionMode: "edit" }).executes, false);
+  assert.deepEqual(resolvePermissionExecution({ driver: "dsh" }), {
+    executes: false,
+    field: "sandbox",
+    mode: "workspace-write",
+    executingModes: ["danger-full-access"],
+  });
+  assert.equal(resolvePermissionExecution({ driver: "dsh", sandbox: "danger-full-access" }).executes, true);
+  assert.deepEqual(resolvePermissionExecution({ driver: "codex" }), {
+    executes: true,
+    field: "sandbox",
+    mode: "workspace-write",
+    executingModes: ["read-only", "workspace-write", "danger-full-access"],
+  });
+  for (const driver of ["agy", "exec-jsonl", "replay"]) {
+    assert.deepEqual(resolvePermissionExecution({ driver }), {
+      executes: true,
+      field: null,
+      mode: null,
+      executingModes: [],
+    });
   }
 });
 

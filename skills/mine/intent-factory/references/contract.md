@@ -19,7 +19,7 @@ typecheck`). Schema version is `3`.
   "runtimeDefaults": { "worker": "flash", "judge": "sol" },
   "runtimes": {
     "flash": { "driver": "dsh", "model": "deepseek-flash", "reasoning": "high",
-      "vendor": "deepseek",
+      "vendor": "deepseek", "sandbox": "danger-full-access",
       "config": { "provider": "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" } },
     "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
     "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
@@ -157,6 +157,14 @@ attempt) and is instead refused at execution; see Failover below. Two models of 
 declaring distinct `vendor` strings — a claim about review independence, not a
 formality.
 
+Non-empty `taskPacket.verification` is rejected when the resolved worker or a
+worker fallback cannot execute commands. Adapters declare
+`permissionExecution`: `claude`/`glm` only `bypassPermissions` (default
+`acceptEdits`), `zcode` only `yolo` (also default), `dsh` only
+`danger-full-access` (default `workspace-write`); every `codex` sandbox mode
+executes, and `agy`/`exec-jsonl`/`replay` expose no denying mode. Judge modes
+are excluded because judges review captured results.
+
 - `claude`: `permissionMode` (default `acceptEdits`; a node that runs
   commands needs `bypassPermissions`, since headless `acceptEdits` denies
   execution and the worker can only return `blocked_context`). Executable
@@ -195,17 +203,18 @@ formality.
 - `dsh`: the DeepSeek Harness through the shipped `sdk` JSON-RPC client;
   `headless` drops usage. Normalization assumes streamed `inputTokens` excludes
   `cacheReadTokens`; `usage.jsonl` records it unchanged as uncached input.
-  `config.provider` is required; `model` and `reasoning` pass through verbatim.
-  Its catalogue exposes `deepseek-flash` (default), `deepseek-v4-flash`,
-  `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp`; unknown ids fail in the
-  harness. Authentication stays in `DEEPSEEK_API_KEY`;
+  `config.provider` is required (`deepseek-official`); `model` and `reasoning`
+  pass through verbatim. Its catalogue exposes `deepseek-flash` (default),
+  `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp`;
+  unknown ids fail in the harness. Authentication stays in `DEEPSEEK_API_KEY`;
   `config["api_key.env_key"]` only names it for `preflight`. `sandbox` maps to
   `DSH_PERMISSION_MODE`; omitted, the harness defaults to `workspace-write`
-  with interactive approvals, so detached writes outside the worktree need
-  `danger-full-access`. Every attempt loads `dsh-closed-packet.patch.yml`;
-  `config.patch` stacks one layer. Executable override: `executable` or
-  `INTENT_FACTORY_DSH_BIN`. No default vendor, continuation (`session/resume` is
-  ACP-only), or native schema flag; the judge schema travels in the prompt.
+  whose approvals detached runs cannot answer — a command-running worker
+  declares `danger-full-access`. Every attempt loads
+  `dsh-closed-packet.patch.yml`; `config.patch` stacks one layer. Executable
+  override: `executable` or `INTENT_FACTORY_DSH_BIN`. No default vendor,
+  continuation (`session/resume` is ACP-only), or native schema flag; the judge
+  schema travels in the prompt.
 - `exec-jsonl`: generic driver for a JSONL-protocol executable — one
   `run.request` on stdin, `run.started`/`message`/`run.completed`/
   `run.failed` on stdout. Set `executable` (or
