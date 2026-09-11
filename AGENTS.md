@@ -73,6 +73,6 @@ Before starting new work here, check `.runs/`: if a campaign is active or a run 
 - intent-factory campaign `intent-factory-close-c1-20260910`: active — read `.runs/campaigns/intent-factory-close-c1-20260910/HANDOFF.md`
 - intent-factory campaign `intent-factory-exec-permission-20260911`: active — read `.runs/campaigns/intent-factory-exec-permission-20260911/HANDOFF.md`
 - intent-factory campaign `intent-factory-models-command-20260911`: active — read `.runs/campaigns/intent-factory-models-command-20260911/HANDOFF.md`
-- intent-factory run `if-audit-zcode-20260911`: active (0/1 nodes done) — read `.runs/if-audit-zcode-20260911/STATUS.md`; `resume` or `supervise` it
-- intent-factory run `if-models-command-20260911-r2`: active (0/1 nodes done) — read `.runs/if-models-command-20260911-r2/STATUS.md`; `resume` or `supervise` it
+- intent-factory run `if-audit-zcode-20260911-r2`: active (0/1 nodes done) — read `.runs/if-audit-zcode-20260911-r2/STATUS.md`; `resume` or `supervise` it
+- intent-factory run `if-models-command-20260911-r3`: active (0/1 nodes done) — read `.runs/if-models-command-20260911-r3/STATUS.md`; `resume` or `supervise` it
 <!-- intent-factory-active:end -->
