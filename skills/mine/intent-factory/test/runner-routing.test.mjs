@@ -691,7 +691,7 @@ test("Claude phase reuse passes the first explicit session through --resume", as
   const path = writeContract(directory, fixture({
     id: "claude-phase-reuse-run",
     runtimeDefaults: { worker: "provider", judge: "provider" },
-    runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
+    runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -710,7 +710,7 @@ test("a completed phase without a continuation ID remains a fresh invocation", a
   const path = writeContract(directory, fixture({
     id: "phase-no-id-run",
     runtimeDefaults: { worker: "provider", judge: "provider" },
-    runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
+    runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
     nodes: [
       { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
       { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
@@ -733,7 +733,7 @@ test("a non-continuing runtime gets a deterministic fresh phase handoff", async 
     const path = writeContract(directory, fixture({
       id: "phase-no-continuation-run",
       runtimeDefaults: { worker: "provider", judge: "provider" },
-      runtimes: { provider: { driver: "claude", model: "test-model", executable: fake.executable } },
+      runtimes: { provider: { driver: "claude", model: "test-model", permissionMode: "bypassPermissions", executable: fake.executable } },
       nodes: [
         { id: "first", type: "backend", phase: "implementation", taskPacket: packet(), gate: false },
         { id: "second", type: "backend", phase: "implementation", dependsOn: ["first"], taskPacket: packet(), gate: false },
