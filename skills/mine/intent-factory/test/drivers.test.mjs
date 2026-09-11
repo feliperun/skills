@@ -36,7 +36,6 @@ test("all provider adapters report explicit capabilities and transport", () => {
     { driver: "codex", model: "m" },
     { driver: "claude", model: "m" },
     { driver: "agy", model: "m" },
-    { driver: "glm", model: "m" },
     { driver: "zcode", model: "m" },
     { driver: "dsh", model: "m", executable: "dsh", config: { provider: "deepseek-official" } },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
@@ -80,19 +79,6 @@ test("all provider adapters report explicit capabilities and transport", () => {
       usage: true,
       cost: false,
       toolPolicy: false,
-      streamsOutput: true,
-    },
-    {
-      structuredOutput: true,
-      promptTransport: "stdin",
-      sandbox: false,
-      permissions: true,
-      continuation: true,
-      tokenBudget: false,
-      costBudget: true,
-      usage: true,
-      cost: true,
-      toolPolicy: true,
       streamsOutput: true,
     },
     {
@@ -153,12 +139,6 @@ test("provider adapters declare the permission modes that execute commands and t
     executingModes: ["bypassPermissions"],
   });
   assert.equal(resolvePermissionExecution({ driver: "claude", permissionMode: "bypassPermissions" }).executes, true);
-  assert.deepEqual(resolvePermissionExecution({ driver: "glm" }), {
-    executes: false,
-    field: "permissionMode",
-    mode: "acceptEdits",
-    executingModes: ["bypassPermissions"],
-  });
   assert.deepEqual(resolvePermissionExecution({ driver: "zcode" }), {
     executes: true,
     field: "permissionMode",
@@ -199,7 +179,6 @@ test("stdin adapters keep prompts out of argv and argv adapters enforce byte lim
   for (const runtime of [
     { driver: "codex", model: "m" },
     { driver: "claude", model: "m" },
-    { driver: "glm", model: "m" },
     { driver: "exec-jsonl", model: "m", executable: "wrapper" },
   ]) {
     const command = providerCommand(runtime, prompt);
@@ -280,19 +259,16 @@ test("Codex rollout-budget exhaustion is a provider exhaustion event", () => {
 });
 
 test("quota exhaustion routes through the declared failover edge (normalizer)", () => {
-  // N05: after ten claude CLI retries the Z.ai stream ends with an assistant
-  // rate_limit record and a terminal api_error result; the envelope must be
-  // exhausted so the declared failover edge fires.
-  const glmIncident = [
-    { type: "assistant", error: "rate_limit", is_api_error_message: true, content: "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-04 21:44:15][Request was not sent]" },
-    { type: "result", result: "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-04 21:44:15]", is_error: true, terminal_reason: "api_error", session_id: "quota-session", usage: { input_tokens: 5, output_tokens: 1 } },
-  ].map((event) => JSON.stringify(event)).join("\n");
-  const glm = normalizeProviderResult("glm", glmIncident, 1, null);
-  assert.equal(glm.status, "exhausted");
-  assert.equal(glm.error?.code, "quota_exhausted");
-  assert.match(glm.error?.message ?? "", /2026-09-04 21:44:15/u);
-  assert.equal(glm.continuationId, "quota-session");
-  assert.deepEqual(glm.usage, { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: null });
+  // N05: the Z.ai weekly limit refusal. The incident was recorded on a
+  // Claude-compatible CLI pinned to Z.ai; the wording is the vendor's own and
+  // reaches the ZCode harness the same way, before any result object. The
+  // envelope must be exhausted so the declared failover edge fires.
+  const zcodeQuota = normalizeProviderResult("zcode", "", 1, null, {
+    stderr: "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-04 21:44:15][Request was not sent]\n",
+  });
+  assert.equal(zcodeQuota.status, "exhausted");
+  assert.equal(zcodeQuota.error?.code, "quota_exhausted");
+  assert.match(zcodeQuota.error?.message ?? "", /2026-09-04 21:44:15/u);
 
   // N05's codex equivalent: a turn.failed carrying the usage-limit text.
   const codexQuota = normalizeProviderResult("codex", [
@@ -405,7 +381,6 @@ test("all adapter normalizers return the common envelope", () => {
       { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } },
     ],
     claude: [{ type: "result", result: "claude", session_id: "c", usage: { input_tokens: 2 } }],
-    glm: [{ type: "result", result: "glm", session_id: "g", usage: { input_tokens: 5, output_tokens: 1 } }],
     agy: [{ event: "result", result: { status: "SUCCESS", response: "agy", conversation_id: "a", usage: {} } }],
     "exec-jsonl": [{ schemaVersion: 1, type: "run.completed", result: { answer: 1 }, continuationId: "e", usage: { inputTokens: 3 } }],
   };
@@ -562,98 +537,17 @@ test("builds agy commands with unambiguous equals-form flags", () => {
   assert.ok(command.args.includes("--print=task with spaces"));
 });
 
-test("builds glm commands pinned to the Z.ai endpoint", () => {
-  const previous = {
-    ZAI_API_KEY: process.env.ZAI_API_KEY,
-    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
-    INTENT_FACTORY_GLM_BIN: process.env.INTENT_FACTORY_GLM_BIN,
-    INTENT_FACTORY_TEST_GLM_TOKEN: process.env.INTENT_FACTORY_TEST_GLM_TOKEN,
-  };
-  process.env.ZAI_API_KEY = "test-zai-token";
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
-  delete process.env.INTENT_FACTORY_GLM_BIN;
-  delete process.env.INTENT_FACTORY_TEST_GLM_TOKEN;
-  try {
-    const command = providerCommand({ driver: "glm", model: "glm-5.3[1m]" }, "task", { schema: JUDGE_SCHEMA });
-    assert.equal(command.executable, "claude");
-    assert.deepEqual(command.args, [
-      "-p",
-      "--model",
-      "glm-5.3[1m]",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--permission-mode",
-      "acceptEdits",
-      "--disable-slash-commands",
-      "--strict-mcp-config",
-      "--setting-sources",
-      "",
-      "--tools",
-      "Read,Edit,Write,Bash,Glob,Grep",
-      "--json-schema",
-      JSON.stringify(JUDGE_SCHEMA),
-    ]);
-    assert.equal(command.promptTransport, "stdin");
-    assert.equal(command.input, "task");
-    assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.z.ai/api/anthropic");
-    assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "test-zai-token");
-    assert.equal(command.env?.ANTHROPIC_MODEL, "glm-5.3[1m]");
-    assert.equal(command.env?.ANTHROPIC_API_KEY, null, "ambient Anthropic key must be removed");
-    assert.equal(command.env?.API_TIMEOUT_MS, "3000000");
-    assert.equal(command.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
-    assert.equal(command.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL, "glm-5.3-flash[1m]", "a 1M-context runtime routes small-model calls to the 1M flash tier");
-    assert.equal(command.env?.ANTHROPIC_DEFAULT_SONNET_MODEL, "glm-5.3[1m]");
-    assert.equal(command.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, "glm-5.3[1m]");
-    assert.equal(command.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1048576");
-
-    const flash = providerCommand({ driver: "glm", model: "glm-5.3-flash" }, "task");
-    assert.equal(flash.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL, "glm-5.3-flash");
-    assert.equal(flash.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000", "a model without the [1m] suffix keeps the 200k compaction window");
-
-    const custom = providerCommand({
-      driver: "glm",
-      model: "glm-5.3",
-      config: { base_url: "https://custom.example/api", "auth_token.env_key": "INTENT_FACTORY_TEST_GLM_TOKEN" },
-    }, "task");
-    assert.equal(custom.env?.ANTHROPIC_BASE_URL, "https://custom.example/api");
-    assert.equal("ANTHROPIC_AUTH_TOKEN" in (custom.env ?? {}), false, "an unresolved token is omitted, not blanked");
-
-    process.env.INTENT_FACTORY_TEST_GLM_TOKEN = "custom-token";
-    const resolved = providerCommand({
-      driver: "glm",
-      model: "glm-5.3",
-      config: { "auth_token.env_key": "INTENT_FACTORY_TEST_GLM_TOKEN" },
-    }, "task");
-    assert.equal(resolved.env?.ANTHROPIC_AUTH_TOKEN, "custom-token");
-
-    const continued = providerCommand({ driver: "glm", model: "glm-5.3" }, "next task", {
-      continuationId: "glm-session-1",
-    });
-    assert.equal(continued.promptTransport, "stdin");
-    assert.equal(continued.input, "next task");
-    assert.equal(continued.args.includes("next task"), false);
-    assert.deepEqual(continued.args.slice(0, 4), ["-p", "--resume", "glm-session-1", "--model"]);
-    assert.equal(continued.args.includes("--continue"), false);
-    assert.equal(continued.args.includes("--max-budget-usd"), false);
-  } finally {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-});
-
-test("accepts a glm runtime in contracts and routes nodes to it", () => {
-  const directory = mkdtempSync(join(tmpdir(), "runner-glm-contract-"));
+test("accepts a zcode runtime in contracts and routes nodes to it", () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-zcode-contract-"));
   const value = fixture();
   /** @type {Record<string, Record<string, unknown>>} */
   const runtimes = /** @type {Record<string, Record<string, unknown>>} */ (value.runtimes);
-  runtimes.glm = { driver: "glm", model: "glm-5.3[1m]", config: { "auth_token.env_key": "ZAI_API_KEY" } };
+  // guard-exempt: schema-only — validation and routing only, no spawn.
+  runtimes["zcode-glm"] = { driver: "zcode", model: "glm-5.3[1m]", config: { "auth_token.env_key": "ZAI_API_KEY" } };
   const path = writeContract(directory, value);
   const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
-  assert.equal(contract.runtimes.glm.driver, "glm");
-  assert.equal(routeRuntime(contract, { id: "g", type: "backend", runtime: "glm", gate: {} }).id, "glm");
+  assert.equal(contract.runtimes["zcode-glm"].driver, "zcode");
+  assert.equal(routeRuntime(contract, { id: "g", type: "backend", runtime: "zcode-glm", gate: {} }).id, "zcode-glm");
 });
 
 test("uses provider-compatible explicit types in the judge schema", () => {
@@ -1035,7 +929,6 @@ test("live session metrics expose only what each driver's events prove", () => {
     { turns: 2, cacheReadInputTokens: 60, toolCalls: 2, completed: false },
     "assistant turns, summed per-request cache reads, and tool_use blocks",
   );
-  assert.deepEqual(liveSessionMetrics("glm", claude), { turns: 2, cacheReadInputTokens: 60, toolCalls: 2, completed: false });
   const terminal = `${claude}\n${JSON.stringify({ type: "result", result: "ok", usage: { input_tokens: 15, cache_read_input_tokens: 90 } })}`;
   assert.deepEqual(
     liveSessionMetrics("claude", terminal),
@@ -1063,7 +956,7 @@ test("the codex driver bounds the harness preamble before the runtime's own conf
 });
 
 test("claude-compatible drivers bound the harness preamble and accept a tools override", () => {
-  for (const runtime of [{ driver: "claude", model: "m" }, { driver: "glm", model: "glm-5.3[1m]" }]) {
+  for (const runtime of [{ driver: "claude", model: "m" }]) {
     const args = providerCommand(runtime, "work").args;
     const sources = args.indexOf("--setting-sources");
     assert.ok(args.includes("--disable-slash-commands"), `${runtime.driver} loads no skills`);
@@ -1082,7 +975,7 @@ test("claude-compatible drivers bound the harness preamble and accept a tools ov
 test("toolPolicy travels only the Claude-compatible hook settings boundary", () => {
   const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
   // Claude-compatible adapters prove enforcement by installing hook settings.
-  for (const runtime of [{ driver: "claude", model: "m" }, { driver: "glm", model: "glm-5.3[1m]" }]) {
+  for (const runtime of [{ driver: "claude", model: "m" }]) {
     const command = providerCommand(runtime, "work", { toolPolicy: policy });
     const settingsIndex = command.args.indexOf("--settings");
     assert.ok(settingsIndex >= 0, `${runtime.driver} installs the hook settings`);

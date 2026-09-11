@@ -24,7 +24,6 @@ typecheck`). Schema version is `3`.
     "luna": { "driver": "codex", "model": "gpt-5.6-luna", "reasoning": "xhigh" },
     "sol": { "driver": "codex", "model": "gpt-5.6-sol", "reasoning": "xhigh", "vendor": "openai-sol" },
     "opus": { "driver": "claude", "model": "opus", "permissionMode": "acceptEdits" },
-    "glm": { "driver": "glm", "model": "glm-5.3[1m]", "config": { "auth_token.env_key": "ZAI_API_KEY" } },
     "zcode-flash": { "driver": "zcode", "model": "glm-5.3-flash", "vendor": "zhipu-flash", "permissionMode": "edit" },
     "zcode-pro": { "driver": "zcode", "model": "glm-5.3", "vendor": "zhipu-pro", "permissionMode": "plan" },
     "agy-flash": { "driver": "agy", "model": "gemini-3.7-flash-low" }
@@ -136,17 +135,22 @@ one `artifacts` entry: the execution packet for the next node.
 Resolve a worker as `nodes[].runtime`, then `runtimeDefaults.worker`; a judge
 as `nodes[].gate.runtime`, then `runtimeDefaults.judge`. When `runtimes` and
 `runtimeDefaults` are both omitted, the factory composes them from the
-installed-driver catalogue: the cheapest available runtime executes, the
-strongest runtime of a *different vendor* judges, persisted in
-`routing.assignments`; no admissible cross-vendor judge fails by name
-(`runtime_assignment_judge_unavailable`).
+discovery catalogue (`DISCOVERY_RUNTIME_DEFINITIONS`: `dsh-deepseek`,
+`zcode-glm`, `agy-gemini` at tier 1, `codex-gpt` and `claude-sonnet` at tier 2;
+available when the binary answers and every `config["*.env_key"]` it names is
+set): the cheapest available runtime executes, the strongest runtime of a
+*different vendor* judges, persisted in `routing.assignments`; no admissible
+cross-vendor judge fails by name (`runtime_assignment_judge_unavailable`).
 
-`driver` is `claude`, `codex`, `agy`, `glm`, `dsh`, `zcode`, `exec-jsonl`, or
-`replay`. Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the
+`driver` names the harness that runs the turn (`claude`, `codex`, `agy`, `dsh`,
+`zcode`, `exec-jsonl`, `replay`) and `model` what that harness asks; the two
+vary independently — DeepSeek answers through `dsh`, GLM through `zcode`. Name
+a runtime id `<harness>-<model>` so a recorded run says which harness produced
+it; ids take letters, numbers, dot, underscore, dash only. Vendor is resolved (`resolveVendor` in `drivers/index.mjs`), not the
 driver name: an explicit `vendor`, else a provider-config override (a codex
 runtime with `config.model_provider: "deepseek"` is vendor `deepseek`), else
 the driver default (`claude`→anthropic, `codex`→openai, `agy`→google,
-`glm`/`zcode`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
+`zcode`→zhipu); `dsh`/`replay`/`exec-jsonl` have no default and must declare
 `vendor`. Validation rejects a gate-enabled node whose worker and judge
 resolve to the same vendor, and does the same for every runtime in the
 worker's declared fallback chain (rejecting a cycle in that chain outright)
@@ -159,32 +163,27 @@ formality.
 
 Non-empty `taskPacket.verification` is rejected when the resolved worker or a
 worker fallback cannot execute commands. Adapters declare
-`permissionExecution`: `claude`/`glm` only `bypassPermissions` (default
-`acceptEdits`), `zcode` only `yolo` (also default), `dsh` only
-`danger-full-access` (default `workspace-write`); every `codex` sandbox mode
+`permissionExecution`: `claude` only `bypassPermissions` (default
+`acceptEdits`), `zcode` only `yolo` (also default), `dsh` both its default
+`workspace-write` (measured: executes and writes inside the worktree) and
+`danger-full-access` (only for effects outside it); every `codex` sandbox mode
 executes, and `agy`/`exec-jsonl`/`replay` expose no denying mode. Judge modes
 are excluded because judges review captured results.
 
 - `claude`: `permissionMode` (default `acceptEdits`; a node that runs
   commands needs `bypassPermissions`, since headless `acceptEdits` denies
   execution and the worker can only return `blocked_context`). Executable
-  override: `executable` or `INTENT_FACTORY_CLAUDE_BIN`. Claude-compatible
-  adapters (`claude`, `glm`) disable slash commands, MCP, and settings files
-  on every invocation and restrict tools to `runtime.tools` (default `Read,
-  Edit, Write, Bash, Glob, Grep`); `--bare` is never used because it also
-  disables the tool-policy hook.
+  override: `executable` or `INTENT_FACTORY_CLAUDE_BIN`. It disables slash
+  commands, MCP, and settings files on every invocation and restricts tools to
+  `runtime.tools` (default `Read, Edit, Write, Bash, Glob, Grep`); `--bare` is
+  never used because it also disables the tool-policy hook.
 - `codex`: `sandbox` (`read-only`, `workspace-write` default,
   `danger-full-access`); arbitrary `config` entries serialize as `-c
   key=value`; disables browser/computer-use/app/sub-agent tooling and MCP by
   default (`CODEX_PREAMBLE_OVERRIDES`). Executable override: `executable` or
   `INTENT_FACTORY_CODEX_BIN`. Never rely on a profile name to select a custom
   provider — Codex silently accepts unknown profiles.
-- `glm`: runs GLM models through a Claude-Code-compatible CLI pinned to the
-  Z.ai Anthropic-compatible endpoint; injects `ANTHROPIC_BASE_URL`,
-  `ANTHROPIC_MODEL`, `ANTHROPIC_AUTH_TOKEN`, strips ambient
-  `ANTHROPIC_API_KEY`. Token from `config["auth_token.env_key"]` (default
-  `ZAI_API_KEY`). Executable override: `executable` or `INTENT_FACTORY_GLM_BIN`.
-- `zcode`: runs GLM models through Z.ai's own harness CLI headlessly
+- `zcode`: the GLM route — Z.ai's own harness CLI, driven headlessly
   (`zcode --prompt --json`; the adapter installs the shim itself, and
   `executable` / `INTENT_FACTORY_ZCODE_BIN` override). Model and endpoint travel
   as `ZCODE_MODEL` (`config.provider`/model, default `glm`/model; a `[1m]` model
@@ -209,9 +208,7 @@ are excluded because judges review captured results.
   (`deepseek-flash` is the default); unknown ids fail in the harness.
   Authentication stays in `DEEPSEEK_API_KEY`;
   `config["api_key.env_key"]` only names it for `preflight`. `sandbox` maps to
-  `DSH_PERMISSION_MODE`; omitted, the harness defaults to `workspace-write`
-  whose approvals detached runs cannot answer — a command-running worker
-  declares `danger-full-access`. Every attempt loads
+  `DSH_PERMISSION_MODE`, default `workspace-write` (above). Every attempt loads
   `dsh-closed-packet.patch.yml`; `config.patch` stacks one layer. Executable
   override: `executable` or `INTENT_FACTORY_DSH_BIN`. No default vendor,
   continuation (`session/resume` is ACP-only), or native schema flag; the judge
@@ -228,7 +225,7 @@ are excluded because judges review captured results.
   emits `replay_exhausted` (exit 1); a path escape in `files` emits
   `replay_path_escape` (exit 2) and writes nothing.
 
-Continuation is capability-gated (`codex`, `claude`, `glm`, `zcode`, `agy`,
+Continuation is capability-gated (`codex`, `claude`, `zcode`, `agy`,
 `exec-jsonl`, `replay` all declare it) and requires an exact fingerprint of
 the runtime definition; a runtime change, a failover hop, or an adapter
 without the capability starts a fresh session carrying prior structured
@@ -271,7 +268,7 @@ failed terminal dependency makes it `blocked`. Terminal states: `done`,
 `no-op`, `blocked`, `failed`, `exhausted`, `stalled`, `canceled` — every node
 ends in exactly one. `stallTimeoutSec` bounds silence on stdout/stderr, but
 only for a driver declaring `streamsOutput` (true for `codex`, `claude`,
-`glm`, `agy`, `dsh`; false for `zcode`, which dumps its turn at exit);
+`agy`, `dsh`; false for `zcode`, which dumps its turn at exit);
 others fall back to `timeoutSec` alone.
 `timeoutSec` (default 2400s) caps one invocation and may be overridden per
 node; a node is bounded by `(1 + maxRevisions) × 2 × timeoutSec`. Both clocks

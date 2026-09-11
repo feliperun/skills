@@ -18,4 +18,4 @@ interface:
     - "doctor"
     - "JSON status"
     - "exec-jsonl"
-    - "glm"
+    - "zcode"

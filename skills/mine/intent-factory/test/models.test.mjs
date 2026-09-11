@@ -22,7 +22,7 @@ function hermeticEnv(overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), "models-absent-"));
   /** @type {Record<string, string>} */
   const env = {};
-  for (const driver of ["claude", "codex", "agy", "glm", "dsh", "zcode", "exec-jsonl", "replay"]) {
+  for (const driver of ["claude", "codex", "agy", "dsh", "zcode", "exec-jsonl", "replay"]) {
     env[`INTENT_FACTORY_${driver.replace(/-/gu, "_").toUpperCase()}_BIN`] = join(directory, `absent-${driver}`);
   }
   return { ...env, ...overrides };

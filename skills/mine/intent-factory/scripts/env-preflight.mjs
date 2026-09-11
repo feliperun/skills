@@ -337,7 +337,6 @@ const DRIVER_BIN_OVERRIDES = Object.freeze({
   codex: "INTENT_FACTORY_CODEX_BIN",
   claude: "INTENT_FACTORY_CLAUDE_BIN",
   agy: "INTENT_FACTORY_AGY_BIN",
-  glm: "INTENT_FACTORY_GLM_BIN",
   zcode: "INTENT_FACTORY_ZCODE_BIN",
   "exec-jsonl": "INTENT_FACTORY_EXEC_JSONL_BIN",
 });
@@ -422,11 +421,10 @@ export async function doctorCommand(contractPath, values) {
   // absent on purpose — its binary is a shim the driver writes on first use, so
   // a PATH miss here is the normal state of a fresh machine, not a missing
   // dependency; `dsh` runs through its own SDK client, not a PATH binary.
-  for (const binary of ["codex", "claude", "agy", "glm", "exec-jsonl"]) {
+  for (const binary of ["codex", "claude", "agy", "exec-jsonl"]) {
     const overrideName = /** @type {Record<string, string>} */ (DRIVER_BIN_OVERRIDES)[binary];
     const overridden = overriddenDrivers.has(binary) || Boolean(process.env[overrideName]);
-    // The glm driver drives a Claude-Code-compatible CLI; its default binary is `claude`.
-    const found = findExecutable(binary === "glm" && !overridden ? "claude" : binary);
+    const found = findExecutable(binary);
     const required = usedDrivers.has(binary) && !overridden;
     checks.push({
       name: `binary ${binary}`,

@@ -4,22 +4,17 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeAssignments, nextSameTierRuntime, normalizeProviderAvailability } from "../scripts/runtime-discovery.mjs";
-import { probeRuntime } from "../scripts/drivers/index.mjs";
+import { normalizeProviderResult, probeRuntime } from "../scripts/drivers/index.mjs";
 
 const ready = { available: true, exhaustedUntil: null, reason: "ready" };
 
 test("normalizes Z.ai code 1310 with its reset timestamp", () => {
-  const availability = normalizeProviderAvailability("glm", JSON.stringify({
-    type: "assistant",
-    error: "rate_limit",
-    is_api_error_message: true,
-    content: "[1310] Weekly limit exhausted. Your limit will reset at 2026-09-04 21:44:15",
-  }) + "\n" + JSON.stringify({
-    type: "result",
-    result: "quota exhausted",
-    is_error: true,
-    terminal_reason: "api_error",
-  }), 1, null);
+  // Z.ai's weekly-limit refusal reaches the ZCode harness before any result
+  // object, so the vendor's code and the reset instant arrive on stderr alone.
+  const envelope = normalizeProviderResult("zcode", "", 1, null, {
+    stderr: "Error: [1310] Weekly limit exhausted. Your limit will reset at 2026-09-04 21:44:15\n",
+  });
+  const availability = normalizeProviderAvailability("zcode", envelope);
   assert.equal(availability.available, false);
   assert.equal(availability.reason, "quota_exhausted");
   assert.equal(availability.exhaustedUntil, "2026-09-04T21:44:15.000Z");

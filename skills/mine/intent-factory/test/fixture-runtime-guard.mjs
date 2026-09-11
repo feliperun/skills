@@ -1,4 +1,4 @@
-const REPORTED_DRIVERS = new Set(["codex", "claude", "agy", "glm", "dsh", "zcode"]);
+const REPORTED_DRIVERS = new Set(["codex", "claude", "agy", "dsh", "zcode"]);
 const EXEMPTION_MARKER = "guard-exempt: schema-only";
 
 /**
@@ -138,7 +138,7 @@ function parseRuntimeEntry(entryText) {
 /**
  * Scan a test file's source for `runtimes: { ... }` fixture blocks and report
  * every entry whose driver would resolve a real provider CLI (codex, claude,
- * agy, glm, dsh, zcode) but declares no `executable`, since env-preflight then
+ * agy, dsh, zcode) but declares no `executable`, since env-preflight then
  * falls back to whatever binary of that name is first on PATH.
  *
  * @param {string} source

@@ -1,64 +1,58 @@
-import { normalizeProviderResult, probeRuntime } from "./drivers/index.mjs";
+import { normalizeProviderAvailability, probeRuntime } from "./drivers/index.mjs";
+
+// Availability normalization belongs to the adapter registry, which is where
+// each provider's own exhaustion, balance, and authentication wording is
+// already classified. Re-exported here so discovery callers keep one import
+// site; a second copy of these two functions is how they drift apart.
+export { exhaustedUntilOf, normalizeProviderAvailability } from "./drivers/index.mjs";
 
 /** @typedef {import("./contract.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {{driver?: string, model?: string, vendor: string, tier?: number|string, costRank?: number, [key: string]: unknown}} RuntimeLike */
 /** @typedef {{runtimes: Record<string, RuntimeLike>, runtimeDefaults?: {worker?: string, judge?: string}, nodes?: {id: string, runtime?: string, gate: {enabled: boolean, runtime?: string}}[]}} RuntimeContract */
 /** @typedef {{available: boolean, exhaustedUntil: string|null, reason: string}} RuntimeAvailability */
+/** @typedef {{driver: string, model: string, vendor: string, tier: number, costRank: number, config?: Record<string, unknown>}} DiscoveryRuntime */
 
 /**
  * Candidates used when a contract omits its runtime catalogue. The catalogue
- * only names adapters; availability still comes from the installed binary.
+ * only names harnesses; availability still comes from the installed binary.
+ *
+ * Every id is `<harness>-<model>`, saying out loud what the fields already
+ * say: `driver` is the harness that runs the turn, `model` is what that
+ * harness asks, and the two vary independently — DeepSeek answers through the
+ * `dsh` harness, GLM through `zcode`. An id naming only one half (the bare
+ * `glm` this catalogue used to carry, which was at once a model family, a
+ * vendor, and an adapter name) hides which harness a recorded run used. The
+ * separator is a dash because `contract.mjs` admits no `:` in an id.
+ *
+ * Declaration order is the tie-break `composeAssignments` applies inside a
+ * tier, so the cheap harnesses lead: the first available tier-1 entry works
+ * and the strongest available entry of another vendor judges.
+ *
+ * @type {Readonly<Record<string, DiscoveryRuntime>>}
  */
 export const DISCOVERY_RUNTIME_DEFINITIONS = Object.freeze({
-  glm: { driver: "glm", model: "glm-5.3", vendor: "zhipu", tier: 1, costRank: 1 },
-  agy: { driver: "agy", model: "gemini-3.7-flash-low", vendor: "google", tier: 1, costRank: 1 },
-  codex: { driver: "codex", model: "gpt-5.6", vendor: "openai", tier: 2, costRank: 2 },
-  claude: { driver: "claude", model: "claude-sonnet-5", vendor: "anthropic", tier: 2, costRank: 2 },
+  // `dsh` defaults no vendor and no provider route, so both are declared here
+  // or nothing can build a command from this entry.
+  "dsh-deepseek": {
+    driver: "dsh",
+    model: "deepseek-flash",
+    vendor: "deepseek",
+    config: { provider: "deepseek-official", "api_key.env_key": "DEEPSEEK_API_KEY" },
+    tier: 1,
+    costRank: 1,
+  },
+  "zcode-glm": {
+    driver: "zcode",
+    model: "glm-5.3",
+    vendor: "zhipu",
+    config: { "auth_token.env_key": "ZAI_API_KEY" },
+    tier: 1,
+    costRank: 1,
+  },
+  "agy-gemini": { driver: "agy", model: "gemini-3.8-flash-low", vendor: "google", tier: 1, costRank: 1 },
+  "codex-gpt": { driver: "codex", model: "gpt-5.6", vendor: "openai", tier: 2, costRank: 2 },
+  "claude-sonnet": { driver: "claude", model: "claude-sonnet-5", vendor: "anthropic", tier: 2, costRank: 2 },
 });
-
-/**
- * Normalize a provider envelope or recorded provider response into the
- * availability shape used by discovery and routing.
- *
- * @param {string|{driver: string}} runtimeOrDriver
- * @param {unknown} response
- * @param {number|null} [exitCode]
- * @param {string|null} [signal]
- * @returns {RuntimeAvailability}
- */
-export function normalizeProviderAvailability(runtimeOrDriver, response, exitCode = 0, signal = null) {
-  let envelope;
-  try {
-    envelope = isEnvelope(response)
-      ? response
-      : normalizeProviderResult(runtimeOrDriver, String(response ?? ""), exitCode, signal);
-  } catch (error) {
-    return { available: false, exhaustedUntil: null, reason: error instanceof Error ? error.message : "provider_unavailable" };
-  }
-  const error = envelope.error && typeof envelope.error === "object"
-    ? /** @type {Record<string, unknown>} */ (envelope.error)
-    : null;
-  const code = typeof error?.code === "string" ? error.code : "";
-  const message = typeof error?.message === "string" ? error.message : "";
-  const text = `${code} ${message}`;
-  if (envelope.status === "done" || envelope.status === "no-op") return { available: true, exhaustedUntil: null, reason: "ready" };
-  if (envelope.status === "exhausted" || /quota|rate.?limit|usage limit|limit exhausted|1310/iu.test(text)) {
-    return { available: false, exhaustedUntil: exhaustedUntilOf(envelope), reason: code || "quota_exhausted" };
-  }
-  if (/auth|credential|unauthori[sz]ed|forbidden|invalid.*(?:key|token)|(?:api|access) key|login/iu.test(text)) {
-    return { available: false, exhaustedUntil: null, reason: "authentication_failed" };
-  }
-  return { available: false, exhaustedUntil: null, reason: code || "provider_unavailable" };
-}
-
-/** @param {unknown} envelope @returns {string|null} */
-export function exhaustedUntilOf(envelope) {
-  if (!isEnvelope(envelope)) return null;
-  const error = envelope.error && typeof envelope.error === "object"
-    ? /** @type {Record<string, unknown>} */ (envelope.error)
-    : null;
-  return normalizeReset(envelope.exhaustedUntil ?? error?.resetAt ?? extractReset(typeof error?.message === "string" ? error.message : ""));
-}
 
 /**
  * Discover runtime binaries without sending a model prompt. Tests can pass
@@ -180,24 +174,3 @@ function isAvailable(availability) {
   return Boolean(availability.exhaustedUntil && Date.parse(availability.exhaustedUntil) <= Date.now());
 }
 
-/** @param {unknown} value @returns {value is {status: string, error?: unknown, exhaustedUntil?: unknown}} */
-function isEnvelope(value) {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof /** @type {Record<string, unknown>} */ (value).status === "string");
-}
-
-/** @param {unknown} value @returns {string|null} */
-function normalizeReset(value) {
-  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null;
-  if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
-  if (typeof value !== "string") return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
-}
-
-/** @param {string} text @returns {string|null} */
-function extractReset(text) {
-  const match = /reset(?:s| at| on)?\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?)/iu.exec(text);
-  if (!match) return null;
-  const value = match[1].includes("T") || /(?:Z|[+-]\d{2}:?\d{2})$/u.test(match[1]) ? match[1] : `${match[1].replace(" ", "T")}Z`;
-  return normalizeReset(value);
-}

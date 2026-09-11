@@ -22,12 +22,11 @@ import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "./runtime-dis
  * opt-in that reads the host.
  */
 
-/** Display order of the registered drivers: claude, codex, agy, glm, dsh, zcode, exec-jsonl, replay. */
+/** Display order of the registered drivers: claude, codex, agy, dsh, zcode, exec-jsonl, replay. */
 export const MODEL_DRIVER_ORDER = Object.freeze([
   "claude",
   "codex",
   "agy",
-  "glm",
   "dsh",
   "zcode",
   "exec-jsonl",
@@ -36,7 +35,6 @@ export const MODEL_DRIVER_ORDER = Object.freeze([
 
 const CLAUDE_EFFORTS = Object.freeze(["low", "medium", "high", "max"]);
 const CODEX_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);
-const GLM_EFFORTS = Object.freeze(["low", "medium", "high"]);
 const AGY_EFFORTS = Object.freeze(["low", "medium", "high"]);
 /** agy.mjs collapses both of these onto `high` before `--effort` is built. */
 const AGY_EFFORT_ALIASES = Object.freeze({ max: "high", xhigh: "high" });
@@ -46,7 +44,7 @@ const NO_EFFORTS = Object.freeze([]);
 
 /** Measured: the harness accepts off/low/high/max and defaults to high; 1M tokens is its default window. */
 const DSH_CONTEXT_WINDOW_TOKENS = 1_000_000;
-/** glm.mjs pairs the [1m] model tier with a 1,048,576-token compaction window and everything else with 200,000. */
+/** The two GLM tiers Z.ai serves: the flash model's 200,000-token window and the 5.3 model's 1,048,576. */
 const GLM_CONTEXT_WINDOW_TOKENS = 200_000;
 const GLM_ONE_MILLION_CONTEXT_WINDOW_TOKENS = 1_048_576;
 
@@ -87,11 +85,6 @@ export const DECLARED_MODEL_CATALOGUES = Object.freeze({
     agyModel("claude-opus-4-6-thinking"),
     agyModel("gpt-oss-120b-medium"),
   ]),
-  glm: Object.freeze([
-    declaredModel("glm-5.3-flash", { contextWindowTokens: GLM_CONTEXT_WINDOW_TOKENS, efforts: GLM_EFFORTS }),
-    declaredModel("glm-5.3", { contextWindowTokens: GLM_CONTEXT_WINDOW_TOKENS, efforts: GLM_EFFORTS }),
-    declaredModel("glm-5.3[1m]", { contextWindowTokens: GLM_ONE_MILLION_CONTEXT_WINDOW_TOKENS, efforts: GLM_EFFORTS }),
-  ]),
   dsh: Object.freeze([
     declaredModel("deepseek-flash", { contextWindowTokens: DSH_CONTEXT_WINDOW_TOKENS, efforts: DSH_EFFORTS, defaultEffort: "high" }),
     declaredModel("deepseek-v4-flash", { contextWindowTokens: DSH_CONTEXT_WINDOW_TOKENS, efforts: DSH_EFFORTS, defaultEffort: "high" }),
@@ -114,7 +107,6 @@ export const DECLARED_MODEL_CATALOGUES = Object.freeze({
 const CATALOGUE_SOURCES = Object.freeze({
   claude: "declared",
   codex: "declared",
-  glm: "declared",
   dsh: "declared",
   zcode: "declared",
   "exec-jsonl": "runtime-declared",
@@ -130,7 +122,6 @@ const EFFORT_TRANSPORT = Object.freeze({
   claude: "--effort",
   codex: "config.model_reasoning_effort",
   agy: "--effort",
-  glm: "--effort",
   dsh: "--reasoning (harness reasoningEffort)",
   zcode: null,
   "exec-jsonl": null,

@@ -165,7 +165,11 @@ function createLivePreflightRepo() {
  */
 function safeLiveRuntime(runtime) {
   if (runtime.driver === "codex") return { ...runtime, sandbox: "read-only" };
-  if (runtime.driver === "claude" || runtime.driver === "glm") return { ...runtime, permissionMode: "plan" };
+  if (runtime.driver === "dsh") return { ...runtime, sandbox: "read-only" };
+  if (runtime.driver === "claude") return { ...runtime, permissionMode: "plan" };
+  // `plan` is the ZCode mode that reads without writing; the adapter's own
+  // default is `yolo`, which a preflight prompt must never reach.
+  if (runtime.driver === "zcode") return { ...runtime, permissionMode: "plan" };
   return { ...runtime };
 }
 

@@ -6,7 +6,7 @@
  * outputSchema,continuationId}`. The request deliberately carries no tool
  * policy: an
  * arbitrary wrapper executable cannot prove enforcement, so the mechanical
- * policy travels only where a hook surface can enforce it (claude/glm). It
+ * policy travels only where a hook surface can enforce it (claude). It
  * writes JSONL events to stdout:
  * `run.started` (optional), `message` (zero or more), then exactly one
  * `run.completed` or `run.failed` event. Events must appear in that order,
@@ -305,7 +305,7 @@ export function liveUsage(driver, stdout) {
       record.inputTokens + record.cacheReadInputTokens > best.inputTokens + best.cacheReadInputTokens ? record : best
     ));
   }
-  if (driver === "claude" || driver === "glm") {
+  if (driver === "claude") {
     // The terminal result event carries the session total; before it lands,
     // sum per-request assistant usage (each request re-reads full context).
     // Claude's input_tokens already exclude cache reads.
@@ -479,7 +479,7 @@ export class SessionMetricsParser {
       const window = Buffer.concat([this.oversized.tail, piece]);
       const keep = window.subarray(Math.max(0, window.length - SESSION_FRAGMENT_BYTES));
       const dropped = window.subarray(0, window.length - keep.length);
-      if (isClaudeFamily(this.driver)) {
+      if (this.driver === "claude") {
         const counted = countWithCarry(dropped, this.oversized.carry, TOOL_USE_NEEDLE);
         this.oversized.streamedToolUse += counted.hits;
         this.oversized.carry = counted.carry;
@@ -499,7 +499,7 @@ export class SessionMetricsParser {
     const tail = whole.subarray(Math.max(0, whole.length - SESSION_FRAGMENT_BYTES));
     /** @type {{head: Buffer, tail: Buffer, streamedToolUse: number, carry: Buffer}} */
     const oversized = { head, tail, streamedToolUse: 0, carry: Buffer.alloc(0) };
-    if (isClaudeFamily(this.driver)) {
+    if (this.driver === "claude") {
       // Count from the record start up to where the rolling tail takes over,
       // so a needle straddling any region boundary is counted exactly once.
       const counted = countWithCarry(whole.subarray(0, Math.max(0, whole.length - tail.length)), oversized.carry, TOOL_USE_NEEDLE);
@@ -516,7 +516,7 @@ export class SessionMetricsParser {
       this.oversized = null;
       /** @type {{head: string, tail: string, toolUse: number}} */
       let fragments;
-      if (isClaudeFamily(this.driver)) {
+      if (this.driver === "claude") {
         const counted = countWithCarry(oversized.tail, oversized.carry, TOOL_USE_NEEDLE);
         fragments = {
           head: decodeFragment(oversized.head),
@@ -561,7 +561,7 @@ export class SessionMetricsParser {
         && extractJson(this.lastAgentText) !== null) {
         totals.completed = true;
       }
-    } else if ((this.driver === "claude" || this.driver === "glm") && record.type === "result") {
+    } else if (this.driver === "claude" && record.type === "result") {
       totals.completed = true;
     } else if (this.driver === "exec-jsonl" && record.type === "run.completed") {
       totals.completed = true;
@@ -603,7 +603,7 @@ function foldRecord(driver, totals, record) {
     }
     return;
   }
-  if (driver === "claude" || driver === "glm") {
+  if (driver === "claude") {
     if (record.type === "assistant") {
       const message = /** @type {Record<string, unknown>} */ (record.message ?? {});
       totals.turns += 1;
@@ -641,7 +641,7 @@ function foldRecord(driver, totals, record) {
  */
 function foldFragmentRecord(driver, totals, fragments) {
   const text = `${fragments.head}\n${fragments.tail}`;
-  if (driver === "claude" || driver === "glm") {
+  if (driver === "claude") {
     if (text.includes('"type":"assistant"')) {
       totals.turns += 1;
       totals.toolCalls += fragments.toolUse;
@@ -688,7 +688,7 @@ function recordContinuationId(driver, record) {
   if (driver === "codex") {
     return record.type === "thread.started" && typeof record.thread_id === "string" ? record.thread_id : null;
   }
-  if (driver === "claude" || driver === "glm") {
+  if (driver === "claude") {
     return record.type === "result" && typeof record.session_id === "string" ? record.session_id : null;
   }
   if (driver === "exec-jsonl" && (record.type === "run.started" || record.type === "run.completed")) {
@@ -708,19 +708,11 @@ function fragmentContinuationId(driver, fragments) {
   const text = `${fragments.head}\n${fragments.tail}`;
   const pattern = driver === "codex"
     ? /"thread_id":"([^"]+)"/u
-    : driver === "claude" || driver === "glm"
+    : driver === "claude"
       ? /"session_id":"([^"]+)"/u
       : /"continuationId":"([^"]+)"/u;
   const match = pattern.exec(text);
   return match ? match[1] : null;
-}
-
-/**
- * @param {string} driver
- * @returns {boolean}
- */
-function isClaudeFamily(driver) {
-  return driver === "claude" || driver === "glm";
 }
 
 /**

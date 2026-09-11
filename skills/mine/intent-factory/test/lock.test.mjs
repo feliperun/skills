@@ -713,38 +713,38 @@ test("stall supervision never kills a runtime whose driver declares no streamed 
   }
 });
 
-test("a glm worker runs with the driver's endpoint env overlay applied", async () => {
-  const runDir = mkdtempSync(join(tmpdir(), "lock-glm-env-"));
+test("a zcode worker runs with the driver's endpoint env overlay applied", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "lock-zcode-env-"));
   const logs = join(runDir, "logs");
   mkdirSync(logs);
-  const marker = join(runDir, "glm-worker-marker.json");
+  const marker = join(runDir, "zcode-worker-marker.json");
   const provider = join(runDir, "provider.mjs");
   writeFileSync(provider, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
   notify: process.env.INTENT_FACTORY_NOTIFY_BIN ?? null,
   ambient: process.env.INTENT_FACTORY_AMBIENT ?? null,
-  baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,
-  model: process.env.ANTHROPIC_MODEL ?? null,
-  token: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
+  baseUrl: process.env.ZCODE_BASE_URL ?? null,
+  model: process.env.ZCODE_MODEL ?? null,
+  token: process.env.GLM_API_KEY ?? null,
   apiKey: process.env.ANTHROPIC_API_KEY ?? null,
 }));
 setInterval(() => {}, 1000);
 `);
   chmodSync(provider, 0o755);
   const previous = {
-    INTENT_FACTORY_GLM_BIN: process.env.INTENT_FACTORY_GLM_BIN,
+    INTENT_FACTORY_ZCODE_BIN: process.env.INTENT_FACTORY_ZCODE_BIN,
     INTENT_FACTORY_MARKER: process.env.INTENT_FACTORY_MARKER,
     INTENT_FACTORY_AMBIENT: process.env.INTENT_FACTORY_AMBIENT,
     INTENT_FACTORY_NOTIFY_BIN: process.env.INTENT_FACTORY_NOTIFY_BIN,
     ZAI_API_KEY: process.env.ZAI_API_KEY,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   };
-  process.env.INTENT_FACTORY_GLM_BIN = provider;
+  process.env.INTENT_FACTORY_ZCODE_BIN = provider;
   process.env.INTENT_FACTORY_MARKER = marker;
   process.env.INTENT_FACTORY_AMBIENT = "ambient-value";
   process.env.INTENT_FACTORY_NOTIFY_BIN = provider;
-  process.env.ZAI_API_KEY = "glm-notify-test-token";
+  process.env.ZAI_API_KEY = "zcode-notify-test-token";
   process.env.ANTHROPIC_API_KEY = "ambient-anthropic-key";
   const { contract, node } = validatedRun(runDir);
   const state = nodeSnapshot(node, []);
@@ -752,7 +752,7 @@ setInterval(() => {}, 1000);
     contract,
     node,
     state,
-    runtime: { id: "glm", driver: "glm", model: "glm-5.3[1m]" },
+    runtime: { id: "zcode-glm", driver: "zcode", model: "glm-5.3[1m]" },
     prompt: "task",
     paths: {
       prompt: join(logs, "worker.prompt"),
@@ -776,8 +776,8 @@ setInterval(() => {}, 1000);
     assert.equal(observed.notify, null, "INTENT_FACTORY_NOTIFY_BIN must not reach the worker provider");
     assert.equal(observed.ambient, "ambient-value", "ambient runtime variables must survive");
     assert.equal(observed.baseUrl, "https://api.z.ai/api/anthropic", "driver env overlay must still apply");
-    assert.equal(observed.model, "glm-5.3[1m]");
-    assert.equal(observed.token, "glm-notify-test-token");
+    assert.equal(observed.model, "glm/glm-5.3", "the [1m] tier marker is stripped before ZCODE_MODEL");
+    assert.equal(observed.token, "zcode-notify-test-token");
     assert.equal(observed.apiKey, null, "ambient Anthropic key is removed, not inherited");
   } finally {
     for (const [key, value] of Object.entries(previous)) {

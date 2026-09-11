@@ -1,6 +1,6 @@
 /**
  * Shared provider-protocol normalization and version parsing, extracted from
- * `exec-jsonl.mjs` because `claude.mjs`, `codex.mjs`, `agy.mjs`, `glm.mjs`,
+ * `exec-jsonl.mjs` because `claude.mjs`, `codex.mjs`, `agy.mjs`, `dsh.mjs`,
  * `zcode.mjs`, `replay.mjs` and `exec-jsonl.mjs` itself all depend on it.
  */
 

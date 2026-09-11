@@ -8,14 +8,14 @@ export const DEFAULT_CLAUDE_TOOLS = ["Read", "Edit", "Write", "Bash", "Glob", "G
  * Bound the harness preamble of a Claude-compatible CLI: no skills, no MCP
  * servers, no settings files (an explicit `--settings` still applies, so hook
  * enforcement survives) and only the declared built-in tools. Measured on
- * 2026-09-01 with glm-5.3[1m]: 65,170 uncached input tokens per trivial call
+ * 2026-09-01 against this CLI: 65,170 uncached input tokens per trivial call
  * with the ambient configuration, about 4,300 per turn with these flags.
  * `--bare` would cut further but disables hooks, so it is never used.
  *
  * @param {import("./index.mjs").DriverRuntime} runtime
  * @returns {string[]}
  */
-export function claudePreambleArgs(runtime) {
+function claudePreambleArgs(runtime) {
   return [
     "--disable-slash-commands",
     "--strict-mcp-config",

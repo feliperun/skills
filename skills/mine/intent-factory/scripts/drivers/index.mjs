@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { claudeDriver } from "./claude.mjs";
 import { codexDriver } from "./codex.mjs";
 import { agyDriver } from "./agy.mjs";
-import { glmDriver } from "./glm.mjs";
 import { dshDriver } from "./dsh.mjs";
 import { zcodeDriver } from "./zcode.mjs";
 import { execJsonlDriver } from "./exec-jsonl.mjs";
@@ -18,7 +17,6 @@ const DRIVERS = new Map([
   ["claude", claudeDriver],
   ["codex", codexDriver],
   ["agy", agyDriver],
-  ["glm", glmDriver],
   ["dsh", dshDriver],
   ["zcode", zcodeDriver],
   ["exec-jsonl", execJsonlDriver],
@@ -60,8 +58,9 @@ const CAPABILITY_NAMES = new Set([
 /** @typedef {{status: "done"|"no-op"|"blocked"|"failed"|"exhausted"|"stalled"|"canceled", result: string|null, continuationId: string|null, usage: {inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}, costUsd: number|null, error: {code: string, message: string, resetAt?: string|null}|null, exhaustedUntil?: string|null, judgeCandidates?: number}} ProviderEnvelope */
 
 /**
- * One declared runtime. `driver` names a registered adapter (`claude`,
- * `codex`, `agy`, `glm`, `dsh`, `zcode`, `exec-jsonl`, or `replay`); replay requires
+ * One declared runtime. `driver` names the harness adapter that runs the turn
+ * (`claude`, `codex`, `agy`, `dsh`, `zcode`, `exec-jsonl`, or `replay`) and
+ * `model` names what that harness asks; the two are independent. replay requires
  * `config["replay.recording"]` for commands, and dsh requires
  * `config.provider` for the harness route every attempt runs on.
  *
@@ -147,7 +146,6 @@ const DEFAULT_DRIVER_VENDORS = Object.freeze({
   claude: "anthropic",
   codex: "openai",
   agy: "google",
-  glm: "zhipu",
   zcode: "zhipu",
 });
 
@@ -242,10 +240,29 @@ export function normalizeProviderAvailability(runtimeOrDriver, response, exitCod
   // that branch even though its text never matches the quota pattern.
   if (classified?.reason === "insufficient_balance") return classified;
   if (envelope.status === "exhausted" || classified?.reason === "quota_exhausted") {
-    return { available: false, exhaustedUntil: resetTimestamp(envelope.exhaustedUntil ?? error?.resetAt ?? message), reason: code || "quota_exhausted" };
+    return { available: false, exhaustedUntil: exhaustedUntilOf(envelope), reason: code || "quota_exhausted" };
   }
   if (classified?.reason === "authentication_failed") return classified;
   return { available: false, exhaustedUntil: null, reason: code || "provider_unavailable" };
+}
+
+/**
+ * The absolute instant an exhaustion envelope announces, taken from whichever
+ * field carries it: the envelope's own `exhaustedUntil`, the error's `resetAt`,
+ * or a reset sentence inside the error message. `null` means the provider named
+ * no reset, which is the controller's signal to take the failover edge instead
+ * of waiting on the same runtime.
+ *
+ * @param {unknown} envelope
+ * @returns {string|null}
+ */
+export function exhaustedUntilOf(envelope) {
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return null;
+  const record = /** @type {Record<string, unknown>} */ (envelope);
+  const error = record.error && typeof record.error === "object"
+    ? /** @type {Record<string, unknown>} */ (record.error)
+    : null;
+  return resetTimestamp(record.exhaustedUntil ?? error?.resetAt ?? (typeof error?.message === "string" ? error.message : null));
 }
 
 /**
