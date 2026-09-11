@@ -166,13 +166,18 @@ test("provider adapters declare the permission modes that execute commands and t
     executingModes: ["yolo"],
   });
   assert.equal(resolvePermissionExecution({ driver: "zcode", permissionMode: "edit" }).executes, false);
+  // Measured 2026-09-11 by running a dsh worker at the harness default: it
+  // executed `printf ... > exec-probe.txt` through the shell and the file
+  // reached the integrated commit. Declaring only danger-full-access rejected
+  // the very contract that attested the driver.
   assert.deepEqual(resolvePermissionExecution({ driver: "dsh" }), {
-    executes: false,
+    executes: true,
     field: "sandbox",
     mode: "workspace-write",
-    executingModes: ["danger-full-access"],
+    executingModes: ["workspace-write", "danger-full-access"],
   });
   assert.equal(resolvePermissionExecution({ driver: "dsh", sandbox: "danger-full-access" }).executes, true);
+  assert.equal(resolvePermissionExecution({ driver: "dsh", sandbox: "read-only" }).executes, false);
   assert.deepEqual(resolvePermissionExecution({ driver: "codex" }), {
     executes: true,
     field: "sandbox",

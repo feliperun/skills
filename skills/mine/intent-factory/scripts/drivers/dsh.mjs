@@ -55,7 +55,11 @@ export const dshDriver = {
 
   // sandbox maps to DSH_PERMISSION_MODE. The default workspace-write needs
   // approvals a detached run cannot answer; danger-full-access does not.
-  permissionExecution: { field: "sandbox", executingModes: ["danger-full-access"], defaultMode: "workspace-write" },
+  // Measured 2026-09-11: a worker at the harness default `workspace-write`
+  // ran `printf ... > exec-probe.txt` through the shell and the file landed
+  // in the integrated commit. Only writes *outside* the worktree need
+  // `danger-full-access`; execution inside it does not.
+  permissionExecution: { field: "sandbox", executingModes: ["workspace-write", "danger-full-access"], defaultMode: "workspace-write" },
 
   /** @param {import("./index.mjs").DriverRuntime} runtime @returns {string} */
   executable(runtime) {
