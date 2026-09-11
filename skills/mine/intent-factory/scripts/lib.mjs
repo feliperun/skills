@@ -3,6 +3,7 @@ import { normalizeProviderResult, providerCommand } from "./drivers/index.mjs";
 export { composeAssignments, discoverRuntimes, exhaustedUntilOf, nextSameTierRuntime, normalizeProviderAvailability } from "./runtime-discovery.mjs";
 import { validateWorkerResult } from "./worker-result.mjs";
 import { scopeFindingsPromptSection } from "./scope-findings.mjs";
+import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "./judge-envelope.mjs";
 
 export { validateContract, routeRuntime, normalizeProviderResult, providerCommand };
 export { renderStatus, renderReport, renderFindings } from "./render.mjs";
@@ -65,7 +66,7 @@ export function parseJudge(result) {
   if (typeof judgeVerdict !== "string" || !JUDGE_SCHEMA.properties.verdict.enum.includes(judgeVerdict)) throw new Error("judge verdict must be pass or fail");
   if (typeof maxSeverity !== "string" || !JUDGE_SCHEMA.properties.maxSeverity.enum.includes(maxSeverity)) throw new Error("judge maxSeverity is invalid");
   if (typeof verdict.summary !== "string" || !Array.isArray(verdict.findings)) throw new Error("judge result is missing summary or findings");
-  if (Buffer.byteLength(verdict.summary, "utf8") > 4 * 1024 || verdict.findings.length > 32) throw new Error("judge result exceeds limits");
+  if (Buffer.byteLength(verdict.summary, "utf8") > JUDGE_LIMITS.summaryBytes || verdict.findings.length > JUDGE_LIMITS.findings) throw new Error(JUDGE_ENVELOPE_REASON);
   const severityRank = { none: 0, minor: 1, major: 2, critical: 3 };
   const rawFindings = /** @type {unknown[]} */ (verdict.findings);
   const findings = rawFindings.map((finding) => {
@@ -75,7 +76,7 @@ export function parseJudge(result) {
     if (typeof severity !== "string" || !["minor", "major", "critical"].includes(severity) || typeof record.description !== "string" || typeof record.evidence !== "string") {
       throw new Error("judge finding is invalid");
     }
-    if (Buffer.byteLength(record.description, "utf8") > 2 * 1024 || Buffer.byteLength(record.evidence, "utf8") > 4 * 1024) throw new Error("judge finding exceeds limits");
+    if (Buffer.byteLength(record.description, "utf8") > JUDGE_LIMITS.descriptionBytes || Buffer.byteLength(record.evidence, "utf8") > JUDGE_LIMITS.evidenceBytes) throw new Error(JUDGE_FINDING_ENVELOPE_REASON);
     return {
       severity: /** @type {"minor"|"major"|"critical"} */ (severity),
       description: record.description,
@@ -136,7 +137,7 @@ export function judgePrompt(node, workerResult, context = {}) {
     `Controller verification:\n${JSON.stringify(verificationResult)}\n\n` +
     (scopeSection ? `${scopeSection}\n\n` : "") +
     (context.previousAttempt ? `${context.previousAttempt}\n\n` : "") +
-    "Return only the JSON object required by the output schema. Evidence must be concrete. " +
+    "Return only the JSON object required by the output schema. The verdict is a record, not a report: keep `summary` within " + JUDGE_LIMITS.summaryBytes + " bytes, use at most " + JUDGE_LIMITS.findings + " findings, and keep each finding's `description` within " + JUDGE_LIMITS.descriptionBytes + " bytes and its `evidence` within " + JUDGE_LIMITS.evidenceBytes + " bytes. A verdict that overshoots this envelope is rejected unread, however sound the arbitration. Evidence must be concrete. " +
     "Use verdict pass only when findings is empty and maxSeverity is none. " +
     "Use verdict fail whenever findings is non-empty, including advisory findings below failOn. " +
     (node.definitionOfDone.length

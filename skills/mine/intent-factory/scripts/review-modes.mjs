@@ -21,6 +21,8 @@
  * there were two of them.
  */
 
+import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON } from "./judge-envelope.mjs";
+
 /** Every review mode a gate may declare, plus the disabled-gate equivalent. */
 export const REVIEW_MODES = new Set(["none", "advisory", "blocking"]);
 
@@ -130,8 +132,10 @@ export function reviewNote(node) {
 
 /**
  * The instruction appended to a re-asked judge prompt. An uncited rejection
- * gets the citation rule; every other protocol defect gets the one-verdict
- * rule, because the judge already saw the citation rule and ignored it.
+ * gets the citation rule; a verdict discarded by its envelope gets the size
+ * rule, because a concise re-issue is the whole defect; every other protocol
+ * defect gets the one-verdict rule, because the judge already saw the citation
+ * rule and ignored it.
  *
  * @param {string|undefined} reason the reason recorded with the spent re-ask
  * @returns {string}
@@ -139,6 +143,9 @@ export function reviewNote(node) {
 export function judgeReaskInstruction(reason) {
   if (reason === UNCITED_REJECTION_REASON) {
     return "\n\nYour previous fail verdict cited no Definition of Done item id. Protocol: every finding of a fail verdict must cite the id of the judgment item it addresses. Deterministic items are already proven by the controller and must not be re-arbitrated. Re-issue the verdict JSON with every finding citing the judgment item id it addresses.";
+  }
+  if (reason === JUDGE_ENVELOPE_REASON || reason === JUDGE_FINDING_ENVELOPE_REASON) {
+    return "\n\nYour previous verdict did arrive, and its content was discarded unread: it overshot the envelope the schema states. Protocol: keep the arbitration exactly as it is and re-issue the same verdict JSON inside the envelope — a shorter `summary`, and findings whose `description` and `evidence` fit their limits. Do not drop a finding to make room; shorten its prose.";
   }
   return "\n\nYour previous response did not carry exactly one usable verdict. Protocol: the verdict is one JSON object matching the required schema, and it must be the only content of your final message — no prose before or after it, and no second verdict. Re-issue the verdict JSON now.";
 }

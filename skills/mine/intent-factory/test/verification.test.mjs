@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
 import { parseJudge, retryPrompt } from "../scripts/lib.mjs";
+import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../scripts/judge-envelope.mjs";
+import { judgeReaskInstruction } from "../scripts/review-modes.mjs";
 import { mechanicalVerdict } from "../scripts/judge-gate.mjs";
 import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands, validateWorkspaceScopeBoundary } from "../scripts/verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../scripts/worker-result.mjs";
@@ -109,6 +111,24 @@ test("worker result and verification output stay within hard caps", async () => 
   const result = await runVerification([{ argv: [process.execPath, "-e", "console.log('x'.repeat(100000))"] }], cwd);
   assert.equal(result.passed, true);
   assert.ok(Buffer.byteLength(result.commands[0].attempts[0].stdout, "utf8") <= 16 * 1024);
+});
+
+test("a verdict rejected by its envelope is re-asked with the size rule", () => {
+  assert.throws(() => parseJudge(JSON.stringify({
+    verdict: "pass", maxSeverity: "none", summary: "s".repeat(JUDGE_LIMITS.summaryBytes + 1), findings: [],
+  })), new RegExp(JUDGE_ENVELOPE_REASON, "u"));
+  assert.throws(() => parseJudge(JSON.stringify({
+    verdict: "fail", maxSeverity: "critical", summary: "s",
+    findings: [{ severity: "critical", description: "d", evidence: "e".repeat(JUDGE_LIMITS.evidenceBytes + 1) }],
+  })), new RegExp(JUDGE_FINDING_ENVELOPE_REASON, "u"));
+  // The defect is size, not shape: a judge told it "did not carry exactly one
+  // usable verdict" rewrites the whole arbitration and overshoots again.
+  for (const reason of [JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON]) {
+    const instruction = judgeReaskInstruction(reason);
+    assert.match(instruction, /envelope/u);
+    assert.match(instruction, /re-issue the same verdict/u);
+    assert.doesNotMatch(instruction, /did not carry exactly one usable verdict/u);
+  }
 });
 
 test("judge results are bounded, consistent, and require concrete evidence", () => {

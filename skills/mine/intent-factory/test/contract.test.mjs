@@ -18,6 +18,7 @@ import {
 } from "../scripts/contract.mjs";
 import { SIGNAL_END, SIGNAL_START } from "../scripts/signal-block.mjs";
 import { judgePrompt } from "../scripts/lib.mjs";
+import { JUDGE_LIMITS } from "../scripts/judge-envelope.mjs";
 import { runContract } from "../scripts/runner.mjs";
 import { driverCapabilities } from "../scripts/drivers/index.mjs";
 import * as helpers from "./helpers.mjs";
@@ -781,6 +782,24 @@ test("judge prompt exposes only the write-file evidence boundary", () => {
   assert.match(prompt, /\[works\] It works/u);
   assert.doesNotMatch(prompt, /Read files/u);
   assert.doesNotMatch(prompt, /contract\.json/u);
+});
+
+test("judge prompt advertises the envelope the parser enforces", () => {
+  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
+    id: "build",
+    type: "backend",
+    taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
+    definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
+  });
+  const prompt = judgePrompt(node, "worker complete");
+  // A verdict that overshoots is discarded unread, so the numbers the parser
+  // enforces have to be the numbers the prompt states: a judge told nothing
+  // about the limit can only be destroyed by it, and the re-ask repeats it.
+  assert.match(prompt, new RegExp(`keep \`summary\` within ${JUDGE_LIMITS.summaryBytes} bytes`, "u"));
+  assert.match(prompt, new RegExp(`at most ${JUDGE_LIMITS.findings} findings`, "u"));
+  assert.match(prompt, new RegExp(`\`description\` within ${JUDGE_LIMITS.descriptionBytes} bytes`, "u"));
+  assert.match(prompt, new RegExp(`\`evidence\` within ${JUDGE_LIMITS.evidenceBytes} bytes`, "u"));
+  assert.match(prompt, /rejected unread/u);
 });
 
 test("judge prompt lists scope findings only when the node carries an advisory finding", () => {
