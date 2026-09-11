@@ -1261,6 +1261,17 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
     }, "task");
     assert.equal(resolved.env?.ZAI_API_KEY, "custom-token");
 
+    // The CLI folds non-alphanumerics in the provider id into `_` before
+    // appending `_API_KEY`, so a dashed id must name the variable it reads.
+    const dashed = providerCommand({
+      driver: "zcode",
+      model: "glm-5.3",
+      config: { provider: "z-ai", "auth_token.env_key": "INTENT_FACTORY_TEST_ZCODE_TOKEN" },
+    }, "task");
+    assert.equal(dashed.env?.ZCODE_MODEL, "z-ai/glm-5.3");
+    assert.equal(dashed.env?.Z_AI_API_KEY, "custom-token");
+    assert.equal("Z-AI_API_KEY" in (dashed.env ?? {}), false, "the unfolded spelling is not a variable the CLI reads");
+
     const continued = providerCommand({ driver: "zcode", model: "glm-5.3" }, "next task", {
       continuationId: "sess_zcode-1",
     });
@@ -1281,7 +1292,7 @@ test("zcode tool policy is refused honestly and the judge schema travels in the 
     toolPolicy: policy,
     schema: JUDGE_SCHEMA,
   });
-  assert.equal(command.args.includes("--settings"), false, "the CLI has no settings flag to pretend with");
+  assert.equal(command.args.includes("--settings"), false, "the driver sends no tool policy, so no settings payload is passed");
   assert.deepEqual(
     missingCapabilities(driverCapabilities({ driver: "zcode" }), { toolPolicy: true }),
     ["toolPolicy=true (driver provides toolPolicy=false)"],
@@ -1317,6 +1328,20 @@ test("normalizes the ZCode result object with cache-aware usage", () => {
   assert.equal(envelope.error, null);
   assert.deepEqual(envelope.usage, { inputTokens: 6482, outputTokens: 109, cacheReadInputTokens: 9024 },
     "inputTokens already include the cached reads, so the cache component is subtracted");
+
+  // A turn that also wrote cache: the write is already inside inputTokens, so
+  // only the read portion may be subtracted — adding the write would inflate
+  // usage.jsonl and every cost-per-checkpoint derived from it.
+  const wroteCache = JSON.stringify({
+    sessionId: "sess_cache",
+    response: "pong",
+    usage: { inputTokens: 10000, outputTokens: 50, totalTokens: 10050, cacheReadTokens: 3000, cacheWriteTokens: 1000 },
+  });
+  assert.deepEqual(
+    normalizeProviderResult("zcode", wroteCache, 0, null).usage,
+    { inputTokens: 7000, outputTokens: 50, cacheReadInputTokens: 3000 },
+    "10000 - 3000 cache reads leaves 6000 uncached + 1000 written",
+  );
 
   const empty = JSON.stringify({ sessionId: "sess_x", response: "", usage: {} });
   assert.equal(normalizeProviderResult("zcode", empty, 0, null).status, "no-op");
