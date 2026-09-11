@@ -23,6 +23,7 @@ Everything else runs detached.
 | You want | Run |
 | --- | --- |
 | Probe runtimes and host before spending tokens | `preflight <contract.json>`, `doctor [--cwd <dir>]` |
+| Choose runtime and model, and see the effort each accepts | `models [--probe] [--json]` |
 | Prove each verification command fits its own `timeoutSec` | `preflight <contract.json> --time-verification` |
 | Pull unseen campaign events | `campaign sync <id> --cwd <repo> --session-id <s>` |
 | Advance that cursor past an event | `campaign ack <id> --cwd <repo> --session-id <s> --event-id <e>` |

@@ -23,6 +23,7 @@ import {
   validateContract,
 } from "./lib.mjs";
 import { probeRuntime, providerCommand } from "./drivers/index.mjs";
+import { modelsCommand } from "./models.mjs";
 import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./env-preflight.mjs";
 import { renderReportJson, renderStatusJson } from "./render.mjs";
 import { validateNodeSnapshot } from "./contract.mjs";
@@ -621,6 +622,7 @@ const COMMAND_OPTIONS = {
   report: { json: { type: "boolean" } },
   findings: {},
   doctor: { cwd: { type: "string" }, json: { type: "boolean" }, discover: { type: "boolean" } },
+  models: { probe: { type: "boolean" }, json: { type: "boolean" } },
   metrics: METRICS_OPTIONS,
 };
 
@@ -643,7 +645,8 @@ function parseCli(argv, quiet = false) {
     return null;
   }
   if (parsed.positionals.length > 1) return null;
-  if (command !== "doctor" && parsed.positionals.length !== 1) return null;
+  if (command === "models" && parsed.positionals.length !== 0) return null;
+  if (command !== "doctor" && command !== "models" && parsed.positionals.length !== 1) return null;
   return {
     command,
     target: parsed.positionals[0],
@@ -682,6 +685,10 @@ async function main(argv) {
       discover: values.discover === true,
     });
     if (!ok) process.exitCode = 1;
+    return;
+  }
+  if (command === "models") {
+    await modelsCommand({ probe: values.probe === true, json: values.json === true });
     return;
   }
   if (!target) { usage(); return; }
@@ -797,7 +804,8 @@ function usage() {
     "usage: runner.mjs <run|validate> <contract.json> [--detach] | preflight <contract.json> [--static] [--time-verification] [--json] | " +
     "<resume|cancel> <run-dir> [--detach] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
-    "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | contract validate <contract.json> | " +
+    "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | models [--probe] [--json] | " +
+    "contract validate <contract.json> | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|watch|attach|note|resolve|close|show|list|sync|ack> ...\n",
   );

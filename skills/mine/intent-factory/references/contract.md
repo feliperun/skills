@@ -204,9 +204,9 @@ are excluded because judges review captured results.
   `headless` drops usage. Normalization assumes streamed `inputTokens` excludes
   `cacheReadTokens`; `usage.jsonl` records it unchanged as uncached input.
   `config.provider` is required (`deepseek-official`); `model` and `reasoning`
-  pass through verbatim. Its catalogue exposes `deepseek-flash` (default),
-  `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp`;
-  unknown ids fail in the harness. Authentication stays in `DEEPSEEK_API_KEY`;
+  pass through verbatim. Its catalogue is the one `models` prints
+  (`deepseek-flash` is the default); unknown ids fail in the harness.
+  Authentication stays in `DEEPSEEK_API_KEY`;
   `config["api_key.env_key"]` only names it for `preflight`. `sandbox` maps to
   `DSH_PERMISSION_MODE`; omitted, the harness defaults to `workspace-write`
   whose approvals detached runs cannot answer — a command-running worker

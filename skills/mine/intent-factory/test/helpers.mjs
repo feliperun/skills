@@ -504,14 +504,25 @@ printf '%s\\n' '{"schemaVersion":1,"type":"run.completed","result":'"$(printf '%
 }
 
 /**
+ * The stand-in is named `agy` inside its own directory so a PATH lookup finds
+ * it by the same name the real binary has. `agy models` answers in the
+ * measured shape: `id<TAB>display name` lines on stdout, a progress line on
+ * stderr. The listing is fixed, never the host's, and carries one id the
+ * declared catalogue does not have.
+ *
  * @param {string} directory
  * @returns {string}
  */
 export function fakeAgy(directory) {
-  const path = join(mkdtempSync(join(tmpdir(), "runner-fake-agy-")), "fake-agy.mjs");
+  const path = join(mkdtempSync(join(tmpdir(), "runner-fake-agy-")), "agy");
   writeFileSync(path, `#!${process.execPath}
 if (process.argv.includes("--version")) {
   console.log("agy 1.0.0");
+} else if (process.argv.includes("models")) {
+  console.error("Fetching available models...");
+  console.log("gemini-3.8-flash-high\\tGemini 3.8 Flash (High)");
+  console.log("gemini-3.1-pro-low\\tGemini 3.1 Pro (Low)");
+  console.log("claude-sonnet-4-6\\tClaude Sonnet 4.6");
 } else {
 console.log(JSON.stringify({event:"init",conversation_id:"fake-conversation"}));
 console.log(JSON.stringify({event:"result",result:{

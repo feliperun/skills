@@ -98,6 +98,17 @@ const CAPABILITY_NAMES = new Set([
 /** @typedef {{id?: string}} RuntimeIdentity */
 
 /**
+ * Every registered driver name, for callers that must account for the whole
+ * registry. Declaration order only — callers that display drivers sort it
+ * themselves.
+ *
+ * @returns {string[]}
+ */
+export function registeredDrivers() {
+  return [...DRIVERS.keys()];
+}
+
+/**
  * @param {string} name
  * @returns {DriverAdapter}
  */
