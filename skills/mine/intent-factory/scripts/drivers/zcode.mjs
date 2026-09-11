@@ -20,10 +20,10 @@ const ZCODE_DEFAULT_AUTH_TOKEN_ENV = "ZAI_API_KEY";
  * `ANTHROPIC_AUTH_TOKEN`) into the provider-derived `${PROVIDER}_API_KEY`
  * variable the CLI resolves. Values never travel in the contract.
  *
- * The harness has no schema flag and no hook surface, so `structuredOutput`
- * and `toolPolicy` stay `false`: a judge's schema travels inside the prompt
- * text (enforcement remains parseJudge at the review boundary), and an
- * offered tool policy is never sent.
+ * The harness has no schema flag, and this driver sends no tool policy, so
+ * `structuredOutput` and `toolPolicy` stay `false`: a judge's schema travels
+ * inside the prompt text (enforcement remains parseJudge at the review
+ * boundary), and the CLI's `--settings`/hooks surface stays unwired.
  *
  * @type {import("./index.mjs").DriverAdapter}
  */

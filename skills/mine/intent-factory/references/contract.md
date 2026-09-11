@@ -193,7 +193,8 @@ are excluded because judges review captured results.
   rides the provider-derived `${PROVIDER}_API_KEY` variable built from
   `config["auth_token.env_key"]` (default `ZAI_API_KEY`). `permissionMode`
   maps to `--mode` (`build`/`edit`/`plan`/`yolo`; default `yolo` — a judge
-  runtime declares `plan`). No schema flag and no hook surface:
+  runtime declares `plan`). No schema flag, and the driver sends no tool
+  policy (the CLI's `--settings`/hooks surface stays unwired):
   `structuredOutput`/`toolPolicy` are `false`, judges arbitrate through the
   prompt-embedded schema, and a `toolPolicy` requirement rejects the runtime.
   Continuation resumes `sess_…` ids. Mid-run live metering reads zero; usage

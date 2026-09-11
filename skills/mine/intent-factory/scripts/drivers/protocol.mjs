@@ -181,13 +181,15 @@ export function normalizeZcodeResult(stdout, exitCode, signal, options = {}) {
     status: result?.trim() ? "done" : "no-op",
     result,
     continuationId: typeof record.sessionId === "string" ? record.sessionId : null,
-    // ZCode inputTokens already include the cached reads (its totalTokens is
-    // inputTokens + outputTokens), so the cache component is subtracted here.
+    // ZCode inputTokens is the whole input volume: its totalTokens is
+    // inputTokens + outputTokens, and cacheReadTokens/cacheWriteTokens are
+    // details already inside it. Subtracting the cache reads leaves uncached
+    // input plus cache writes, the canonical convention; adding the writes on
+    // top would count them twice.
     usage: canonicalUsage({
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cache_read_tokens: usage.cacheReadTokens,
-      cache_write_tokens: usage.cacheWriteTokens,
     }, { inputIncludesCache: true }),
     costUsd: null,
     error: null,
