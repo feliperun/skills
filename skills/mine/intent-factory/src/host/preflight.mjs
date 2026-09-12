@@ -19,9 +19,10 @@ import { existsSync, readFileSync, statfsSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, getHarness, probeRuntime } from "../harnesses/index.mjs";
 import { addRuntimeRequirement, failoverTargets, runtimeSnapshot } from "../engine/failover.mjs";
-import { routeRuntime, validateContract } from "../contract/index.mjs";
+import { validateContract } from "../contract/index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, discoverRuntimes } from "../engine/runtime-discovery.mjs";
 import { errorMessage } from "../util.mjs";
+import { routeRuntime } from "../contract/runtime.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").RuntimeSnapshot} RuntimeSnapshot */

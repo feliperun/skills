@@ -27,9 +27,10 @@ import { normalizeCodexResult, parseVersion } from "../../src/harnesses/protocol
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../../src/host/tool-policy-hook.mjs";
 import { DEFAULT_CLAUDE_TOOLS } from "../../src/harnesses/claude/index.mjs";
 import { CODEX_PREAMBLE_OVERRIDES } from "../../src/harnesses/codex/index.mjs";
-import { JUDGE_SCHEMA, routeRuntime } from "../../src/engine/prompts.mjs";
+import { JUDGE_SCHEMA } from "../../src/engine/prompts.mjs";
 import { validateContract } from "../../src/contract/index.mjs";
 import { fixture, packet, withEmptyPath, writeContract } from "../helpers.mjs";
+import { routeRuntime } from "../../src/contract/runtime.mjs";
 
 test("all provider adapters report explicit capabilities and transport", () => {
   const runtimes = [

@@ -16,17 +16,12 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   TERMINAL,
-  normalizeProviderResult,
-  renderFindings,
-  renderReport,
-  renderStatus,
-  validateContract,
 } from "./engine/prompts.mjs";
-import { probeRuntime, providerCommand } from "./harnesses/index.mjs";
+import { normalizeProviderResult, probeRuntime, providerCommand } from "./harnesses/index.mjs";
 import { modelsCommand } from "./harnesses/catalogue.mjs";
 import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./host/preflight.mjs";
-import { renderReportJson, renderStatusJson } from "./report/render.mjs";
-import { validateNodeSnapshot } from "./contract/index.mjs";
+import { renderFindings, renderReport, renderReportJson, renderStatus, renderStatusJson } from "./report/render.mjs";
+
 import {
   bootstrapAckPath,
   bootstrapAttemptPath,
@@ -55,6 +50,8 @@ import { delay, errorCode, errorMessage } from "./util.mjs";
 import { bootstrapNonceForProcess, cleanupBootstrapNonce, waitForBootstrapAcknowledgement } from "./engine/detach.mjs";
 import { render } from "./report/final.mjs";
 import { emptyUsage } from "./run/usage.mjs";
+import { validateContract } from "./contract/index.mjs";
+import { validateNodeSnapshot } from "./contract/snapshot.mjs";
 
 /** @typedef {import("./contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract/index.mjs").ValidatedNode} ValidatedNode */

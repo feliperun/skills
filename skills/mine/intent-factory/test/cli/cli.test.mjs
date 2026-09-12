@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { renderFindings, renderReport, renderStatus, validateContract } from "../../src/engine/prompts.mjs";
-import { INTENT_FACTORY_VERSION } from "../../src/contract/index.mjs";
-import { renderStatusJson } from "../../src/report/render.mjs";
+
+import { INTENT_FACTORY_VERSION, validateContract } from "../../src/contract/index.mjs";
+import { renderFindings, renderReport, renderStatus, renderStatusJson } from "../../src/report/render.mjs";
 import { runContract, resumeRun } from "../../src/cli.mjs";
 
 import { processStartToken } from "../../src/run/lock.mjs";

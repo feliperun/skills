@@ -1,3 +1,4 @@
+import { rejectUnknown, requireId, requireString } from "./assert.mjs";
 /**
  * Schema 2 Definition of Done items. Each item is an object that names an
  * observable outcome and declares how it is proven: mechanically through a
@@ -94,31 +95,3 @@ function validateVerificationRef(value, label, options) {
   return String(index);
 }
 
-/**
- * @param {Record<string, unknown>} record
- * @param {Set<string>} fields
- * @param {string} label
- */
-function rejectUnknown(record, fields, label) {
-  for (const key of Object.keys(record)) {
-    if (!fields.has(key)) throw new TypeError(`${label} has unknown field: ${key}`);
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireId(value, label) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._-]+$/u.test(value) || value === "." || value === "..") {
-    throw new TypeError(`${label} must contain only letters, numbers, dot, underscore, or dash`);
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireString(value, label) {
-  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
-}

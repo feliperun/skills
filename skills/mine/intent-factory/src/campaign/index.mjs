@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic, writeTextAtomic } from "../run/store.mjs";
 import { errorCode } from "../util.mjs";
+import { requireId, requireText, requireTimestamp } from "../contract/assert.mjs";
 
 const CAMPAIGN_DIR_NAME = "campaigns";
 const CAMPAIGN_FILE = "campaign.json";
@@ -1382,37 +1383,5 @@ function validateCampaign(campaign) {
   }
   if (!Array.isArray(record.linkedRunIds)) throw new TypeError("campaign.linkedRunIds must be an array");
   for (const runId of record.linkedRunIds) requireId(runId, "campaign.linkedRunIds[]");
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireId(value, label) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._-]+$/u.test(value)) {
-    throw new TypeError(`${label} must contain only letters, numbers, dot, underscore, or dash`);
-  }
-  if (value === "." || value === "..") {
-    throw new TypeError(`${label} must not be "." or ".."`);
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- * @returns {asserts value is string}
- */
-function requireText(value, label) {
-  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireTimestamp(value, label) {
-  if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
-    throw new TypeError(`${label} must be an ISO-8601 timestamp`);
-  }
 }
 

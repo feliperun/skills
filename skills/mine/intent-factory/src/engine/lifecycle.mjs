@@ -33,9 +33,7 @@ import {
   JUDGE_SCHEMA,
   TERMINAL,
   judgePrompt,
-  normalizeProviderResult,
   parseJudge,
-  routeRuntime,
 } from "./prompts.mjs";
 import {
   deterministicGate,
@@ -58,12 +56,7 @@ import {
   applyVerificationFailure,
   settleUnavailableJudge,
 } from "./review.mjs";
-import {
-  INTENT_FACTORY_VERSION,
-  PROTOCOL_SCHEMA_VERSION,
-  harnessCapabilities,
-  providerCommand,
-} from "../harnesses/index.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, harnessCapabilities, normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";
 import { liveUsage, SessionMetricsParser, TOOL_OUTPUT_LIMIT_BYTES } from "../harnesses/exec-jsonl/index.mjs";
 import { extractJson } from "../harnesses/protocol.mjs";
 import { routeRuntimeForState, routingBackoffActive, runtimeSnapshot } from "./failover.mjs";
@@ -80,7 +73,7 @@ import {
 } from "./backoff.mjs";
 import { exhaustedUntilOf } from "./runtime-discovery.mjs";
 import { statusNote, writeStatusArtifacts } from "../report/render.mjs";
-import { validateEvent, validateNodeSnapshot } from "../contract/index.mjs";
+
 import {
   appendJsonl,
   readJson,
@@ -130,6 +123,8 @@ import {
 import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerScope, emptyScope, persistedScopeBoundary, recordScopeFinding, sourceWorkerRuntime, workerScope } from "./scope.mjs";
 import { runVerification } from "./run-command.mjs";
 import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../repo/workspace.mjs";
+import { routeRuntime } from "../contract/runtime.mjs";
+import { validateEvent, validateNodeSnapshot } from "../contract/snapshot.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */

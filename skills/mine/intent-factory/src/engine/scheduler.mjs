@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { syncAgentSignal } from "../repo/signal.mjs";
-import { JUDGE_SCHEMA, TERMINAL, retryPrompt, validateContract } from "./prompts.mjs";
+import { JUDGE_SCHEMA, TERMINAL, retryPrompt } from "./prompts.mjs";
 import { verificationFailureVerdict } from "./judge-gate.mjs";
 import {
   applyJudgeProtocolFailure,
@@ -15,11 +15,7 @@ import { extractJson } from "../harnesses/protocol.mjs";
 import { routingBackoffActive } from "./failover.mjs";
 import { blockingChecks, environmentPreflight, reachableRuntimes } from "../host/preflight.mjs";
 import { composeAssignments, discoverRuntimes } from "./runtime-discovery.mjs";
-import {
-  captureSourceIdentity,
-  validateNodeSnapshot,
-  validateRunMetadata,
-} from "../contract/index.mjs";
+
 import {
   appendJsonl,
   bootstrapAttemptPath,
@@ -69,6 +65,9 @@ import { closePersistedInvocation, recoverOrphan, recoveryFromOverride } from ".
 import { canonicalWorkerResultText, isResultMaterializationInvocation, materializeAttemptResult, recoverWorkerResult } from "./result-file.mjs";
 import { captureNodeScopeBoundaries, checkPersistedWorkerScope, checkWorkerScope, emptyScope, persistedScopeBoundary, reconcileAmbiguousWorkerRestart, resolveUnknownEffect } from "./scope.mjs";
 import { executeControllerVerification, recoverVerificationAttempts, verifyCandidateWorkspace } from "./verify.mjs";
+import { validateContract } from "../contract/index.mjs";
+import { validateNodeSnapshot, validateRunMetadata } from "../contract/snapshot.mjs";
+import { captureSourceIdentity } from "../contract/source-identity.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */

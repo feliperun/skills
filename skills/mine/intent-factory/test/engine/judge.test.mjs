@@ -4,12 +4,11 @@ import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { renderFindings } from "../../src/engine/prompts.mjs";
+
 import { runContract, resumeRun } from "../../src/cli.mjs";
 import { fakeCodex, fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, notifications, withBrokenGateCodex } from "../runner-helpers.mjs";
-
-
+import { renderFindings } from "../../src/report/render.mjs";
 
 test("fails deterministic verification before the judge", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-verification-fail-"));
@@ -42,7 +41,6 @@ test("fails deterministic verification before the judge", async () => {
   assert.match(state.gate.findings[0].evidence, /exit=2/u);
 });
 
-
 test("a retried attempt continues from the previous attempt's sealed worktree instead of a fresh cut from the integration head", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-continue-sealed-"));
   const path = writeContract(directory, fixture({
@@ -69,7 +67,6 @@ test("a retried attempt continues from the previous attempt's sealed worktree in
   );
 });
 
-
 test("oversized judge prompt fails before judge spawn or persistence", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-prompt-cap-"));
   const path = writeContract(directory, fixture({
@@ -95,7 +92,6 @@ test("oversized judge prompt fails before judge spawn or persistence", async () 
   assert.equal(state.error.code, "judge_prompt_too_large");
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0);
 });
-
 
 test("skips the judge when every Definition of Done item is mechanical", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-mechanical-gate-"));
@@ -146,7 +142,6 @@ process.stdin.on("end", () => {
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
   assert.equal(readFileSync(marker, "utf8"), "proved", "the mechanical proof command ran in the contract workspace");
 });
-
 
 test("invokes the judge with the deterministic checklist when a judgment item exists", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judgment-gate-"));
@@ -213,7 +208,6 @@ process.stdin.on("end", () => {
   assert.match(prompt, /Arbitrate only the judgment items/u);
 });
 
-
 test("a failing mechanical proof rejects the worker generation without any judge", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-mechanical-fail-"));
   const fake = join(directory, "mechanical-fail-provider.mjs");
@@ -258,7 +252,6 @@ process.stdin.on("end", () => {
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 0, "no judge was ever invoked");
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
 });
-
 
 test("an uncited judge rejection re-asks once then blocks attention without consuming a revision", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-"));
@@ -325,7 +318,6 @@ process.stdin.on("end", () => {
   assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
 
-
 test("skips the judge for an empty Definition of Done checklist", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-empty-dod-gate-"));
   const judgeCalls = join(directory, ".runs", "empty-dod-judge-calls.txt");
@@ -379,7 +371,6 @@ process.stdin.on("end", () => {
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")), "no judge protocol events for an empty Definition of Done");
   assert.ok(!existsSync(judgeCalls), "the judge provider is never spawned for an empty Definition of Done");
 });
-
 
 test("an uncited fail below the gate failOn threshold is a judge protocol failure, not a pass", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-below-"));
@@ -449,7 +440,6 @@ process.stdin.on("end", () => {
   assert.match(readFileSync(promptTwo, "utf8"), /Your previous fail verdict cited no Definition of Done item id/u);
   assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
-
 
 test("a judge protocol re-ask over a mixed checklist neither reruns mechanical proofs nor consumes a revision", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-uncited-mixed-"));
@@ -521,7 +511,6 @@ process.stdin.on("end", () => {
   assert.equal(readFileSync(proofRuns, "utf8").trim().split("\n").filter(Boolean).length, 1, "the mechanical proof runs exactly once and is not rerun by the re-ask");
   assert.match(readFileSync(join(outDir, "judge-prompt-2.txt"), "utf8"), /already proven by the controller/u);
 });
-
 
 test("the judge re-ask bound survives a controller crash in either gap because it is persisted with the node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-reask-durable-"));
@@ -640,7 +629,6 @@ process.stdin.on("end", () => {
   assert.ok(notifications(verdictGap).some((event) => event.type === "attention" && event.errorCode === "judge_protocol"));
 });
 
-
 test("preserves the worker report when the judge provider fails", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-fail-"));
   const path = writeContract(directory, fixture({
@@ -656,7 +644,6 @@ test("preserves the worker report when the judge provider fails", async () => {
   assert.equal((state.invocations ?? []).filter((invocation) => invocation.phase === "judge").length, 2, "one bounded judge retry before blocking");
   assert.equal(/** @type {{summary: string}} */ (state.result).summary, "worker complete");
 });
-
 
 test("a judge whose tool host is disabled never yields a verdict and blocks as judge_unavailable after one retry", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-judge-tool-host-"));
@@ -677,7 +664,6 @@ test("a judge whose tool host is disabled never yields a verdict and blocks as j
   assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "judge_unavailable"));
 });
 
-
 test("bounds gate retries and reports exhausted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-retry-"));
   const path = writeContract(directory, fixture({
@@ -696,7 +682,6 @@ test("bounds gate retries and reports exhausted", async () => {
   assert.equal(nodeState(result).status, "exhausted");
   assert.equal(nodeState(result).attempt, 2);
 });
-
 
 test("findings renders exhausted gate findings ready for a fix node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-findings-"));
@@ -717,7 +702,6 @@ test("findings renders exhausted gate findings ready for a fix node", async () =
   assert.match(rendered, /\[critical\] broken/u);
   assert.match(rendered, /Evidence: test failed/u);
 });
-
 
 test("a finished run with non-done nodes writes a findings.json handoff", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-findings-artifact-"));
@@ -752,7 +736,6 @@ test("a finished run with non-done nodes writes a findings.json handoff", async 
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 });
-
 
 test("a fully done run writes no findings.json", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-findings-clean-"));

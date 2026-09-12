@@ -11,6 +11,7 @@
 
 import { Buffer } from "node:buffer";
 import { validateVerificationCommands } from "./verification.mjs";
+import { assertObject, nonNegativeInteger, positiveInteger, rejectUnknown, requireInteger, requireString, requireTimestamp } from "./assert.mjs";
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {import("./verification.mjs").VerificationCommand} VerificationCommand */
@@ -93,64 +94,3 @@ function validateVerificationAttempt(value, label) {
   }
 }
 
-/**
- * @param {unknown} value
- * @param {string} label
- * @returns {asserts value is JsonObject}
- */
-function assertObject(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object`);
-}
-
-/**
- * @param {JsonObject} value
- * @param {Set<string>} allowed
- * @param {string} label
- */
-function rejectUnknown(value, allowed, label) {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new TypeError(`${label} has unexpected field ${key}`);
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireString(value, label) {
-  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireTimestamp(value, label) {
-  if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
-    throw new TypeError(`${label} must be a valid timestamp`);
-  }
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireInteger(value, label) {
-  if (!Number.isInteger(value)) throw new TypeError(`${label} must be an integer`);
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function positiveInteger(value, label) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer`);
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function nonNegativeInteger(value, label) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new TypeError(`${label} must be a non-negative integer`);
-}

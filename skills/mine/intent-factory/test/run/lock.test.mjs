@@ -16,11 +16,12 @@ import {
   processStartToken,
   readLock,
 } from "../../src/run/lock.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../../src/contract/index.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../../src/contract/index.mjs";
 import { resumeRun, runContract } from "../../src/cli.mjs";
 import { detectStalls, invocationAlive, monitorInvocation, startProcess, terminateInvocation } from "../../src/engine/process.mjs";
 
 import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
+import { validateNodeSnapshot } from "../../src/contract/snapshot.mjs";
 
 // A pid the kernel will not hand out while the test runs: its holder is dead.
 const DEAD_PID = 2_147_483_647;

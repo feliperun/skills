@@ -8,13 +8,8 @@ import { fileURLToPath } from "node:url";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
-  captureSourceIdentity,
   hashPacket,
-  routeRuntime,
   validateContract,
-  validateEvent,
-  validateNodeSnapshot,
-  validateRunMetadata,
 } from "../../src/contract/index.mjs";
 import { SIGNAL_END, SIGNAL_START } from "../../src/repo/signal-block.mjs";
 import { judgePrompt } from "../../src/engine/prompts.mjs";
@@ -22,6 +17,9 @@ import { JUDGE_LIMITS } from "../../src/contract/judge-envelope.mjs";
 import { runContract } from "../../src/cli.mjs";
 import { harnessCapabilities } from "../../src/harnesses/index.mjs";
 import * as helpers from "../helpers.mjs";
+import { routeRuntime } from "../../src/contract/runtime.mjs";
+import { validateEvent, validateNodeSnapshot, validateRunMetadata } from "../../src/contract/snapshot.mjs";
+import { captureSourceIdentity } from "../../src/contract/source-identity.mjs";
 
 /** @param {string} directory */
 function initializeGit(directory) {

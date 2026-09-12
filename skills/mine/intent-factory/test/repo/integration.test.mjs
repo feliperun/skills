@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
-import { captureSourceIdentity } from "../../src/contract/index.mjs";
+
 import { candidateOnlyFailures } from "../../src/engine/judge-gate.mjs";
 import {
   candidateRefName,
@@ -15,6 +15,7 @@ import {
   createRunRef,
   sealAttempt,
 } from "../../src/repo/worktree.mjs";
+import { captureSourceIdentity } from "../../src/contract/source-identity.mjs";
 
 test("run creation source identity includes resolved cwd and task-packet hashes", () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-source-"));

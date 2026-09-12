@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { validateTaskPacket } from "./task-packet.mjs";
+import { requireText } from "./assert.mjs";
 
 const RESULT_LIMITS = Object.freeze({
   bytes: 32 * 1024,
@@ -107,16 +108,6 @@ export function parseDiscoveryResult(value, cwd) {
   return /** @type {WorkerResult & {discoveryPacket: import("./task-packet.mjs").TaskPacket}} */ (
     /** @type {unknown} */ (normalized)
   );
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- * @param {number} maxBytes
- */
-function requireText(value, label, maxBytes) {
-  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
-  if (Buffer.byteLength(value, "utf8") > maxBytes) throw new TypeError(`${label} exceeds ${maxBytes} bytes`);
 }
 
 /**

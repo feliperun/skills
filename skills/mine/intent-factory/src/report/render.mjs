@@ -1,10 +1,11 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
-import { validateContract, validateNodeSnapshot, validateRunMetadata } from "../contract/index.mjs";
+import { validateContract } from "../contract/index.mjs";
 import { readJson, writeJsonAtomic } from "../run/store.mjs";
 import { lockStale, pidAlive, readLock } from "../run/lock.mjs";
 import { scopeFindingsNote } from "../contract/scope-findings.mjs";
 import { reviewNote } from "../contract/review-modes.mjs";
+import { validateNodeSnapshot, validateRunMetadata } from "../contract/snapshot.mjs";
 
 /** Advisory ceiling for status.json (TECH-SPEC lean, rule 5); never enforced destructively. */
 const STATUS_JSON_MAX_BYTES = 200 * 1024;

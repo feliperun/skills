@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../../src/contract/index.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../../src/contract/index.mjs";
 import { parseJudge, retryPrompt } from "../../src/engine/prompts.mjs";
 import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../../src/contract/judge-envelope.mjs";
 import { judgeReaskInstruction } from "../../src/contract/review-modes.mjs";
@@ -13,6 +13,7 @@ import { validateVerificationCommands } from "../../src/contract/verification.mj
 import { parseDiscoveryResult, parseWorkerResult } from "../../src/contract/worker-result.mjs";
 import { runVerification } from "../../src/engine/run-command.mjs";
 import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../../src/repo/workspace.mjs";
+import { validateNodeSnapshot } from "../../src/contract/snapshot.mjs";
 
 /** @param {string} directory */
 function initializeGit(directory) {

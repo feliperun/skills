@@ -12,8 +12,9 @@ import { excerpt } from "../util.mjs";
 import { hasOperationSettlement, operationNextState, settleInvocation } from "../run/operations.mjs";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { validateEvent, validateNodeSnapshot } from "../contract/index.mjs";
+
 import { writeRunTextWithDiskPressureRetry } from "../run/disk-gc.mjs";
+import { validateEvent, validateNodeSnapshot } from "../contract/snapshot.mjs";
 
 /** @typedef {ReturnType<typeof import("../run/lock.mjs").acquire>} LockHandle */
 /** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */

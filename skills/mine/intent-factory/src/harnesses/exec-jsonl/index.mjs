@@ -29,6 +29,7 @@ import {
   parseJsonLines,
   parseVersion,
 } from "../protocol.mjs";
+import { rejectUnknown } from "../../contract/assert.mjs";
 
 export { HARNESS_OUTPUT_LIMIT_BYTES } from "../protocol.mjs";
 
@@ -204,17 +205,6 @@ function validateExecJsonlEvents(events) {
     }
   }
   if (terminalCount !== 1) throw new TypeError("exec-jsonl requires exactly one terminal event");
-}
-
-/**
- * @param {Record<string, unknown>} value
- * @param {Set<string>} allowed
- * @param {string} label
- */
-function rejectUnknown(value, allowed, label) {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new TypeError(`${label} has unexpected field ${key}`);
-  }
 }
 
 /**

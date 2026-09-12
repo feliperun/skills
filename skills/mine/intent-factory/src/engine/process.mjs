@@ -12,9 +12,9 @@ import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readSync, sta
 import { dirname, join, resolve } from "node:path";
 import { errorCode } from "../util.mjs";
 import { fileURLToPath } from "node:url";
-import { harnessCapabilities, providerCommand } from "../harnesses/index.mjs";
+import { harnessCapabilities, normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";
 import { latestTimeoutSec } from "./backoff.mjs";
-import { normalizeProviderResult } from "./prompts.mjs";
+
 import { processStartToken } from "../run/lock.mjs";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";

@@ -3,14 +3,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderReport, renderStatus, validateContract } from "../../src/engine/prompts.mjs";
-import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "../../src/report/render.mjs";
+
+import { MAX_NOTE_LENGTH, renderReport, renderReportJson, renderStatus, renderStatusJson } from "../../src/report/render.mjs";
 import { runContract, resumeRun } from "../../src/cli.mjs";
 import { runRefName } from "../../src/repo/worktree.mjs";
 import { ensureAttemptWorktree, fakeCodex, fakeExecJsonl, fixture, initializeGit, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, showRefFile, advisoryGateCodex } from "../runner-helpers.mjs";
-
-
+import { validateContract } from "../../src/contract/index.mjs";
 
 test("an unexpected write on green verification is an advisory finding, not a terminal failure", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-"));
@@ -114,7 +113,6 @@ test("an unexpected write on green verification is an advisory finding, not a te
   }
 });
 
-
 test("an incomplete worker that writes outside scope still fails with unexpected_write", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-incomplete-"));
   const path = writeContract(directory, fixture({
@@ -130,7 +128,6 @@ test("an incomplete worker that writes outside scope still fails with unexpected
   assert.equal(state.scopeFindings, undefined, "only a completed attempt earns an advisory finding");
   assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
 });
-
 
 test("a scope violation on failed verification keeps the failure and appends the unexpected paths to the message", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-red-"));
@@ -154,7 +151,6 @@ test("a scope violation on failed verification keeps the failure and appends the
   assert.equal(state.scopeFindings, undefined, "a failed attempt never gets an advisory finding");
   assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
 });
-
 
 test("a done envelope whose worker result is not done still fails with unexpected_write", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-blocked-result-"));
@@ -187,7 +183,6 @@ test("a done envelope whose worker result is not done still fails with unexpecte
   assert.equal(invalidState.scopeFindings, undefined);
 });
 
-
 test("a done envelope without the canonical result file keeps the terminal unexpected_write", async () => {
   // The final message alone is not accepted work: the controller materializes
   // the canonical file from it only after the scope gate, so an attempt that
@@ -207,7 +202,6 @@ test("a done envelope without the canonical result file keeps the terminal unexp
   assert.equal(existsSync(join(result.runDir, "results", "build.json")), false, "the envelope result was never materialized");
   assert.ok(state.scope?.unexpectedPaths.includes("unexpected.txt"));
 });
-
 
 test("a scope violation on a gated red attempt reaches the retry prompt", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-red-revision-"));
@@ -239,7 +233,6 @@ test("a scope violation on a gated red attempt reaches the retry prompt", async 
   assert.match(retryPrompt, /unexpected-1\.txt/u);
 });
 
-
 test("a worker-created symlink cannot authorize its target, but is advisory on green verification", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-new-symlink-"));
   writeFileSync(join(directory, "outside.txt"), "baseline\n");
@@ -257,7 +250,6 @@ test("a worker-created symlink cannot authorize its target, but is advisory on g
   assert.ok(state.scope?.unexpectedPaths.includes("outside.txt"));
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["outside.txt"]);
 });
-
 
 test("retargeting a contained alias cannot authorize the new target, but is advisory on green verification", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-retargeted-symlink-"));
@@ -278,7 +270,6 @@ test("retargeting a contained alias cannot authorize the new target, but is advi
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["outside.txt"]);
 });
 
-
 test("a pre-existing contained alias remains an authorized write path", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-contained-alias-"));
   writeFileSync(join(directory, "src.txt"), "source\n");
@@ -296,7 +287,6 @@ test("a pre-existing contained alias remains an authorized write path", async ()
   assert.deepEqual(state.scope?.boundary?.files, ["alias.txt", "src.txt"]);
   assert.equal(showRefFile(directory, runRefName("scope-contained-alias-run"), "src.txt"), "authorized target\n");
 });
-
 
 test("a file write root matches exactly that path in the scope gate", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-"));
@@ -317,7 +307,6 @@ test("a file write root matches exactly that path in the scope gate", async () =
   assert.equal(showRefFile(directory, runRefName("scope-file-root-run"), "notes.md"), "in the file root\n");
 });
 
-
 test("a file write root does not authorize a sibling file", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-sibling-"));
   writeFileSync(join(directory, "notes.md"), "before\n");
@@ -334,7 +323,6 @@ test("a file write root does not authorize a sibling file", async () => {
   assert.ok(state.scope?.unexpectedPaths.includes("sibling.md"));
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["sibling.md"]);
 });
-
 
 test("a file write root does not authorize a path beneath a same-named directory", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-file-root-nested-"));
@@ -354,13 +342,11 @@ test("a file write root does not authorize a path beneath a same-named directory
   assert.deepEqual(state.scopeFindings?.unexpectedPaths, ["notes.md/nested.txt"]);
 });
 
-
 test("accepts parallel execution now that attempt worktrees provide isolation", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-max-parallel-"));
   const path = writeContract(directory, fixture({ maxParallel: 2 }));
   assert.equal(validateContract(JSON.parse(readFileSync(path, "utf8")), path).maxParallel, 2);
 });
-
 
 test("provider exhaustion follows the declared one-hop fallback without consuming revisions", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-one-hop-"));
@@ -384,7 +370,6 @@ test("provider exhaustion follows the declared one-hop fallback without consumin
   assert.deepEqual((state.routing?.history ?? []).map((entry) => entry.hop), [1]);
 });
 
-
 test("a second exhaustion after the one declared hop blocks at the hop cap", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-hop-cap-"));
   const first = fakeCodex(directory, "exhausted");
@@ -405,7 +390,6 @@ test("a second exhaustion after the one declared hop blocks at the hop cap", asy
   assert.equal(state.error?.code, "provider_failover_hop_cap");
   assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
 });
-
 
 test("provider exhaustion without a rule is terminal and cycles do not reuse a runtime", async () => {
   const terminalDirectory = mkdtempSync(join(tmpdir(), "runner-failover-no-rule-"));
@@ -438,7 +422,6 @@ test("provider exhaustion without a rule is terminal and cycles do not reuse a r
   assert.deepEqual((cycle.invocations ?? []).map((invocation) => invocation.runtimeId), ["first", "second"]);
 });
 
-
 test("a declared fallback reschedules immediately with no backoff", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-backoff-"));
   const first = fakeCodex(directory, "exhausted");
@@ -457,7 +440,6 @@ test("a declared fallback reschedules immediately with no backoff", async () => 
   assert.equal(state.routing?.history?.[0]?.backoffSec, 0);
   assert.ok(Date.parse(state.routing?.history?.[0]?.backoffUntil ?? "") <= Date.now());
 });
-
 
 test("recovered provider exhaustion does not charge persisted usage or cost twice", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-no-double-charge-"));
@@ -493,7 +475,6 @@ test("recovered provider exhaustion does not charge persisted usage or cost twic
   assert.equal(final.costUsd, costUsd);
 });
 
-
 test("ordinary provider failure usage is counted from its invocation once", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failure-usage-once-"));
   const path = writeContract(directory, fixture({
@@ -507,7 +488,6 @@ test("ordinary provider failure usage is counted from its invocation once", asyn
   assert.deepEqual(state.usage, { inputTokens: 5, outputTokens: 3, cacheReadInputTokens: 2 });
   assert.deepEqual(state.invocations?.map((invocation) => invocation.usage), [{ inputTokens: 5, outputTokens: 3, cacheReadInputTokens: 2 }]);
 });
-
 
 test("judge provider failover preserves the completed worker result", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-failover-judge-"));
@@ -531,7 +511,6 @@ test("judge provider failover preserves the completed worker result", async () =
   assert.deepEqual((state.invocations ?? []).map((invocation) => invocation.runtimeId), ["worker", "judge-first", "judge-second"]);
   assert.equal(state.routing?.history?.[0]?.role, "judge");
 });
-
 
 test("persists and recovers cost exactly once and reports totals", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-cost-recovery-"));
@@ -573,7 +552,6 @@ test("persists and recovers cost exactly once and reports totals", async () => {
   assert.deepEqual((recovered.invocations ?? []).map((invocation) => invocation.costUsd), [0.01, 0.01]);
 });
 
-
 test("a scope finding still persists the usage its invocation spent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-scope-usage-"));
   const path = writeContract(directory, fixture({
@@ -589,7 +567,6 @@ test("a scope finding still persists the usage its invocation spent", async () =
   const invocation = state.invocations?.at(-1);
   assert.equal(invocation?.usage?.inputTokens, 10, "invocation record carries the same usage");
 });
-
 
 test("a wall-clock kill persists usage backfilled from the transcript", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-timeout-usage-"));

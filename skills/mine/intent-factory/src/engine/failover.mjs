@@ -11,7 +11,7 @@
  */
 import { harnessCapabilities } from "../harnesses/index.mjs";
 import { nextSameTierRuntime } from "./runtime-discovery.mjs";
-import { routeRuntime } from "./prompts.mjs";
+import { routeRuntime } from "../contract/runtime.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
 /** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */

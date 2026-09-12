@@ -11,9 +11,10 @@ import { basename, join } from "node:path";
 import { errorMessage, stableJson } from "../util.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import { liveUsage } from "../harnesses/exec-jsonl/index.mjs";
-import { normalizeProviderResult } from "../engine/prompts.mjs";
+
 import { readBoundedTail } from "../engine/process.mjs";
 import { writeNode } from "../engine/state.mjs";
+import { normalizeProviderResult } from "../harnesses/index.mjs";
 
 /** @typedef {import("../engine/process.mjs").Invocation} Invocation */
 /** @typedef {import("../engine/process.mjs").Job} Job */

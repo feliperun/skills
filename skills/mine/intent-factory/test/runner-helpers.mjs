@@ -4,10 +4,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runContract } from "../src/cli.mjs";
-import { validateContract } from "../src/engine/prompts.mjs";
+
 import { fixture, packet, writeContract } from "./helpers.mjs";
-
-
+import { validateContract } from "../src/contract/index.mjs";
 
 /** @param {import("../src/cli.mjs").RunOutcome} result @param {string} [id] @returns {import("../src/contract/index.mjs").NodeSnapshot} */
 export function nodeState(result, id = "build") {
@@ -16,14 +15,12 @@ export function nodeState(result, id = "build") {
   return state;
 }
 
-
 /** @param {string} runDir @returns {Record<string, unknown>[]} */
 export function notifications(runDir) {
   const path = join(runDir, "notify.jsonl");
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
-
 
 /**
  * A completed run merges its work onto the run ref, not into the shared
@@ -35,13 +32,11 @@ export function showRefFile(repo, ref, path) {
   return execFileSync("git", ["-C", repo, "show", `${ref}:${path}`], { encoding: "utf8" });
 }
 
-
 /** @param {import("node:child_process").ChildProcess} child @returns {number} */
 export function childPid(child) {
   if (child.pid === undefined) throw new Error("child pid unavailable");
   return child.pid;
 }
-
 
 /**
  * @param {string} directory
@@ -72,13 +67,11 @@ else {
   return { executable, requestLog };
 }
 
-
 /** @param {string[]} args @param {string} flag @returns {string|null} */
 export function flagValue(args, flag) {
   const index = args.indexOf(flag);
   return index < 0 ? null : args[index + 1] ?? null;
 }
-
 
 /**
  * A codex-shaped provider for the durable worker-result protocol: the worker
@@ -161,7 +154,6 @@ if (process.argv.includes("--version")) {
   return executable;
 }
 
-
 /** @param {string} directory @param {"file-first"|"missing-then-mutates"|"missing-then-file-vs-message"|"missing-then-noop"|"revision-regrinds"} mode @param {string} path @returns {Promise<import("../src/cli.mjs").RunOutcome>} */
 export async function withResultFileCodex(directory, mode, path) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -173,7 +165,6 @@ export async function withResultFileCodex(directory, mode, path) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /**
  * A codex-mode provider whose judge always rejects the judgment item it is
@@ -218,7 +209,6 @@ if (process.argv.includes("--version")) {
   return executable;
 }
 
-
 /** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
 export async function withCitedGateCodex(directory, fn) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -230,7 +220,6 @@ export async function withCitedGateCodex(directory, fn) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /**
  * A codex-mode provider whose judge returns a cited minor advisory verdict
@@ -269,7 +258,6 @@ if (process.argv.includes("--version")) {
   return executable;
 }
 
-
 /** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
 export async function withAdvisoryGateCodex(directory, fn) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -281,7 +269,6 @@ export async function withAdvisoryGateCodex(directory, fn) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /**
  * A codex-mode provider whose judge rejects the judgment item it is asked to
@@ -319,7 +306,6 @@ if (process.argv.includes("--version")) {
   return executable;
 }
 
-
 /** @template T @param {string} directory @param {() => T | Promise<T>} fn @returns {Promise<T>} */
 export async function withBrokenGateCodex(directory, fn) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -331,7 +317,6 @@ export async function withBrokenGateCodex(directory, fn) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /**
  * A codex-shaped provider whose judge produces one review-protocol defect.
@@ -400,7 +385,6 @@ process.stdin.on("end", () => {
   return executable;
 }
 
-
 /** @template T @param {string} directory @param {"two-verdicts"|"empty-output"|"no-terminal"|"two-verdicts-then-fail"} defect @param {{again?: boolean}} options @param {() => T | Promise<T>} runner @returns {Promise<T>} */
 export async function withJudgeDefectCodex(directory, defect, options, runner) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -412,7 +396,6 @@ export async function withJudgeDefectCodex(directory, defect, options, runner) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /**
  * A codex-shaped provider whose worker finishes at once and whose judge keeps
@@ -450,7 +433,6 @@ process.stdin.on("end", () => {
   return executable;
 }
 
-
 /** @template T @param {string} directory @param {() => T | Promise<T>} runner @returns {Promise<T>} */
 export async function withStallingJudgeCodex(directory, runner) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -462,7 +444,6 @@ export async function withStallingJudgeCodex(directory, runner) {
     else process.env.INTENT_FACTORY_CODEX_BIN = previous;
   }
 }
-
 
 /** @param {string} prefix @param {Record<string, unknown>} overrides @returns {import("../src/contract/index.mjs").ValidatedContract} */
 export function failoverContract(prefix, overrides) {
@@ -476,11 +457,9 @@ export function failoverContract(prefix, overrides) {
   return validateContract(JSON.parse(readFileSync(path, "utf8")), path);
 }
 
-
 // A fixed clock keeps these cases deterministic: the schedule is judged against
 // now at both ends, so wall-clock drift must not decide the assertions.
 export const RESET_NOW = Date.parse("2026-09-04T06:00:00.000Z");
-
 
 export const NETWORK_NOW = Date.parse("2026-09-04T06:00:00.000Z");
 
@@ -489,9 +468,7 @@ export const NETWORK_DEADLINE = "2026-09-04T12:00:00.000Z";
 /** Fixed jitter draw: the classification under test, not the random number generator. */
 export const halfJitter = () => 0.5;
 
-
 export const RUNNER_CLI = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
-
 
 /**
  * Rewrite a persisted node snapshot the way the failure being resumed would
@@ -518,7 +495,6 @@ export function persistFailure(runDir, nodeId, failure) {
     error: { code: failure.code, message: failure.message ?? failure.code.replace(/_/g, " ") },
   }, null, 2));
 }
-
 
 /**
  * A codex-shaped provider whose worker prompts are logged before it completes,
@@ -557,7 +533,6 @@ if (process.argv.includes("--version")) {
   return { executable, log };
 }
 
-
 /** @template T @param {string} executable @param {() => T | Promise<T>} body @returns {Promise<T>} */
 export async function withCodexBinary(executable, body) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
@@ -570,12 +545,10 @@ export async function withCodexBinary(executable, body) {
   }
 }
 
-
 /** @param {string} runDir @returns {{identityWarnings?: string[], sourceIdentity: {gitHead: string|null}}} */
 export function runMetadata(runDir) {
   return JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
 }
-
 
 /** @param {string} runDir @returns {string[]} */
 export function recoveryDecisions(runDir) {
@@ -587,7 +560,6 @@ export function recoveryDecisions(runDir) {
     throw error;
   }
 }
-
 
 /**
  * A codex whose first judge turn returns two verdicts (blocking review blocks

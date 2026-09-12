@@ -11,10 +11,11 @@
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { normalizeProviderResult } from "../engine/prompts.mjs";
+
 import { readBoundedTail } from "../engine/process.mjs";
 import { readJson, writeJsonAtomic } from "./store.mjs";
 import { runtimeSnapshot } from "../engine/failover.mjs";
+import { normalizeProviderResult } from "../harnesses/index.mjs";
 
 /** @typedef {import("../engine/process.mjs").Invocation} Invocation */
 /** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */

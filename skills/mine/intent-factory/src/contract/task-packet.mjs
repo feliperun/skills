@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { validateVerificationCommands } from "./verification.mjs";
 import { errorCode } from "../util.mjs";
+import { requireString, requireStringArray } from "./assert.mjs";
 
 const FIELDS = new Set([
   "mode",
@@ -434,27 +435,6 @@ function renderAutonomousPrompt(packet, nodeId) {
   const prompt = `${lines.join("\n")}\n`;
   if (Buffer.byteLength(prompt, "utf8") > PROMPT_MAX_BYTES) throw new TypeError(`worker prompt exceeds ${PROMPT_MAX_BYTES} bytes`);
   return prompt;
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- */
-function requireString(value, label) {
-  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
-}
-
-/**
- * @param {unknown} value
- * @param {string} label
- * @param {boolean} nonEmpty
- */
-function requireStringArray(value, label, nonEmpty = false) {
-  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
-  if (nonEmpty && !value.length) throw new TypeError(`${label} must not be empty`);
-  for (const [index, item] of value.entries()) {
-    requireString(item, `${label}[${index}]`);
-  }
 }
 
 /**

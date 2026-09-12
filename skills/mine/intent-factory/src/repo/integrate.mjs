@@ -45,7 +45,7 @@ export function readIntegrationJournal(runDir) {
   const path = integrationJournalPath(runDir);
   let text;
   try {
-    text = requireText(path);
+    text = readTextFile(path);
   } catch (error) {
     if (error instanceof Error && /** @type {{code?: string}} */ (error).code === "ENOENT") return [];
     throw error;
@@ -473,6 +473,6 @@ function interruptStage(interrupt, stage) {
 }
 
 /** @param {string} path @returns {string} */
-function requireText(path) {
+function readTextFile(path) {
   return readFileSync(path, "utf8");
 }
