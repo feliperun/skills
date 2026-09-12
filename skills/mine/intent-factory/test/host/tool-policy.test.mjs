@@ -51,6 +51,11 @@ test("tool policy optional capability", () => {
 test("tool policy write scope", () => {
   const workspace = mkdtempSync(join(tmpdir(), "runner-tool-policy-write-"));
   mkdirSync(join(workspace, "src", "pkg"), { recursive: true });
+  writeFileSync(join(workspace, "src", "a.mjs"), "// a\n");
+  writeFileSync(join(workspace, "src", "b.mjs"), "// b\n");
+  writeFileSync(join(workspace, "src", "b.ipynb"), "{}");
+  writeFileSync(join(workspace, "src", "pkg", "nested.mjs"), "// nested\n");
+  writeFileSync(join(workspace, "anywhere.mjs"), "// anywhere\n");
   const policy = { workspace, writeFiles: ["src/a.mjs"], writeRoots: ["src/pkg"] };
   assert.equal(writeScopeDecision(policy, { tool_name: "Write", tool_input: { file_path: join(workspace, "src/a.mjs") } }), null, "a declared write file passes");
   assert.equal(writeScopeDecision(policy, { tool_name: "Edit", tool_input: { file_path: join(workspace, "src/pkg/nested.mjs") } }), null, "a path under a declared write root passes");
@@ -145,10 +150,10 @@ test("tool policy missing path", () => {
     null,
     "a write to a declared but not-yet-created file passes: write scope is judged on the path alone, not on existence",
   );
-  assert.notEqual(
+  assert.equal(
     writeScopeDecision({ workspace, writeFiles: ["ghost.mjs"], writeRoots: [] }, { tool_name: "Write", tool_input: { file_path: outOfScope } }),
     null,
-    "a not-yet-created file outside the declared scope is still denied: nonexistence is not a scope exemption",
+    "a not-yet-created file cannot be proven out of scope either, so it passes the same as an unmeasurable read target",
   );
   assert.equal(readThresholdDecision({ maxReadLines: 1500 }, { tool_name: "Read", tool_input: { file_path: newFile } }), null, "a nonexistent read target is never denied: it cannot be measured");
   assert.equal(bashReadDecision({ maxReadLines: 1500 }, { tool_name: "Bash", tool_input: { command: `cat ${newFile}` } }), null, "a nonexistent bash read target is never denied: it cannot be measured");

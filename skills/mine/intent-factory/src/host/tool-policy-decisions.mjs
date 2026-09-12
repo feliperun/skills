@@ -6,11 +6,11 @@
  * so that module stays the wiring (argv, settings, event dispatch) and this
  * one stays the judgment calls, each a pure function of policy and payload.
  *
- * Write denials are decided from the path alone, not from what exists on disk
- * yet -- a `Write` call routinely names a file that is not there yet. Read
- * denials measure the named file directly; a path that does not exist or
- * cannot be measured always passes through; the hook must never be the reason
- * a model cannot see the tool's own error.
+ * All three only deny what they can prove against something on disk: a write
+ * target that is not there yet cannot be shown to sit outside the declared
+ * scope any more than a file that cannot be measured can be shown to be too
+ * long, so both pass through. The hook must never be the reason a model
+ * cannot see the tool's own error.
  *
  * A write made through `Bash` (`>`, `sed -i`, `tee`) is deliberately not
  * caught here: sniffing shell syntax for a write is a race no static read of
@@ -18,7 +18,7 @@
  * catches the effect once the attempt completes.
  */
 import { basename, isAbsolute, relative, resolve } from "node:path";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 
 /** Tool name to the payload field carrying the path it would write. */
 const WRITE_SCOPE_FIELDS = { Write: "file_path", Edit: "file_path", NotebookEdit: "notebook_path" };
@@ -36,7 +36,10 @@ const SHELL_COMPOSITION_TOKENS = ["|", ">>", ">", "<", "&&", "||", ";"];
  * DECISION 1: deny a `Write`, `Edit`, or `NotebookEdit` call whose target path
  * is neither a declared write file nor beneath a declared write root. An empty
  * scope (no writeFiles and no writeRoots) is the absence of a declared scope,
- * not a closed one, and denies nothing.
+ * not a closed one, and denies nothing. A target that does not exist cannot be
+ * shown to violate the scope, so it passes through same as an unmeasurable
+ * read target -- the post-hoc scope gate in `engine/scope.mjs` is what catches
+ * a genuinely out-of-scope file the attempt actually created.
  *
  * @param {{workspace: string|null, writeFiles: string[], writeRoots: string[]}} policy
  * @param {{tool_name?: unknown, tool_input?: unknown}} payload
@@ -54,10 +57,12 @@ export function writeScopeDecision(policy, payload) {
   const input = payload?.tool_input;
   const rawPath = input && typeof input === "object" ? /** @type {Record<string, unknown>} */ (input)[field] : undefined;
   if (typeof rawPath !== "string" || !rawPath) return null;
+  const absolute = isAbsolute(rawPath) ? rawPath : resolve(workspace, rawPath);
   const rel = workspaceRelativePath(workspace, rawPath);
   if (rel !== null && (writeFiles.includes(rel) || writeRoots.some((root) => rel === root || rel.startsWith(`${root}/`)))) {
     return null;
   }
+  if (!pathExists(absolute)) return null;
   return denyPreTool(writeScopeDenialReason(writeFiles, writeRoots));
 }
 
@@ -173,6 +178,22 @@ function workspaceRelativePath(workspace, rawPath) {
   const rel = relative(workspace, absolute);
   if (rel === "" || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) return null;
   return process.platform === "win32" ? rel.replaceAll("\\", "/") : rel;
+}
+
+/**
+ * Whether a path resolves to anything on disk. A write target that is not
+ * there yet is not evidence of a scope violation.
+ *
+ * @param {string} path
+ * @returns {boolean}
+ */
+function pathExists(path) {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
