@@ -379,6 +379,9 @@ export function startWorker(contract, node, state, runDir, running, prompt, lock
       contract, node, state, runtime, workspace, prompt: effectivePrompt, paths, phase: "worker",
       commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, {
         toolPolicy: workerToolPolicy(runtime, node, workspace),
+        // The pair a `bulk-read` delegation inside the worker accounts itself
+        // against; providerCommand merges it into the spawned environment.
+        env: { INTENT_FACTORY_RUN_DIR: runDir, INTENT_FACTORY_NODE_ID: node.id },
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, state, runDir, "worker", phasePlan.mode, phasePlan.continuationId);
