@@ -151,9 +151,10 @@ test("tool policy missing path", () => {
     "a write to a declared but not-yet-created file passes: write scope is judged on the path alone, not on existence",
   );
   assert.equal(
-    writeScopeDecision({ workspace, writeFiles: ["ghost.mjs"], writeRoots: [] }, { tool_name: "Write", tool_input: { file_path: outOfScope } }),
-    null,
-    "a not-yet-created file cannot be proven out of scope either, so it passes the same as an unmeasurable read target",
+    writeScopeDecision({ workspace, writeFiles: ["ghost.mjs"], writeRoots: [] }, { tool_name: "Write", tool_input: { file_path: outOfScope } })
+      ?.hookSpecificOutput.permissionDecision,
+    "deny",
+    "creating a new file outside the scope is denied: scope membership is a fact about the path, and this is the ordinary violation",
   );
   assert.equal(readThresholdDecision({ maxReadLines: 1500 }, { tool_name: "Read", tool_input: { file_path: newFile } }), null, "a nonexistent read target is never denied: it cannot be measured");
   assert.equal(bashReadDecision({ maxReadLines: 1500 }, { tool_name: "Bash", tool_input: { command: `cat ${newFile}` } }), null, "a nonexistent bash read target is never denied: it cannot be measured");
