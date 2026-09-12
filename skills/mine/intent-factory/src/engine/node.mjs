@@ -97,7 +97,7 @@ import {
   sealAttempt,
 } from "../repo/worktree.mjs";
 import { integrateAttempt } from "../repo/integrate.mjs";
-import { delay, errorMessage, excerpt } from "../util.mjs";
+import { delay, errorCode, errorMessage, excerpt, stableJson } from "../util.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -127,15 +127,6 @@ import { delay, errorMessage, excerpt } from "../util.mjs";
 /** @typedef {{kind: "adopted"|"rejudge"|"restart"|"reconciled"|"exhausted"|"stalled", phase?: "worker"|"judge", result?: unknown, usage?: Usage, costUsd?: number|null, error?: {code: string, message: string}|null, invocationId?: string, reason?: string}} RecoveryOutcome */
 /** @typedef {import("node:child_process").ChildProcess & {bootstrapNonce?: string, bootstrapProcessStartToken?: string|null}} DetachedChild */
 /** @typedef {{status?: string, nonce?: string, pid?: number, processStartToken?: string|null, holderId?: string, generation?: number, error?: unknown, runDir?: string}} BootstrapRecord */
-
-/**
- * @param {unknown} error
- * @returns {unknown}
- */
-export function errorCode(error) {
-  if (error && typeof error === "object" && "code" in error) return error.code;
-  return undefined;
-}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -3731,19 +3722,6 @@ export function recoverWorkerResult(runDir, state, contract, node) {
   const result = invocationResult(invocation, invocation.runtimeId ? runtimeSnapshot(contract, invocation.runtimeId) : routeRuntimeForState(contract, node, state, "worker"));
   if (result?.status !== "done") return null;
   try { return parseWorkerResult(result.result ?? ""); } catch { return null; }
-}
-
-/**
- * @param {unknown} value
- * @returns {string}
- */
-export function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = /** @type {Record<string, unknown>} */ (value);
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 /**

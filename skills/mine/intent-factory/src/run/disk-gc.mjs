@@ -22,16 +22,12 @@ import { lockStale, readLock } from "./lock.mjs";
 import { campaignsDir } from "../campaign/index.mjs";
 import { checkDisk, minFreeDiskBytes } from "../host/preflight.mjs";
 import { appendJsonl, writeTextAtomic } from "./store.mjs";
+import { errorCode } from "../util.mjs";
 
 /** @typedef {{path: string, startedAt: string|null, hasActiveController: boolean, allNodesTerminal: boolean}} RunDescriptor */
 
 /** Names under `.runs/` a run directory can never be, in any circumstance. */
 const RESERVED_RUN_DIR_NAMES = new Set(["campaigns", "archive"]);
-
-/** @param {unknown} error @returns {unknown} */
-function errorCode(error) {
-  return error && typeof error === "object" && "code" in error ? /** @type {{code: unknown}} */ (error).code : undefined;
-}
 
 /**
  * Gather the facts GC needs about every candidate under `runsDir`, straight

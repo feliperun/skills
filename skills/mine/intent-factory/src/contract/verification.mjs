@@ -6,6 +6,7 @@ import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, r
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { normalizeManagedSignalBlock } from "../repo/signal-block.mjs";
+import { errorCode } from "../util.mjs";
 
 export const VERIFICATION_LIMITS = Object.freeze({
   stdoutBytes: 16 * 1024,
@@ -112,13 +113,6 @@ function fail(code, message) {
   const error = /** @type {Error & {code: string}} */ (new Error(message));
   error.code = code;
   return error;
-}
-
-/** @param {unknown} error @returns {string|undefined} */
-function errorCode(error) {
-  if (!(error instanceof Error) || !("code" in error)) return undefined;
-  const code = error.code;
-  return typeof code === "string" ? code : undefined;
 }
 
 /**

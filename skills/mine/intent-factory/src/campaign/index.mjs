@@ -13,6 +13,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic, writeTextAtomic } from "../run/store.mjs";
+import { errorCode } from "../util.mjs";
 
 const CAMPAIGN_DIR_NAME = "campaigns";
 const CAMPAIGN_FILE = "campaign.json";
@@ -1415,11 +1416,3 @@ function requireTimestamp(value, label) {
   }
 }
 
-/**
- * @param {unknown} error
- * @returns {unknown}
- */
-function errorCode(error) {
-  if (error && typeof error === "object" && "code" in error) return error.code;
-  return undefined;
-}

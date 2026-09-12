@@ -17,6 +17,7 @@ import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, rena
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { fsyncDirectory } from "./store.mjs";
+import { errorCode } from "../util.mjs";
 
 const LOCK_FILE = "controller.lock";
 const TAKEOVER_ATTEMPTS = 20;
@@ -241,15 +242,6 @@ function createHandle(runDir, record) {
     },
     get released() { return released; },
   };
-}
-
-/** @param {unknown} error @returns {string|undefined} */
-function errorCode(error) {
-  if (error && typeof error === "object" && "code" in error) {
-    const code = /** @type {{code: unknown}} */ (error).code;
-    return typeof code === "string" ? code : undefined;
-  }
-  return undefined;
 }
 
 /**

@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "nod
 import { Buffer } from "node:buffer";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { validateVerificationCommands } from "./verification.mjs";
+import { errorCode } from "../util.mjs";
 
 const FIELDS = new Set([
   "mode",
@@ -472,9 +473,3 @@ function bulletOrNone(items) {
   return items.length ? items.map((item) => `- ${item}`) : ["- (none)"];
 }
 
-/** @param {unknown} error @returns {string|undefined} */
-function errorCode(error) {
-  if (!(error instanceof Error) || !("code" in error)) return undefined;
-  const code = error.code;
-  return typeof code === "string" ? code : undefined;
-}

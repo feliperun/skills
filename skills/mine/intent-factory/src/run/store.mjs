@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { errorCode } from "../util.mjs";
 
 const BOOTSTRAP_FILE = "bootstrap.json";
 const JSONL_RECOVERY_TAIL_BYTES = 64 * 1024;
@@ -184,11 +185,3 @@ function isBootstrapAttemptName(name) {
   return /^[A-Za-z0-9-]{16,64}$/u.test(rest) || /^[A-Za-z0-9-]{16,64}\.ack$/u.test(rest);
 }
 
-/**
- * @param {unknown} error
- * @returns {unknown}
- */
-function errorCode(error) {
-  if (error && typeof error === "object" && "code" in error) return error.code;
-  return undefined;
-}

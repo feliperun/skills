@@ -21,6 +21,7 @@ import {
   validateCapabilityRequirements,
 } from "../harnesses/index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../engine/runtime-discovery.mjs";
+import { errorCode, exitStatus } from "../util.mjs";
 
 export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../harnesses/index.mjs";
 
@@ -592,7 +593,6 @@ function validateGate(gate, runtimes, index, nodeId) {
   };
 }
 
-
 /**
  * @param {unknown} value
  * @param {string} label
@@ -605,7 +605,6 @@ function validateReplayPolicy(value, label) {
   }
   return /** @type {"safe"|"reconcile"|"never"} */ (value);
 }
-
 
 /**
  * @param {JsonObject} value
@@ -1327,7 +1326,7 @@ function gitDeclaredPathState(cwd, path, kind) {
     });
     return "tracked";
   } catch (error) {
-    if (errorCode(error) !== 1) return "unknown";
+    if (exitStatus(error) !== 1) return "unknown";
   }
 
   let hasIntentfactoryIgnore = false;
@@ -1403,7 +1402,7 @@ function checkMissingCombinedGitIgnore(cwd, path, extraExclude) {
       execFileSync("git", args, { stdio: ["ignore", "ignore", "ignore"] });
       customMatched = true;
     } catch (error) {
-      if (errorCode(error) !== 1) return "unknown";
+      if (exitStatus(error) !== 1) return "unknown";
       customMatched = false;
     }
 
@@ -1412,7 +1411,7 @@ function checkMissingCombinedGitIgnore(cwd, path, extraExclude) {
       execFileSync("git", args.toSpliced(-3, 1, "--quiet"), { stdio: ["ignore", "ignore", "ignore"] });
       return true;
     } catch (error) {
-      return errorCode(error) === 1 ? false : "unknown";
+      return exitStatus(error) === 1 ? false : "unknown";
     }
   } catch {
     return "unknown";
@@ -1439,16 +1438,8 @@ function checkGitIgnore(cwd, path, extraExclude) {
     execFileSync("git", args, { stdio: ["ignore", "ignore", "ignore"] });
     return true;
   } catch (error) {
-    return errorCode(error) === 1 ? false : "unknown";
+    return exitStatus(error) === 1 ? false : "unknown";
   }
-}
-
-/** @param {unknown} error @returns {number|string|undefined} */
-function errorCode(error) {
-  if (!error || typeof error !== "object") return undefined;
-  if ("status" in error && typeof error.status === "number") return error.status;
-  if ("code" in error && typeof error.code === "string") return error.code;
-  return undefined;
 }
 
 /**
