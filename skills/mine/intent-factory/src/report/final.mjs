@@ -6,7 +6,7 @@
  * This is presentation. It lived inside the engine only because that is where
  * the loop happened to end; nothing in the control path reads what it writes.
  */
-import { errorCode } from "../util.mjs";
+import { compactCost, compactTokens, errorCode } from "../util.mjs";
 import { basename, join } from "node:path";
 import { readJson, writeJsonAtomic, writeTextAtomic } from "../run/store.mjs";
 import { scopeFindingsNote } from "../contract/scope-findings.mjs";
@@ -147,17 +147,6 @@ export function renderFinalReport(runDir, contract, states) {
   }
   lines.push("```", "", `totals · in ${compactTokens(totals.inputTokens)} · out ${compactTokens(totals.outputTokens)} · cache ${compactTokens(totals.cacheReadInputTokens)} · cost ${compactCost(totalCostUsd)}`);
   return `${lines.join("\n")}\n`;
-}
-/** @param {number|null|undefined} value @returns {string} */
-export function compactTokens(value) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "-";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-  return String(value);
-}
-/** @param {number|null|undefined} value @returns {string} */
-export function compactCost(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(6)}` : "-";
 }
 /**
  * Consolidated terminal-state handoff: one bounded JSON snapshot in the run

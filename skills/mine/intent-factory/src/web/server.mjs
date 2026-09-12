@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { discoverCampaigns } from "../campaign/index.mjs";
 import { campaignDir, campaignsDir } from "../campaign/layout.mjs";
+import { readJsonTolerant } from "../util.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STREAM_POLL_MS = 700;
@@ -23,16 +24,6 @@ const RESUME_STATES = new Set(["blocked", "failed", "exhausted", "stalled", "can
 
 /** @typedef {{campaignId?: string|null, runId?: string|null, nodeId?: string|null}} Selection */
 /** @typedef {{path: string, campaign: import("../campaign/index.mjs").Campaign}} CampaignEntry */
-
-/** @param {string} path @returns {unknown} */
-function readJsonTolerant(path) {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
 
 /** Last complete JSONL entries of an append-only file; a torn trailing line is dropped, not fatal. @param {string} path @param {number} maxEntries @param {number} [maxBytes] @returns {Record<string, unknown>[]} */
 export function tailJsonl(path, maxEntries, maxBytes = 32 * 1024) {

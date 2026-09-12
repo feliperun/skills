@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { sameProcessStartToken, validBootstrapNonce } from "../run/lock.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, readJson } from "../run/store.mjs";
-import { delay } from "../util.mjs";
+import { delay, errorCode } from "../util.mjs";
 
 /** How long a detached child waits for its launcher to acknowledge. */
 const ACKNOWLEDGEMENT_TIMEOUT_MS = 5_000;
@@ -99,11 +99,3 @@ export function cleanupBootstrapNonce(runDir, nonce) {
   }
 }
 
-/**
- * @param {unknown} error
- * @returns {unknown}
- */
-function errorCode(error) {
-  if (error && typeof error === "object" && "code" in error) return error.code;
-  return undefined;
-}

@@ -6,6 +6,7 @@ import { lockStale, pidAlive, readLock } from "../run/lock.mjs";
 import { scopeFindingsNote } from "../contract/scope-findings.mjs";
 import { reviewNote } from "../contract/review-modes.mjs";
 import { validateNodeSnapshot, validateRunMetadata } from "../contract/snapshot.mjs";
+import { compactCost, compactTokens, truncateChars } from "../util.mjs";
 
 /** Advisory ceiling for status.json (TECH-SPEC lean, rule 5); never enforced destructively. */
 const STATUS_JSON_MAX_BYTES = 200 * 1024;
@@ -256,16 +257,6 @@ function derivePointer(payload, nodes, generatedAt) {
     generatedAt,
   };
   return pointer;
-}
-
-/**
- * @param {string} value
- * @param {number} maxChars
- * @returns {string}
- */
-function truncateChars(value, maxChars) {
-  const chars = Array.from(value);
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
 }
 
 /**
@@ -563,22 +554,6 @@ function nodeNote(node) {
   if (note) return note;
   if (typeof node.result === "string" && node.result.trim()) return node.result.trim();
   return node.phase ?? "-";
-}
-
-/**
- * @param {unknown} value
- * @returns {string}
- */
-function compactTokens(value) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "-";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-  return String(value);
-}
-
-/** @param {number|null|undefined} value @returns {string} */
-function compactCost(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(6)}` : "-";
 }
 
 /** @typedef {{costUsd: number|null, status: "known"|"estimated"|"ambiguous"}} CostProjection */

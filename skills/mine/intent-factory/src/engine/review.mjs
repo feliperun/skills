@@ -23,11 +23,10 @@ import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
 import {
   raiseNodeAttention,
   settleDone,
-  startJudge,
-  startWorker,
 } from "./lifecycle.mjs";
 import { errorMessage, excerpt } from "../util.mjs";
 import { appendTransitionEvent, transition } from "./state.mjs";
+import { startJudge, startWorker } from "./dispatch.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -90,7 +89,8 @@ export async function applyJudgeProtocolFailure(contract, node, state, runDir, r
     transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lock);
     return;
   }
-  await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath);
+  await applyJudgeRound(await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath),
+    contract, node, state, runDir, running, lock, states, campaignPath, state.result);
 }
 
 /**
@@ -174,7 +174,8 @@ export async function applyJudgeResult(contract, node, state, result, runDir, lo
       transition(runDir, state, "pending", { phase: "judge", gate: null, result: state.result, error: null, blockedBy: [] }, lock);
       return;
     }
-    await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath);
+    await applyJudgeRound(await startJudge(contract, node, state, runDir, running, state.result, lock, states, campaignPath),
+      contract, node, state, runDir, running, lock, states, campaignPath, state.result);
     return;
   }
   clearJudgeReask(state);
@@ -218,4 +219,38 @@ export function applyRejection(contract, node, state, runDir, running, lock, sta
 /** Deterministic verification failure settles through the shared rejection path. The verdict carries this attempt's unexpected paths, so a red attempt reports them whether it stops here or starts its revision (TECH-SPEC lean, rule 1). @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
 export function applyVerificationFailure(contract, node, state, runDir, running, lock, states, campaignPath, verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope)) {
   applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
+}
+
+/**
+ * Act on what a judge round decided. `startJudge` used to do this itself, which
+ * made dispatch depend on both review policy and settlement; the five callers
+ * all reach both already, so the decision comes back to them and lands here.
+ *
+ * @param {import("./dispatch.mjs").JudgeRound} round
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {string} runDir
+ * @param {Map<string, Job>} running
+ * @param {LockHandle} lock
+ * @param {Map<string, NodeSnapshot>} states
+ * @param {string} campaignPath
+ * @param {unknown} workerResult
+ * @returns {Promise<void>}
+ */
+export async function applyJudgeRound(round, contract, node, state, runDir, running, lock, states, campaignPath, workerResult) {
+  if (round.kind === "rejected") {
+    applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, round.verdict, {
+      code: "mechanical_gate_failed",
+      label: "mechanical-gate",
+    });
+    return;
+  }
+  if (round.kind === "settle") {
+    await settleDone(contract, node, state, runDir, lock, states, campaignPath, {
+      phase: "complete",
+      result: workerResult,
+      gate: round.gate,
+    });
+  }
 }

@@ -1,5 +1,5 @@
 import { spawn as defaultSpawn } from "node:child_process";
-import { errorMessage } from "../util.mjs";
+import { errorMessage, truncateChars } from "../util.mjs";
 
 const TITLE = "intent-factory";
 const BODY_CHARS = 200;
@@ -75,15 +75,5 @@ export function createMacosNotifier({ spawn = defaultSpawn, platform = process.p
  */
 function escapeAppleScript(value) {
   return value.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"');
-}
-
-/**
- * @param {string} value
- * @param {number} maxChars
- * @returns {string}
- */
-function truncateChars(value, maxChars) {
-  const chars = Array.from(value);
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
 }
 

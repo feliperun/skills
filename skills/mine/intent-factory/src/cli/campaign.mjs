@@ -13,6 +13,7 @@ import { lockStale, readLock } from "../run/lock.mjs";
 import { syncAgentSignal } from "../repo/signal.mjs";
 import { acknowledgeJournalEvent, appendJournal, readJournal, watchJournal } from "../campaign/journal.mjs";
 import { readCampaign } from "../campaign/record.mjs";
+import { readJsonTolerant } from "../util.mjs";
 
 const SYNC_OUTPUT_MAX_BYTES = 8000;
 const DEFAULT_WAKE_POLL_MS = 30_000;
@@ -149,7 +150,7 @@ async function watchCampaignWake(campaignPath, runsDir, options = {}) {
     }
     let anyActive = false;
     for (const runId of campaign.linkedRunIds) {
-      const status = readJsonTolerant(join(runsDir, runId, "status.json"));
+      const status = /** @type {Record<string, any>|null} */ (readJsonTolerant(join(runsDir, runId, "status.json")));
       if (!status || !Array.isArray(status.nodes)) continue;
       const terminal = status.nodes.every((/** @type {any} */ node) => TERMINAL_NODE_STATUSES.has(String(node.status)));
       const signature = status.nodes.map((/** @type {any} */ node) => `${node.id}:${node.status}:${node.errorCode ?? ""}`).join("|");
@@ -373,7 +374,7 @@ function ack(campaignId, values) {
 function latestRunStatusLine(runsDir, campaign) {
   const runId = campaign.linkedRunIds.at(-1);
   if (!runId) return "run: none linked yet";
-  const status = readJsonTolerant(join(runsDir, runId, "status.json"));
+  const status = /** @type {Record<string, any>|null} */ (readJsonTolerant(join(runsDir, runId, "status.json")));
   if (!status) return `run ${runId}: no status.json yet`;
   const controllerState = status.controller?.state ?? "none";
   return `run ${runId} · ${status.summary ?? ""} · controller ${controllerState}`;
@@ -388,19 +389,6 @@ function journalEntryText(entry) {
   if (entry.type === "session.attached") return `session ${entry.sessionId} attached (${entry.tool})`;
   if (entry.type === "run.registered") return `run ${entry.runId} registered`;
   return String(entry.type);
-}
-
-/**
- * @param {string} path
- * @returns {any}
- */
-function readJsonTolerant(path) {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return null;
-  }
 }
 
 /**
