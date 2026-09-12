@@ -1,7 +1,7 @@
 ---
 title: "Assento do operador, acesso remoto e lições do SwarmForge"
 version: 0.9.1
-status: queued
+status: active
 date: 2026-09-12
 owner: Felipe Broering
 baseline: feliperun/skills @ 33a4772+
@@ -77,16 +77,37 @@ O PRD propõe S-P1..S-P5. Duas trocas, ambas por dependência medida acima:
 | Fase | Conteúdo | Worker | Juiz | Mudança contra o PRD |
 |---|---|---|---|---|
 | S-P1 | S2 (brief) + S5.5 (lossy) | `dsh-deepseek` | `codex-gpt` | — |
-| S-P2 | S1 (assento, tmux) | `claude-sonnet` | `codex-gpt` | — |
+| S-P2 | S1 (assento, tmux) | `dsh-deepseek` | `codex-gpt` | **worker barato**, ver §2.1 |
 | S-P3 | S5.2 (campo derivável) + S5.1 (estado por diretório) | `claude-sonnet` | `codex-gpt` | **antecipado**: muda o protocolo do worker, e S5.4 mede o prompt que ele produz |
 | S-P4 | S3 (daemon, Tailscale) | `zcode-glm` | `claude-sonnet` | — |
 | S-P5 | S4 (Hermes) + S5.3 (dono por campo) | `dsh-deepseek` | `codex-gpt` | — |
-| S-P6 | S5.4 (constituição em camadas) | `claude-sonnet` | `codex-gpt` | **por último**, com D01–D23 verdes, como o PRD pede |
+| S-P6 | S5.4 (constituição em camadas) | `zcode-glm` | `codex-gpt` | **worker barato**; por último, com D01–D23 verdes |
 
-Roteamento herdado da campanha anterior: worker barato por padrão
-(`dsh-deepseek`, `zcode-glm`), `claude-sonnet` só onde errar custa mais que o
-modelo, `codex-gpt` como juiz cross-vendor, `agy-gemini` como alvo de
-delegação, `replay` nos evals.
+### 2.1 Por que `claude-sonnet` sai de worker em duas fases
+
+`interception-and-backlog-20260912` mediu as três combinações. A fase com
+worker Claude custou **US$ 3,42** contra **US$ 0,27** da fase com worker barato
+— 12× — e as duas tiveram a **mesma taxa de primeira passagem** (1/2). Pior: o
+único defeito que um juiz deixou passar naquela campanha saiu justamente do nó
+`claude-sonnet` (a decisão de escopo de escrita que só disparava em
+sobrescrita). A hipótese "worker caro onde errar custa mais que o modelo" não
+tem número a favor; a hipótese oposta tem.
+
+`claude-sonnet` fica como worker só na **S-P3**, que é a única fase que quebra
+o protocolo do worker e invalida toda gravação existente sob `.runs/`.
+
+### 2.2 Três restrições de capacidade, medidas
+
+| Restrição | Consequência |
+|---|---|
+| `zcode` declara `structuredOutput: false` — não tem flag de schema | **nunca é juiz.** O veredito viajaria no texto do prompt, com validação só no `parseJudge`. Worker, sim |
+| só `claude` declara `toolPolicy: true` | a política de interceptação do C6 **só morde em worker Claude**. A queda de tokens de leitura que a campanha anterior não mediu só é mensurável num nó Claude |
+| só `claude` reporta custo | os outros quatro entram como `unknown`. Não impede usá-los; obriga a ler o `count` de `costPerClosedCheckpoint`, que desde 2026-09-12 conta só checkpoints medidos |
+
+`codex` roda `gpt-5.6-sol`: `gpt-5.6` é recusado por conta ChatGPT com
+`400 invalid_request_error` (codex-cli 0.154.0). `agy-gemini` segue sem uso
+como worker ou juiz — é o vendor `google`, disponível como juiz cross-vendor
+para qualquer um dos outros quatro. `replay` nos evals, zero token.
 
 ## 3. O que esta spec não muda
 
