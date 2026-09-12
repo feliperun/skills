@@ -108,7 +108,9 @@ function gitIdentity(cwd, options = {}) {
     let gitHead = null;
     const headPath = resolve(cwd, ".git", "HEAD");
     let headText = null;
-    try { headText = readFileSync(headPath, "utf8").trim(); } catch {}
+    try { headText = readFileSync(headPath, "utf8").trim(); } catch {
+      // A missing or unreadable .git/HEAD leaves headText null; rev-parse below still decides gitHead.
+    }
     let unbornHead = false;
     if (headText?.startsWith("ref: ") === true) {
       try { lstatSync(resolve(cwd, ".git", headText.slice(5))); }
@@ -120,7 +122,9 @@ function gitIdentity(cwd, options = {}) {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         }).trim() || null;
-      } catch {}
+      } catch {
+        // Any rev-parse failure (no repo, unborn HEAD, git absent) leaves gitHead null.
+      }
     }
     const status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all", "-z", "--", ...pathspec], {
       encoding: "buffer",

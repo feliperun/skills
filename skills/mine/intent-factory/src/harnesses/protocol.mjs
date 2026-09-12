@@ -160,7 +160,9 @@ export function normalizeZcodeResult(stdout, exitCode, signal, options = {}) {
   try {
     record = JSON.parse(stdout);
     parsed = record !== null && typeof record === "object" && !Array.isArray(record);
-  } catch {}
+  } catch {
+    // SyntaxError means stdout is not the result object; the !parsed branch below classifies it.
+  }
   if (!parsed) {
     const reason = withStartupReason("ZCode emitted no result object", options);
     // A run that died before its result object still classifies by its own
@@ -394,14 +396,18 @@ export function extractJson(value) {
   try {
     JSON.parse(trimmed);
     return trimmed;
-  } catch {}
+  } catch {
+    // Not JSON as a whole: fall through to the suffix and fenced-block scans below.
+  }
   const lines = trimmed.split(/\r?\n/u);
   for (let index = lines.length - 1; index > 0; index -= 1) {
     const candidate = lines.slice(index).join("\n").trim();
     try {
       JSON.parse(candidate);
       return candidate;
-    } catch {}
+    } catch {
+      // This suffix is not JSON; keep trying earlier line boundaries.
+    }
   }
   const blocks = [...value.matchAll(/```json\s*([\s\S]*?)```/giu)];
   for (const block of blocks.reverse()) {
@@ -409,7 +415,9 @@ export function extractJson(value) {
     try {
       JSON.parse(candidate);
       return candidate;
-    } catch {}
+    } catch {
+      // This fenced block is not JSON; try the next one.
+    }
   }
   return null;
 }

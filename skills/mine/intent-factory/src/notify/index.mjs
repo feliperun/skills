@@ -142,7 +142,9 @@ function spawnDeliver(bin, event, { spawn = defaultSpawn, timeoutMs = 5_000 } = 
     const timer = setTimeout(() => {
       try {
         child.kill("SIGTERM");
-      } catch {}
+      } catch {
+        // ESRCH: the child already exited before the timeout kill; finish still resolves.
+      }
       finish({ ok: false, error: `notification timed out after ${timeoutMs}ms` });
     }, timeoutMs);
     child.stdin.end(`${JSON.stringify(event)}\n`);

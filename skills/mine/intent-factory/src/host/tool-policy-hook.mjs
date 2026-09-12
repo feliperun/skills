@@ -216,7 +216,9 @@ if (invokedAsScript()) {
     let payload = null;
     try {
       payload = JSON.parse(input);
-    } catch {}
+    } catch {
+      // SyntaxError on malformed input leaves payload null; hookDecision then decides nothing, as above.
+    }
     const decision = hookDecision(policy, payload);
     if (decision) process.stdout.write(`${JSON.stringify(decision)}\n`);
   });

@@ -467,7 +467,9 @@ function isRunsIgnored(repoDir) {
   try {
     const result = spawnSync("git", ["-C", repoDir, "check-ignore", "-q", ".runs"], { stdio: ["ignore", "ignore", "ignore"] });
     if (result.status === 0) return true;
-  } catch {}
+  } catch {
+    // A git that cannot run leaves the check-ignore answer unknown; fall through to reading .gitignore directly.
+  }
   try {
     const gitignore = readFileSync(join(repoDir, ".gitignore"), "utf8");
     return gitignore.split(/\r?\n/u).some((line) => /^\.runs\/?$/u.test(line.trim()));

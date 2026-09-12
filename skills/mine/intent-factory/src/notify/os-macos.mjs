@@ -61,7 +61,9 @@ export function createMacosNotifier({ spawn = defaultSpawn, platform = process.p
         timer = setTimeout(() => {
           try {
             child.kill("SIGTERM");
-          } catch {}
+          } catch {
+            // ESRCH: the child already exited before the timeout kill; finish still resolves.
+          }
           finish({ ok: false, error: `osascript timed out after ${timeoutMs}ms` });
         }, timeoutMs);
       });

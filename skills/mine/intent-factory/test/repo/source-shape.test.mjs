@@ -251,7 +251,7 @@ test("no src/ module is a barrel", () => {
  * with a second copy of the walker and carried a ceiling of 32 against an
  * actual count of 28 -- four free slots for new ones.
  */
-const EMPTY_CATCH_CEILING = 12;
+const EMPTY_CATCH_CEILING = 0;
 
 test(`empty catch blocks in src/ never exceed ${EMPTY_CATCH_CEILING}`, () => {
   const offenders = SRC_FILES

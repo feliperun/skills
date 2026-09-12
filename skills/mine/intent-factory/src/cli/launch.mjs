@@ -203,9 +203,13 @@ export function writeBootstrapFailure(command, target, error) {
   // a --detach parent that observed the failure must not recreate attempt
   // artifacts with an ambient nonce it does not own.
   if (nonce && !process.argv.includes("--detach") && !(current?.status === "ready" && current.pid === process.pid)) {
-    try { writeJsonAtomic(bootstrapAttemptPath(runDir, nonce), failure); } catch {}
+    try { writeJsonAtomic(bootstrapAttemptPath(runDir, nonce), failure); } catch {
+      // Best-effort record: a failed attempt write must not mask the bootstrap error being reported.
+    }
   }
-  try { writeJsonAtomic(bootstrapPath(runDir), failure); } catch {}
+  try { writeJsonAtomic(bootstrapPath(runDir), failure); } catch {
+    // Best-effort record: there is nothing left to do if this write fails too.
+  }
 }
 /**
  * @param {import("../run/lock.mjs").ReadLockResult} lock
