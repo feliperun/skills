@@ -83,8 +83,8 @@ test("ci.yml runs the required matrix on push to main and pull_request", () => {
     "npm run check",
     "npm run typecheck",
     "npm test",
-    "node evals/run.mjs --class deterministic --assert-no-model",
-    "node evals/run.mjs --verify-discriminating",
+    "node skills/mine/intent-factory/evals/run.mjs --class deterministic --assert-no-model",
+    "node skills/mine/intent-factory/evals/run.mjs --verify-discriminating",
   ]);
 });
 

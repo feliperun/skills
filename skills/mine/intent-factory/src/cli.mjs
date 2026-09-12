@@ -772,15 +772,30 @@ function usage() {
 process.stdout.on("error", () => {});
 process.stderr.on("error", () => {});
 
-const isMain = process.argv[1] && sameFile(process.argv[1], import.meta.url);
-if (isMain) main(process.argv.slice(2)).catch((error) => {
-  const parsed = parseCli(process.argv.slice(2), true);
-  const command = parsed?.command;
-  const target = parsed?.target;
-  writeBootstrapFailure(command ?? "", target, error);
-  process.stderr.write(`${errorMessage(error)}\n`);
-  process.exitCode = 1;
-});
+/**
+ * Dispatch one CLI invocation, recording a bootstrap failure before reporting
+ * it so a `--detach` launcher watching the run directory sees why its child
+ * died. Exported because `bin/intent-factory.mjs` is the installed entry point
+ * and `import.meta.url` cannot see it.
+ *
+ * @param {string[]} [argv]
+ * @returns {Promise<void>}
+ */
+export async function runCli(argv = process.argv.slice(2)) {
+  try {
+    await main(argv);
+  } catch (error) {
+    const parsed = parseCli(argv, true);
+    writeBootstrapFailure(parsed?.command ?? "", parsed?.target, error instanceof Error ? error : new Error(errorMessage(error)));
+    process.stderr.write(`${errorMessage(error)}\n`);
+    process.exitCode = 1;
+  }
+}
+
+// `node src/cli.mjs …` still works, and the tests and evals invoke it that way.
+// A detached child is always spawned as this file (see spawnDetached), so the
+// nonce check below keeps working whichever entry the launcher itself used.
+if (process.argv[1] && sameFile(process.argv[1], import.meta.url)) runCli();
 
 /**
  * @param {string|undefined} left

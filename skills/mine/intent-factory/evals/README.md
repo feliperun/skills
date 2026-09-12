@@ -5,6 +5,20 @@ invocations: every runtime in every case uses the `replay` harness
 (`skills/mine/intent-factory/src/harnesses/replay/index.mjs`), consuming a
 recorded envelope instead of calling a real provider CLI.
 
+## Paths inside a golden task
+
+A golden task's `verify.json` records the verification commands the task
+declared, and `--validate-golden` only checks that they parse as a valid command
+list -- nothing ever runs them against the current tree, and nothing should.
+Each task restores its own `meta.parentSha` from `golden/fixtures.bundle`, so its
+commands belong to *that* commit's layout.
+
+That is why several of them still name `skills/mine/intent-factory/scripts/…`,
+a directory that stopped existing on 2026-09-11. Those are not stale paths to
+repair: rewriting them to today's `src/…` would point a historical task at files
+its own parent commit does not contain. See `../docs/README.md` for the mapping
+if you are reading one and want the file as it is now.
+
 ## Usage
 
 ```

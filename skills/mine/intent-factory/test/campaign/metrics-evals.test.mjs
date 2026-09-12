@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { compareEvalReports, projectEvalIndicators } from "../../../../../evals/metrics.mjs";
+import { compareEvalReports, projectEvalIndicators } from "../../evals/metrics.mjs";
 
 /** @param {number} minute @param {number} [second] @returns {string} */
 const at = (minute, second = 0) => new Date(Date.parse("2026-09-10T10:00:00.000Z") + (minute * 60 + second) * 1000).toISOString();

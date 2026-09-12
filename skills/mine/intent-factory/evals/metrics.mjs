@@ -1,13 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { jsonObjectOf, round4, timestampMs } from "../skills/mine/intent-factory/src/campaign/metrics-evals.mjs";
+import { jsonObjectOf, round4, timestampMs } from "../src/campaign/metrics-evals.mjs";
 
 /**
  * Indicator projection from one run's own recorded artefacts —
  * `events.jsonl` and `usage.jsonl` only, never a node snapshot — and the
  * comparator between two already-projected reports. Same discipline as
- * `skills/mine/intent-factory/src/campaign/metrics.mjs`: every indicator carries
+ * `src/campaign/metrics.mjs`: every indicator carries
  * its `value`, the `direction` that counts as better, and the `count` of
  * records it was computed from, and an indicator with no supporting record
  * is `null`, never `0`.

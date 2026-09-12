@@ -16,13 +16,13 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { preflightContract, runContract, resumeRun } from "../skills/mine/intent-factory/src/cli.mjs";
-import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../skills/mine/intent-factory/src/run/lock.mjs";
-import { writeJsonAtomic } from "../skills/mine/intent-factory/src/run/store.mjs";
-import { initializeCampaign } from "../skills/mine/intent-factory/src/campaign/index.mjs";
-import { readIntegrationJournal } from "../skills/mine/intent-factory/src/repo/integrate.mjs";
-import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/src/repo/worktree.mjs";
-import { validateVerificationCommands } from "../skills/mine/intent-factory/src/contract/verification.mjs";
+import { preflightContract, runContract, resumeRun } from "../src/cli.mjs";
+import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../src/run/lock.mjs";
+import { writeJsonAtomic } from "../src/run/store.mjs";
+import { initializeCampaign } from "../src/campaign/index.mjs";
+import { readIntegrationJournal } from "../src/repo/integrate.mjs";
+import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../src/repo/worktree.mjs";
+import { validateVerificationCommands } from "../src/contract/verification.mjs";
 import { compareEvalReports, mergeEvalRunSources, projectEvalIndicators, readEvalRunSources, renderEvalComparisonReport } from "./metrics.mjs";
 
 /** @typedef {Record<string, unknown>} JsonObject */
@@ -39,6 +39,7 @@ const MODEL_BIN_VARS = [
   "INTENT_FACTORY_GLM_BIN",
 ];
 
+/** @type {import("node:util").ParseArgsOptionsConfig} */
 const CLI_OPTIONS = {
   class: { type: "string" },
   case: { type: "string" },
@@ -108,6 +109,7 @@ function loadCase(caseId) {
  */
 async function withEnvOverlay(overlay, fn) {
   const keys = Object.keys(overlay ?? {});
+  /** @type {Record<string, string|undefined>} */
   const previous = {};
   for (const key of keys) {
     previous[key] = process.env[key];
@@ -131,6 +133,7 @@ async function withEnvOverlay(overlay, fn) {
  * @returns {Promise<T>}
  */
 async function withModelBinsUnavailable(fn) {
+  /** @type {Record<string, string|undefined>} */
   const previous = {};
   for (const key of MODEL_BIN_VARS) {
     previous[key] = process.env[key];
@@ -476,7 +479,7 @@ function compareNode(nodeId, expectedNode, runDir) {
     }
   }
   if (expectedNode.runtimeIds !== undefined) {
-    const runtimeIds = (actual.invocations ?? []).map((invocation) => invocation.runtimeId);
+    const runtimeIds = (actual.invocations ?? []).map((/** @type {{runtimeId?: string|null}} */ invocation) => invocation.runtimeId);
     if (JSON.stringify(runtimeIds) !== JSON.stringify(expectedNode.runtimeIds)) {
       failures.push(`node ${nodeId}.runtimeIds: expected ${JSON.stringify(expectedNode.runtimeIds)}, got ${JSON.stringify(runtimeIds)}`);
     }
@@ -705,7 +708,7 @@ async function runCase({ caseDir, spec, expected }, options) {
   const proves = /** @type {string} */ (spec.proves ?? "");
 
   if (options.assertNoModel) {
-    const nonReplay = Object.entries(/** @type {Record<string, {harness?: string}>} */ (spec.contract?.runtimes ?? {}))
+    const nonReplay = Object.entries(/** @type {Record<string, {harness?: string}>} */ ((/** @type {{runtimes?: unknown}} */ (spec.contract ?? {})).runtimes ?? {}))
       .filter(([, runtime]) => runtime.harness !== "replay")
       .map(([runtimeId, runtime]) => `${runtimeId} (${runtime.harness})`);
     if (nonReplay.length) {

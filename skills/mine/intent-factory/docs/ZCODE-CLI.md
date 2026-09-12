@@ -358,7 +358,7 @@ schema. ✅
 ```
 
 Distinct vendors are mandatory when the gate crosses worker × judge of the same
-family (see [contract.md](../../skills/mine/intent-factory/references/contract.md)).
+family (see [contract.md](../references/contract.md)).
 
 ---
 

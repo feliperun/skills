@@ -14,8 +14,11 @@ import { fileURLToPath } from "node:url";
  * itself.
  */
 
-const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
-const GOLDEN_ROOT = join(REPO_ROOT, "evals", "golden");
+const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
+// `evals/` moved inside the skill (2026-09-12), so the git work tree and `.runs/`
+// are four levels up, not one.
+const REPO_ROOT = resolve(EVALS_ROOT, "..", "..", "..", "..");
+const GOLDEN_ROOT = join(EVALS_ROOT, "golden");
 const BUNDLE_PATH = join(GOLDEN_ROOT, "fixtures.bundle");
 
 /**
@@ -37,7 +40,7 @@ const FACTORY_SHAS = [
   "f150386d2c9f9e3057617319652cb2c9c9262981", // lease-liveness-fold
 ];
 
-/** Node fields in a `taskPacket`, per `skills/mine/intent-factory/src/contract/task-packet.mjs`. */
+/** Node fields in a `taskPacket`, per `src/contract/task-packet.mjs`. */
 const FACTORY_MESSAGE_RE = /^intent-factory (?:candidate )?(\S+) (\S+) attempt (\d+)/u;
 
 /**
@@ -56,8 +59,8 @@ function runGit(args) {
 
 /**
  * Every commit on `main` whose subject starts with `fix` and whose own
- * first-parent diff touches both `skills/mine/intent-factory/src/` and
- * `skills/mine/intent-factory/test/` — a correction landed together with
+ * first-parent diff touches both `src/` and
+ * `test/` — a correction landed together with
  * the test that pins it. Walked mechanically over the whole branch so the
  * pool is regenerable, never a hand-picked list.
  *
@@ -72,8 +75,8 @@ function discoverFixShas() {
     const parent = `${sha}^`;
     if (!gitRevExists(parent)) continue; // a root commit has no parent to diff against
     const files = diffNameStatus(parent, sha).map((entry) => entry.path);
-    const touchesScripts = files.some((path) => path.startsWith("skills/mine/intent-factory/src/"));
-    const touchesTest = files.some((path) => path.startsWith("skills/mine/intent-factory/test/"));
+    const touchesScripts = files.some((path) => path.startsWith("src/"));
+    const touchesTest = files.some((path) => path.startsWith("test/"));
     if (touchesScripts && touchesTest) picked.push(sha);
   }
   return picked;

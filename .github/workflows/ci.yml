@@ -22,5 +22,5 @@ jobs:
       - run: npm run check
       - run: npm run typecheck
       - run: npm test
-      - run: node evals/run.mjs --class deterministic --assert-no-model
-      - run: node evals/run.mjs --verify-discriminating
+      - run: node skills/mine/intent-factory/evals/run.mjs --class deterministic --assert-no-model
+      - run: node skills/mine/intent-factory/evals/run.mjs --verify-discriminating

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const skillDir = fileURLToPath(new URL('../..', import.meta.url));
-const docsDir = fileURLToPath(new URL('../../../../../docs/intent-factory', import.meta.url));
+const docsDir = fileURLToPath(new URL('../../docs', import.meta.url));
 
 const LINK_PATTERN = /\]\(([^)]+)\)/g;
 
