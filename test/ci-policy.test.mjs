@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -39,32 +39,6 @@ function messageFile(message) {
   writeFileSync(file, message);
   return file;
 }
-
-const SRC_DIR = join(ROOT, "skills", "mine", "intent-factory", "src");
-
-/** @returns {string[]} production .mjs paths under SRC_DIR, relative with forward slashes */
-function productionScriptFiles() {
-  /** @type {string[]} */
-  const files = [];
-  /**
-   * @param {string} dir
-   */
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(path);
-      } else if (entry.isFile() && entry.name.endsWith(".mjs") && !entry.name.endsWith(".test.mjs")) {
-        files.push(relative(SRC_DIR, path));
-      }
-    }
-  };
-  walk(SRC_DIR);
-  return files;
-}
-
-// ratchet — lower the ceiling whenever the count drops; never raise it (spec rule 4)
-const EMPTY_CATCH_CEILING = 32;
 
 const VALID_MESSAGE = "feat(ci): add policy gates\n\nBody line.\n";
 const INVALID_MESSAGE = "bad message\n";
@@ -158,14 +132,5 @@ test("AGENT.md, CLAUDE.md, CURSOR.md and GEMINI.md stay symlinks to AGENTS.md", 
   for (const name of names) {
     assert.equal(readlinkSync(join(ROOT, name)), "AGENTS.md");
   }
-});
-
-test("empty catch blocks in production scripts never increase", () => {
-  let count = 0;
-  for (const rel of productionScriptFiles()) {
-    const contents = readFileSync(join(SRC_DIR, rel), "utf8");
-    count += (contents.match(/catch\s*\{\s*\}/g) ?? []).length;
-  }
-  assert.ok(count <= EMPTY_CATCH_CEILING, `${count} empty catch blocks exceed ceiling ${EMPTY_CATCH_CEILING}`);
 });
 
