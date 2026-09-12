@@ -11,6 +11,10 @@
  */
 import { harnessCapabilities } from "../harnesses/index.mjs";
 import { nextSameTierRuntime } from "./runtime-discovery.mjs";
+import { routeRuntime } from "./prompts.mjs";
+
+/** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
+/** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").RuntimeSnapshot} RuntimeSnapshot */
@@ -164,4 +168,25 @@ export function runtimeSnapshot(contract, id) {
 export function routingBackoffActive(state, phase) {
   const override = state.routing?.currentOverride;
   return Boolean(override?.role === phase && override.backoffUntil && Date.parse(override.backoffUntil) > Date.now());
+}
+
+/**
+ * @param {ValidatedContract} contract
+ * @param {ValidatedNode} node
+ * @param {NodeSnapshot} state
+ * @param {"worker"|"judge"} role
+ * @returns {RuntimeSnapshot}
+ */
+export function routeRuntimeForState(contract, node, state, role) {
+  const override = state.routing?.currentOverride;
+  if (override?.role === role && contract.runtimes[override.runtime]) {
+    const runtime = contract.runtimes[override.runtime];
+    return { id: override.runtime, ...runtime, capabilities: harnessCapabilities(runtime) };
+  }
+  const assigned = state.routing?.assignments?.[role];
+  if (assigned && contract.runtimes[assigned]) {
+    const runtime = contract.runtimes[assigned];
+    return { id: assigned, ...runtime, capabilities: harnessCapabilities(runtime) };
+  }
+  return /** @type {RuntimeSnapshot} */ (routeRuntime(contract, node, role));
 }

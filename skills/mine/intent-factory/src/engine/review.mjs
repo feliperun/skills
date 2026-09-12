@@ -25,7 +25,7 @@ import {
   settleDone,
   startJudge,
   startWorker,
-} from "./node.mjs";
+} from "./lifecycle.mjs";
 import { errorMessage, excerpt } from "../util.mjs";
 import { appendTransitionEvent, transition } from "./state.mjs";
 
@@ -35,7 +35,7 @@ import { appendTransitionEvent, transition } from "./state.mjs";
 /** @typedef {import("../run/lock.mjs").LockRecord} LockRecord */
 /** @typedef {ReturnType<typeof import("../run/lock.mjs").acquire>} LockHandle */
 /** @typedef {import("./prompts.mjs").JudgeVerdict} JudgeVerdict */
-/** @typedef {import("./node.mjs").Job} Job */
+/** @typedef {import("./lifecycle.mjs").Job} Job */
 
 /** A failed judge envelope gets one bounded re-dispatch, then judge_unavailable. */
 export const JUDGE_MAX_FAILURES = 2;

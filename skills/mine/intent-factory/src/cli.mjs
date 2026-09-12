@@ -74,8 +74,8 @@ import { emptyUsage } from "./run/usage.mjs";
 /** @typedef {import("./harnesses/index.mjs").ProviderEnvelope} ProviderEnvelope */
 /** @typedef {import("./campaign/index.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
-/** @typedef {import("./engine/node.mjs").Job} Job */
-/** @typedef {import("./engine/node.mjs").Invocation} Invocation */
+/** @typedef {import("./engine/lifecycle.mjs").Job} Job */
+/** @typedef {import("./engine/lifecycle.mjs").Invocation} Invocation */
 /** @typedef {import("./engine/scheduler.mjs").RunOutcome} RunOutcome */
 /** @typedef {import("node:child_process").ChildProcess & {bootstrapNonce?: string, bootstrapProcessStartToken?: string|null}} DetachedChild */
 /** @typedef {{status?: string, nonce?: string, pid?: number, processStartToken?: string|null, holderId?: string, generation?: number, error?: unknown, runDir?: string}} BootstrapRecord */

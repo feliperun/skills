@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { preflightContract, runContract } from "../src/cli.mjs";
-import { livenessState } from "../src/engine/node.mjs";
+import { livenessState } from "../src/engine/lifecycle.mjs";
 import { failoverEdges, nextHop, nextSynthesizedRuntime } from "../src/engine/failover.mjs";
 import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "../src/engine/backoff.mjs";
 import { getHarness } from "../src/harnesses/index.mjs";

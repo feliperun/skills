@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+/** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */
+
 /** @typedef {{status: "ready", path: string, branch: string, commit: string|null, baseSha: string}} AttemptWorktree */
 /** @typedef {{sha: string, empty: boolean}} SealedAttempt */
 
@@ -237,4 +239,10 @@ export function removeWorktree(repo, path) {
 export function cleanupCandidate(repo, runDir, runId) {
   removeWorktree(repo, candidateWorktreePath(runDir, runId));
   deleteRef(repo, candidateRefName(runId));
+}
+
+/** @param {NodeSnapshot|undefined} state @returns {string|null} */
+export function attemptWorkspace(state) {
+  const path = state?.worktree?.path;
+  return path && state?.worktree?.status !== "removed" && existsSync(path) ? path : null;
 }

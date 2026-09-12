@@ -44,44 +44,20 @@ import {
   planResumeRetry,
   renderPreviousAttemptSection,
 } from "./retry.mjs";
-import {
-  attemptWorktreePath,
-  createRunRef,
-  gitHead,
-  removeWorktree,
-  runRefName,
-} from "../repo/worktree.mjs";
+import { attemptWorkspace, attemptWorktreePath, createRunRef, gitHead, removeWorktree, runRefName } from "../repo/worktree.mjs";
 import { recoverIntegrations } from "../repo/integrate.mjs";
 import { bootstrapNonceForProcess, waitForBootstrapAcknowledgement } from "./detach.mjs";
 import {
   applyInvalidWorkerResult,
   assertRunMutable,
-  attemptWorkspace,
-  canonicalWorkerResultText,
-  captureNodeScopeBoundaries,
-  checkPersistedWorkerScope,
-  checkWorkerScope,
-  closePersistedInvocation,
-  emptyScope,
-  executeControllerVerification,
   finalizeClosedJobs,
   handleProviderExhaustion,
-  isResultMaterializationInvocation,
-  materializeAttemptResult,
-  persistedScopeBoundary,
   raiseNodeAttention,
-  reconcileAmbiguousWorkerRestart,
-  recoverOrphan,
-  recoverVerificationAttempts,
-  recoverWorkerResult,
-  recoveryFromOverride,
-  resolveUnknownEffect,
   settleDone,
   startJudge,
   startWorker,
   terminalErrorCode,
-  verifyCandidateWorkspace,
-} from "./node.mjs";
+} from "./lifecycle.mjs";
 import { delay, errorCode, errorMessage, excerpt, stableJson } from "../util.mjs";
 import { alreadyNotified, notifyQueueFor, notifyQueuesByRun, renderCampaignHandoffSafely } from "./notify-queue.mjs";
 import { detectStalls, invocationAlive, terminateInvocation, terminateProcess } from "./process.mjs";
@@ -89,6 +65,10 @@ import { ensureTerminalEvent, hasDoneEvent, recordExecutionOverride, transition,
 import { render, renderFinalReport, writeFindingsArtifact } from "../report/final.mjs";
 import { hasOperationIntent, hasOperationSettlement, operationNeedsRecovery, operationNextState, providerReceipts, providerReceiptsFromInvocationTail, readOperationSettlement, settleInvocation } from "../run/operations.mjs";
 import { appendUsageRecord, emptyUsage, invocationCost, invocationUsage, persistRecoveryUsage, recordInvocationUsage } from "../run/usage.mjs";
+import { closePersistedInvocation, recoverOrphan, recoveryFromOverride } from "./recover.mjs";
+import { canonicalWorkerResultText, isResultMaterializationInvocation, materializeAttemptResult, recoverWorkerResult } from "./result-file.mjs";
+import { captureNodeScopeBoundaries, checkPersistedWorkerScope, checkWorkerScope, emptyScope, persistedScopeBoundary, reconcileAmbiguousWorkerRestart, resolveUnknownEffect } from "./scope.mjs";
+import { executeControllerVerification, recoverVerificationAttempts, verifyCandidateWorkspace } from "./verify.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -108,10 +88,10 @@ import { appendUsageRecord, emptyUsage, invocationCost, invocationUsage, persist
 /** @typedef {import("../campaign/index.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
 /** @typedef {import("./prompts.mjs").JudgeVerdict} JudgeVerdict */
-/** @typedef {import("./node.mjs").Job} Job */
-/** @typedef {import("./node.mjs").Invocation} Invocation */
-/** @typedef {import("./node.mjs").RecoveryOutcome} RecoveryOutcome */
-/** @typedef {import("./node.mjs").InvocationProbe} InvocationProbe */
+/** @typedef {import("./lifecycle.mjs").Job} Job */
+/** @typedef {import("./lifecycle.mjs").Invocation} Invocation */
+/** @typedef {import("./lifecycle.mjs").RecoveryOutcome} RecoveryOutcome */
+/** @typedef {import("./lifecycle.mjs").InvocationProbe} InvocationProbe */
 /** @typedef {import("../contract/worker-result.mjs").WorkerResult} WorkerResult */
 /** @typedef {{runDir: string, states: Map<string, NodeSnapshot>, ok: boolean, error?: Error}} RunOutcome */
 

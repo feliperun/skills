@@ -84,7 +84,7 @@ const MAX_ROUTING_HISTORY = 64;
 /** @typedef {{code: string, message: string, exhaustedUntil?: string|null}} SnapshotError */
 /** @typedef {{inputTokens: number|null, outputTokens: number|null, cacheReadInputTokens: number|null}} Usage */
 /** @typedef {ValidatedRuntime & {id: string, capabilities: import("../harnesses/index.mjs").HarnessCapabilities}} RuntimeSnapshot */
-/** @typedef {import("../engine/node.mjs").Invocation} Invocation */
+/** @typedef {import("../engine/lifecycle.mjs").Invocation} Invocation */
 /** @typedef {import("./verification.mjs").VerificationCommandResult} VerificationCommandResult */
 /** @typedef {import("./verification.mjs").VerificationAttempt} VerificationAttempt */
 /** @typedef {{passed: boolean, commands?: VerificationCommandResult[], completed?: boolean, error?: string, attempts?: VerificationAttempt[]}} VerificationState */
