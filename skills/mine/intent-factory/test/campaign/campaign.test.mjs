@@ -6,27 +6,19 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  appendJournal,
-  campaignDir,
   closeCampaign,
   discoverCampaigns,
-  HANDOFF_FILE,
-  HANDOFF_BYTES,
-  HANDOFF_LIMIT,
-  JOURNAL_FILE,
-  JOURNAL_TEXT_BYTES,
   initializeCampaign,
-  PROJECTION_FILE,
-  readJournal,
   registerRun,
   renderHandoff,
   resolveCampaign,
-  validateJournalEntry,
 } from "../../src/campaign/index.mjs";
 import { appendJsonl } from "../../src/run/store.mjs";
 import { validateContract } from "../../src/contract/index.mjs";
 import { runContract } from "../../src/cli.mjs";
 import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
+import { appendJournal, readJournal, validateJournalEntry } from "../../src/campaign/journal.mjs";
+import { HANDOFF_BYTES, HANDOFF_FILE, HANDOFF_LIMIT, JOURNAL_FILE, JOURNAL_TEXT_BYTES, PROJECTION_FILE, campaignDir } from "../../src/campaign/layout.mjs";
 
 test("semantic budget keeps critical sections and evicts oldest low-priority history above 16 KiB", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-budget-"));

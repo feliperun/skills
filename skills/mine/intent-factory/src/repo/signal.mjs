@@ -11,8 +11,9 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { TERMINAL } from "../engine/prompts.mjs";
-import { HANDOFF_FILE, campaignsDir, discoverCampaigns } from "../campaign/index.mjs";
+import { discoverCampaigns } from "../campaign/index.mjs";
 import { SIGNAL_END, SIGNAL_START } from "./signal-block.mjs";
+import { HANDOFF_FILE, campaignsDir } from "../campaign/layout.mjs";
 
 export { SIGNAL_END, SIGNAL_START } from "./signal-block.mjs";
 

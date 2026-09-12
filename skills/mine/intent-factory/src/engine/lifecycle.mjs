@@ -88,7 +88,7 @@ import {
 import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "../contract/scope-findings.mjs";
 import { finalVerificationCommands } from "../contract/final-verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../contract/worker-result.mjs";
-import { campaignIdOf, renderHandoff } from "../campaign/index.mjs";
+import { renderHandoff } from "../campaign/index.mjs";
 import { appendPreviousAttempt } from "./retry.mjs";
 import { NotifyQueue } from "../notify/index.mjs";
 import {
@@ -125,6 +125,7 @@ import { runVerification } from "./run-command.mjs";
 import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../repo/workspace.mjs";
 import { routeRuntime } from "../contract/runtime.mjs";
 import { validateEvent, validateNodeSnapshot } from "../contract/snapshot.mjs";
+import { campaignIdOf } from "../campaign/record.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */

@@ -3,19 +3,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs as parseFlags } from "node:util";
 import {
-  acknowledgeJournalEvent,
-  appendJournal,
   closeCampaign,
   discoverCampaigns,
   initializeCampaign,
-  readCampaign,
-  readJournal,
   renderHandoff,
   resolveCampaign,
-  watchJournal,
 } from "../campaign/index.mjs";
 import { lockStale, readLock } from "../run/lock.mjs";
 import { syncAgentSignal } from "../repo/signal.mjs";
+import { acknowledgeJournalEvent, appendJournal, readJournal, watchJournal } from "../campaign/journal.mjs";
+import { readCampaign } from "../campaign/record.mjs";
 
 const SYNC_OUTPUT_MAX_BYTES = 8000;
 const DEFAULT_WAKE_POLL_MS = 30_000;

@@ -8,11 +8,8 @@ import {
   SIGNAL_START,
   syncAgentSignal,
 } from "../skills/mine/intent-factory/src/repo/signal.mjs";
-import {
-  appendJournal,
-  closeCampaign,
-  initializeCampaign,
-} from "../skills/mine/intent-factory/src/campaign/index.mjs";
+import { closeCampaign, initializeCampaign } from "../skills/mine/intent-factory/src/campaign/index.mjs";
+import { appendJournal } from "../skills/mine/intent-factory/src/campaign/journal.mjs";
 
 /**
  * @returns {{repo: string, runsDir: string, agentsPath: string}}

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acknowledgeJournalEvent, campaignDir, readJournal } from "../../src/campaign/index.mjs";
+
 import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../../src/harnesses/index.mjs";
 import { liveInputTokens, liveSessionMetrics, liveUsage } from "../../src/harnesses/exec-jsonl/index.mjs";
 import { replayHarness } from "../../src/harnesses/replay/index.mjs";
@@ -17,6 +17,8 @@ import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt }
 
 import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { captureWorkspaceSnapshot } from "../../src/repo/workspace.mjs";
+import { acknowledgeJournalEvent, readJournal } from "../../src/campaign/journal.mjs";
+import { campaignDir } from "../../src/campaign/layout.mjs";
 
 const bin = fileURLToPath(new URL("../../src/harnesses/replay/bin.mjs", import.meta.url));
 const runner = fileURLToPath(new URL("../../src/cli.mjs", import.meta.url));

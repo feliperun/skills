@@ -2,9 +2,10 @@ import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { campaignDir, initializeCampaign } from "../src/campaign/index.mjs";
+import { initializeCampaign } from "../src/campaign/index.mjs";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../src/contract/index.mjs";
 import { createAttemptWorktree } from "../src/repo/worktree.mjs";
+import { campaignDir } from "../src/campaign/layout.mjs";
 
 // The suite must never pop a macOS desktop notification: when
 // INTENT_FACTORY_NOTIFY_BIN is unset the outbox drain falls back to the

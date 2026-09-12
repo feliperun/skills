@@ -30,10 +30,12 @@
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { campaignDir, readCampaign } from "./index.mjs";
+
 import { jsonObjectOf, round4, timestampMs } from "./metrics-evals.mjs";
 import { MAX_ATTEMPTS as NOTIFY_MAX_ATTEMPTS } from "../notify/index.mjs";
 import { renderMetricsJson, renderMetricsReport } from "../report/metrics-report.mjs";
+import { campaignDir } from "./layout.mjs";
+import { readCampaign } from "./record.mjs";
 
 /** Node statuses that are not terminal: everything else settles a logical node. */
 const OPEN_STATUSES = new Set(["pending", "running"]);

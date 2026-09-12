@@ -3,7 +3,8 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, s
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
-import { campaignDir, campaignsDir, discoverCampaigns } from "../campaign/index.mjs";
+import { discoverCampaigns } from "../campaign/index.mjs";
+import { campaignDir, campaignsDir } from "../campaign/layout.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STREAM_POLL_MS = 700;

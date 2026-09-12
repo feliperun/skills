@@ -19,10 +19,11 @@ import { readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { TERMINAL } from "../engine/prompts.mjs";
 import { lockStale, readLock } from "./lock.mjs";
-import { campaignsDir } from "../campaign/index.mjs";
+
 import { checkDisk, minFreeDiskBytes } from "../host/preflight.mjs";
 import { appendJsonl, writeTextAtomic } from "./store.mjs";
 import { errorCode } from "../util.mjs";
+import { campaignsDir } from "../campaign/layout.mjs";
 
 /** @typedef {{path: string, startedAt: string|null, hasActiveController: boolean, allNodesTerminal: boolean}} RunDescriptor */
 
