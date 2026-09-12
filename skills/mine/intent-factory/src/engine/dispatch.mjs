@@ -172,7 +172,9 @@ function phaseHandoffPrompt(contract, node, state, runDir, role) {
     .map(({ nodeId }) => {
       const candidate = contract.nodes.find((item) => item.id === nodeId);
       let snapshot = null;
-      try { snapshot = readJson(join(runDir, "nodes", `${nodeId}.json`)); } catch {}
+      try { snapshot = readJson(join(runDir, "nodes", `${nodeId}.json`)); } catch {
+        // ENOENT or unreadable snapshot: this prior node contributes no summary.
+      }
       const result = snapshot?.result;
       const record = result && typeof result === "object" && !Array.isArray(result)
         ? /** @type {Record<string, unknown>} */ (result)
@@ -603,7 +605,9 @@ function persistInvocation(runDir, state, invocation, job, lock) {
         structuredResult = Boolean(envelope.result);
         envelopeResult = envelope.result ?? null;
         envelopeError = envelope.error ?? null;
-      } catch {}
+      } catch {
+        // Unparseable provider envelope: settle with the raw closed invocation instead.
+      }
       const completed = { ...closed, continuationId, usage, costUsd };
       state.invocations = (state.invocations ?? []).map((item) => item.id === completed.id ? completed : item);
       state.usage = invocationUsage(state);

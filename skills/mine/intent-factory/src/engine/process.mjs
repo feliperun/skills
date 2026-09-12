@@ -188,7 +188,9 @@ function observeInvocation(job) {
       updatedAt: new Date().toISOString(),
     };
     job.onInvocationUpdate?.(job.invocation);
-  } catch {}
+  } catch {
+    // Observation is best-effort: a failed metrics tick must not stop the run.
+  }
 }
 /**
  * Observe the transcript incrementally: read only the bytes appended since

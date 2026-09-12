@@ -186,7 +186,9 @@ export function persistedJudgeResult(state, invocation, settlement) {
       const serialized = typeof candidate === "string" ? candidate : JSON.stringify(candidate);
       parseJudge(serialized);
       return serialized;
-    } catch {}
+    } catch {
+      // Invalid candidate: skip it and try the next evidence source.
+    }
   }
   return null;
 }

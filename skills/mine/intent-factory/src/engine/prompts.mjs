@@ -116,7 +116,9 @@ export function judgePrompt(node, workerResult, context = {}) {
     ? node.taskPacket.verification.map((command) => `- ${command.argv.join(" ")}`).join("\n")
     : "- (none)";
   let structured = null;
-  try { structured = typeof workerResult === "string" ? JSON.parse(workerResult) : workerResult; } catch {}
+  try { structured = typeof workerResult === "string" ? JSON.parse(workerResult) : workerResult; } catch {
+    // Non-JSON worker result: leave it withheld from the judge prompt.
+  }
   if (structured) {
     try { structured = validateWorkerResult(structured); } catch { structured = null; }
   }

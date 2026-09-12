@@ -143,7 +143,9 @@ function runCommand(command, baseCwd, commandCwd, attempt, signal, options, comm
       };
       if (!completionReported && identity) {
         completionReported = true;
-        try { options?.onAttemptComplete?.({ ...identity, status: result.passed ? "closed" : "failed", completedAt: new Date().toISOString(), result }); } catch {}
+        try { options?.onAttemptComplete?.({ ...identity, status: result.passed ? "closed" : "failed", completedAt: new Date().toISOString(), result }); } catch {
+          // Notification callback: any error it throws must not change the recorded result.
+        }
       }
       resolveResult(result);
     };
@@ -160,12 +162,16 @@ function runCommand(command, baseCwd, commandCwd, attempt, signal, options, comm
       const pid = child.pid ?? null;
       let paused = false;
       if (process.platform !== "win32" && pid) {
-        try { process.kill(-pid, "SIGSTOP"); paused = true; } catch {}
+        try { process.kill(-pid, "SIGSTOP"); paused = true; } catch {
+          // ESRCH: the child may have exited between spawn and the stop; not pausing is safe.
+        }
       }
       Object.assign(identity, { pid, processGroupId: process.platform === "win32" ? null : pid });
       options?.onAttemptSpawn?.({ ...identity });
       if (paused && pid) {
-        try { process.kill(-pid, "SIGCONT"); } catch {}
+        try { process.kill(-pid, "SIGCONT"); } catch {
+          // ESRCH: the child is already gone, so there is nothing to resume.
+        }
       }
       const childStdout = /** @type {import("node:stream").Readable} */ (child.stdout);
       const childStderr = /** @type {import("node:stream").Readable} */ (child.stderr);
@@ -178,7 +184,9 @@ function runCommand(command, baseCwd, commandCwd, attempt, signal, options, comm
       else signal?.addEventListener("abort", abortHandler, { once: true });
     } catch (error) {
       if (child?.pid && process.platform !== "win32") {
-        try { process.kill(-child.pid, "SIGCONT"); } catch {}
+        try { process.kill(-child.pid, "SIGCONT"); } catch {
+          // ESRCH: best-effort resume of a paused child that may already be gone.
+        }
       }
       finish(null, null, error instanceof Error ? error : new Error(String(error)));
     }
@@ -193,14 +201,18 @@ function terminateGroup(child) {
     if (process.platform !== "win32") process.kill(-/** @type {number} */ (child.pid), "SIGTERM");
     else child.kill("SIGTERM");
   } catch {
-    try { child.kill("SIGTERM"); } catch {}
+    try { child.kill("SIGTERM"); } catch {
+      // ESRCH: the group kill failed and the leader was already gone.
+    }
   }
   setTimeout(() => {
     try {
       if (process.platform !== "win32") process.kill(-/** @type {number} */ (child.pid), "SIGKILL");
       else child.kill("SIGKILL");
     } catch {
-      try { child.kill("SIGKILL"); } catch {}
+      try { child.kill("SIGKILL"); } catch {
+        // ESRCH: the SIGKILL fallback found no leader left to kill.
+      }
     }
   }, 100).unref();
 }

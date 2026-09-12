@@ -85,11 +85,15 @@ if (config.promptTransport === "stdin") {
 
 /** @param {NodeJS.Signals} signal */
 function killGroup(signal) {
-  try { process.kill(-process.pid, signal); } catch {}
+  try { process.kill(-process.pid, signal); } catch {
+    // ESRCH: the process group is already gone, so there is nothing to signal.
+  }
 }
 
 function stopProvider() {
-  try { provider?.kill("SIGTERM"); } catch {}
+  try { provider?.kill("SIGTERM"); } catch {
+    // No provider yet, or it already exited: a failed SIGTERM needs no action.
+  }
   setTimeout(() => killGroup("SIGKILL"), 100).unref();
 }
 
@@ -133,7 +137,9 @@ function capLog(path, preservePrefix = false) {
     const out = openSync(path, "w");
     writeSync(out, buffer);
     closeSync(out);
-  } catch {}
+  } catch {
+    // Best-effort cap: any filesystem error leaves the log uncapped, which is safe.
+  }
 }
 
 /** @returns {Record<string, string|undefined>} */

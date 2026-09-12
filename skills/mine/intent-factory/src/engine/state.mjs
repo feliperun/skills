@@ -69,7 +69,9 @@ export function ensureTerminalEvent(runDir, state, lock = null) {
  */
 export function hasDoneEvent(runDir, nodeId, attempt) {
   let text = "";
-  try { text = readFileSync(join(runDir, "events.jsonl"), "utf8"); } catch {}
+  try { text = readFileSync(join(runDir, "events.jsonl"), "utf8"); } catch {
+    // ENOENT: no events file yet means no terminal event was recorded.
+  }
   return text.split("\n").filter(Boolean).some((line) => {
     try {
       const event = JSON.parse(line);

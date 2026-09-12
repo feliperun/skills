@@ -181,7 +181,9 @@ function livePreflight(runtime, cwd, timeoutSec) {
       try {
         if (process.platform === "win32") child.kill(name);
         else process.kill(-/** @type {number} */ (child.pid), name);
-      } catch {}
+      } catch {
+        // ESRCH: the child is already gone, so there is no process to signal.
+      }
     };
     child.stdout.on("data", (chunk) => { stdout = appendBounded(stdout, chunk, LIVE_PREFLIGHT_OUTPUT_LIMIT_BYTES); });
     child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk, LIVE_PREFLIGHT_OUTPUT_LIMIT_BYTES); });
