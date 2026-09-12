@@ -279,13 +279,13 @@ test("claude-compatible harnesses bound the harness preamble and accept a tools 
     const custom = providerCommand({ ...runtime, tools: ["Read", "Bash"] }, "work").args;
     assert.deepEqual(custom.slice(custom.indexOf("--tools"), custom.indexOf("--tools") + 2), ["--tools", "Read,Bash"]);
     // The preamble flags precede the explicit hook settings, which still apply.
-    const policed = providerCommand(runtime, "work", { toolPolicy: { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES } }).args;
+    const policed = providerCommand(runtime, "work", { toolPolicy: { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES, workspace: "/tmp/work", writeFiles: [], writeRoots: [], maxReadLines: null } }).args;
     assert.ok(policed.indexOf("--setting-sources") < policed.indexOf("--settings"));
   }
 });
 
 test("toolPolicy travels only the Claude-compatible hook settings boundary", () => {
-  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES, workspace: "/tmp/work", writeFiles: [], writeRoots: [], maxReadLines: null };
   // Claude-compatible adapters prove enforcement by installing hook settings.
   for (const runtime of [{ harness: "claude", model: "m" }]) {
     const command = providerCommand(runtime, "work", { toolPolicy: policy });
@@ -293,7 +293,7 @@ test("toolPolicy travels only the Claude-compatible hook settings boundary", () 
     assert.ok(settingsIndex >= 0, `${runtime.harness} installs the hook settings`);
     const settings = JSON.parse(command.args[settingsIndex + 1]);
     assert.deepEqual(Object.keys(settings.hooks).sort(), ["PostToolUse", "PreToolUse"]);
-    assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash|TaskOutput|BashOutput|Monitor");
+    assert.equal(settings.hooks.PreToolUse[0].matcher, "Bash|TaskOutput|BashOutput|Monitor|Write|Edit|NotebookEdit|Read");
     assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes(HOOK_PATH), "the repository hook executable is wired");
     assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.includes(HOOK_PATH));
   }
@@ -345,7 +345,7 @@ test("truncateToolOutput bounds tool output to 8192 UTF-8 bytes keeping head and
 });
 
 test("the repository hook behind the providerCommand settings mechanically rejects background tools and bounds output", async () => {
-  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES, workspace: "/tmp/work", writeFiles: [], writeRoots: [], maxReadLines: null };
   const command = providerCommand({ harness: "claude", model: "m" }, "work", { toolPolicy: policy });
   const settings = JSON.parse(command.args[command.args.indexOf("--settings") + 1]);
   const registered = [...settings.hooks.PreToolUse[0].hooks, ...settings.hooks.PostToolUse[0].hooks];
@@ -506,7 +506,7 @@ test("builds zcode commands pinned to the Z.ai endpoint", () => {
 });
 
 test("zcode tool policy is refused honestly and the judge schema travels in the prompt", () => {
-  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  const policy = { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES, workspace: "/tmp/work", writeFiles: [], writeRoots: [], maxReadLines: null };
   // A named executable keeps this test off the real PATH: an unnamed zcode
   // runtime resolves the host's CLI and may install a shim while doing it.
   const runtime = { harness: "zcode", model: "glm-5.3", executable: "/nonexistent/zcode" };

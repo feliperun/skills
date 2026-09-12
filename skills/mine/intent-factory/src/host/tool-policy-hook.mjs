@@ -4,12 +4,26 @@
  * the Claude-compatible CLI boundary (RETROSPECTIVE-2026-08-28 P0.7/P1.1).
  * The runner registers one command for both events through `--settings`:
  *
- * - PreToolUse denies a `Bash` invocation with `run_in_background: true` and
- *   the background-output tools, with a reason that tells the model to rerun
- *   in the foreground.
+ * - PreToolUse denies, in order: a `Bash` invocation with `run_in_background:
+ *   true` and the background-output tools; a `Write`/`Edit`/`NotebookEdit`
+ *   outside the declared write scope; a whole-file `Read`, or the same read
+ *   done through `Bash` (`cat`/`less`/`more`, or `head`/`tail` with no
+ *   explicit limit), above `--max-read-lines`. Every denial reason tells the
+ *   model how to retry. The write-scope and read-threshold judgment calls
+ *   live in `tool-policy-decisions.mjs`; this module is the argv wiring and
+ *   event dispatch, not the decisions themselves.
  * - PostToolUse bounds the textual evidence of a Bash result to at most
  *   `--max-tool-output-bytes` UTF-8 bytes, keeping head and tail; small
  *   results are emitted unchanged (no output at all leaves them untouched).
+ *
+ * A write made through `Bash` is not intercepted here: sniffing shell syntax
+ * for a write is a race no static read of `command` wins, and the post-hoc
+ * scope gate in `engine/scope.mjs` already catches the effect once the
+ * attempt completes.
+ *
+ * The settings that wire this hook are installed inline via `--settings` on
+ * every provider invocation; nothing is written to the worktree, so there is
+ * no file to remove when the attempt is sealed.
  *
  * Every decision is pure and exported so the settings wiring and the hook
  * behavior stay testable without a live provider.
@@ -18,6 +32,7 @@ import { realpathSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { TOOL_OUTPUT_LIMIT_BYTES, truncateToolOutput } from "../harnesses/exec-jsonl/index.mjs";
+import { bashReadDecision, readThresholdDecision, writeScopeDecision } from "./tool-policy-decisions.mjs";
 
 /** Absolute path of this hook, embedded in generated settings. */
 export const HOOK_PATH = fileURLToPath(import.meta.url);
@@ -26,24 +41,39 @@ export const HOOK_PATH = fileURLToPath(import.meta.url);
 const BACKGROUND_OUTPUT_TOOLS = ["TaskOutput", "BashOutput", "Monitor"];
 
 /** PreToolUse matcher covering every tool the policy may deny. */
-const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS].join("|");
+export const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS, "Write", "Edit", "NotebookEdit", "Read"].join("|");
 
 /** Standard foreground-only denial; it tells the model how to retry. */
 export const FOREGROUND_ONLY_DENIAL = "background tool invocation denied by the foreground-only tool policy; rerun the tool in the foreground and wait for it to finish";
 
+/** The policy shape as parsed off argv: `workspace` is null when the flag was omitted, unlike the always-populated {@link import("../harnesses/index.mjs").ToolPolicy} the engine builds.
+ * @typedef {{foregroundOnly: boolean, maxToolOutputBytes: number, workspace: string|null, writeFiles: string[], writeRoots: string[], maxReadLines: number|null}} ParsedPolicy
+ */
+
 /**
  * @param {string[]} argv
- * @returns {{foregroundOnly: boolean, maxToolOutputBytes: number}}
+ * @returns {ParsedPolicy}
  */
 function parsePolicy(argv) {
   const flags = parseArgs({ args: argv, options: {
     "foreground-only": { type: "boolean", default: false },
     "max-tool-output-bytes": { type: "string" },
+    "workspace": { type: "string" },
+    "write-file": { type: "string", multiple: true, default: [] },
+    "write-root": { type: "string", multiple: true, default: [] },
+    "max-read-lines": { type: "string" },
   } });
   const raw = Number(flags.values["max-tool-output-bytes"]);
+  const rawMaxReadLines = Number(flags.values["max-read-lines"]);
   return {
     foregroundOnly: Boolean(flags.values["foreground-only"]),
     maxToolOutputBytes: Number.isInteger(raw) && raw > 0 ? raw : TOOL_OUTPUT_LIMIT_BYTES,
+    workspace: typeof flags.values.workspace === "string" ? flags.values.workspace : null,
+    writeFiles: /** @type {string[]} */ (flags.values["write-file"] ?? []),
+    writeRoots: /** @type {string[]} */ (flags.values["write-root"] ?? []),
+    maxReadLines: flags.values["max-read-lines"] === undefined
+      ? null
+      : (Number.isInteger(rawMaxReadLines) && rawMaxReadLines > 0 ? rawMaxReadLines : null),
   };
 }
 
@@ -60,6 +90,12 @@ export function hookCommand(policy) {
   if (typeof policy.maxToolOutputBytes === "number" && policy.maxToolOutputBytes > 0) {
     argv.push("--max-tool-output-bytes", String(policy.maxToolOutputBytes));
   }
+  if (typeof policy.workspace === "string" && policy.workspace) argv.push("--workspace", policy.workspace);
+  for (const file of policy.writeFiles ?? []) argv.push("--write-file", file);
+  for (const root of policy.writeRoots ?? []) argv.push("--write-root", root);
+  if (typeof policy.maxReadLines === "number" && policy.maxReadLines > 0) {
+    argv.push("--max-read-lines", String(policy.maxReadLines));
+  }
   return argv.map(shellQuote).join(" ");
 }
 
@@ -74,7 +110,9 @@ export function hookCommand(policy) {
 export function hookSettings(policy) {
   /** @type {Record<string, {matcher: string, hooks: {type: "command", command: string}[]}[]>} */
   const hooks = {};
-  if (policy.foregroundOnly) {
+  const hasWriteScope = Boolean((policy.writeFiles ?? []).length || (policy.writeRoots ?? []).length);
+  const hasReadThreshold = typeof policy.maxReadLines === "number" && policy.maxReadLines > 0;
+  if (policy.foregroundOnly || hasWriteScope || hasReadThreshold) {
     hooks.PreToolUse = [{ matcher: PRE_TOOL_MATCHER, hooks: [hookEntry(policy)] }];
   }
   if (typeof policy.maxToolOutputBytes === "number" && policy.maxToolOutputBytes > 0) {
@@ -163,9 +201,11 @@ function allocateTextBudgets(sizes, maxBytes) {
 
 /**
  * One hook decision for one parsed payload, or null when the tool result must
- * pass through untouched.
+ * pass through untouched. The order among the PreToolUse decisions only
+ * matters for the reason the model reads; foregroundOnly stays first because
+ * it was the first policy this hook enforced.
  *
- * @param {{foregroundOnly: boolean, maxToolOutputBytes: number}} policy
+ * @param {ParsedPolicy} policy
  * @param {unknown} payload
  * @returns {{hookSpecificOutput: Record<string, unknown>}|null}
  */
@@ -175,7 +215,12 @@ function hookDecision(policy, payload) {
   const event = typeof record.hook_event_name === "string"
     ? record.hook_event_name
     : record.tool_response === undefined ? "PreToolUse" : "PostToolUse";
-  if (event === "PreToolUse") return preToolUseDecision(policy, record);
+  if (event === "PreToolUse") {
+    return preToolUseDecision(policy, record)
+      ?? writeScopeDecision(policy, record)
+      ?? readThresholdDecision(policy, record)
+      ?? bashReadDecision(policy, record);
+  }
   if (event === "PostToolUse") {
     if (typeof record.tool_name === "string" && record.tool_name !== "Bash") return null;
     const bounded = boundedToolOutput(policy.maxToolOutputBytes, record.tool_response);
