@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const scriptPath = fileURLToPath(new URL("../statusline/claude-code.sh", import.meta.url));
+const scriptPath = fileURLToPath(new URL("../integrations/claude-code/statusline.sh", import.meta.url));
 
 /**
  * @param {Record<string, unknown>} [overrides]

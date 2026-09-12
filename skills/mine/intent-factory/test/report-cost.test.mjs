@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../scripts/contract.mjs";
-import { renderReport, renderReportJson } from "../scripts/render.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../src/contract/index.mjs";
+import { renderReport, renderReportJson } from "../src/report/render.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -91,7 +91,7 @@ function makeRun(nodes) {
     sourceIdentity: { kind: "run" },
   }, null, 2)}\n`);
   for (const node of nodes) {
-    const planNode = /** @type {import("../scripts/contract.mjs").ValidatedNode} */ (contract.nodes.find((candidate) => candidate.id === node.id));
+    const planNode = /** @type {import("../src/contract/index.mjs").ValidatedNode} */ (contract.nodes.find((candidate) => candidate.id === node.id));
     writeFileSync(join(runDir, "nodes", `${node.id}.json`), `${JSON.stringify({
       schemaVersion: PROTOCOL_SCHEMA_VERSION,
       contractVersion: INTENT_FACTORY_VERSION,

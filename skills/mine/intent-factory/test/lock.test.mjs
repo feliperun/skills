@@ -5,7 +5,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendJsonl, readJson, writeJsonAtomic } from "../scripts/store.mjs";
+import { appendJsonl, readJson, writeJsonAtomic } from "../src/run/store.mjs";
 import {
   LockBusyError,
   acquire,
@@ -15,22 +15,22 @@ import {
   pidAlive,
   processStartToken,
   readLock,
-} from "../scripts/lock.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
-import { resumeRun, runContract } from "../scripts/runner.mjs";
+} from "../src/run/lock.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../src/contract/index.mjs";
+import { resumeRun, runContract } from "../src/cli.mjs";
 import {
   detectStalls,
   invocationAlive,
   monitorInvocation,
   startProcess,
   terminateInvocation,
-} from "../scripts/node.mjs";
+} from "../src/engine/node.mjs";
 import { fixture, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
 // A pid the kernel will not hand out while the test runs: its holder is dead.
 const DEAD_PID = 2_147_483_647;
 
-/** @param {string} runDir @returns {import("../scripts/lock.mjs").LockRecord|null} */
+/** @param {string} runDir @returns {import("../src/run/lock.mjs").LockRecord|null} */
 function lockRecord(runDir) {
   const value = readLock(runDir);
   return value && !("invalid" in value) ? value : null;
@@ -39,7 +39,7 @@ function lockRecord(runDir) {
 /**
  * @param {string} runDir
  * @param {Record<string, unknown>} [overrides]
- * @returns {{contract: import("../scripts/contract.mjs").ValidatedContract, node: import("../scripts/contract.mjs").ValidatedNode}}
+ * @returns {{contract: import("../src/contract/index.mjs").ValidatedContract, node: import("../src/contract/index.mjs").ValidatedNode}}
  */
 function validatedRun(runDir, overrides = {}) {
   const contractPath = writeContract(runDir, fixture({ pollIntervalMs: 10, ...overrides }));
@@ -50,9 +50,9 @@ function validatedRun(runDir, overrides = {}) {
 }
 
 /**
- * @param {import("../scripts/contract.mjs").ValidatedNode} node
+ * @param {import("../src/contract/index.mjs").ValidatedNode} node
  * @param {unknown[]} executionOverrides
- * @returns {import("../scripts/contract.mjs").NodeSnapshot}
+ * @returns {import("../src/contract/index.mjs").NodeSnapshot}
  */
 function nodeSnapshot(node, executionOverrides) {
   const now = new Date().toISOString();
@@ -119,7 +119,7 @@ import(workerData.lockUrl).then((lockModule) => {
 async function raceForLock(runDir, count) {
   const gate = new SharedArrayBuffer(4);
   const open = new Int32Array(gate);
-  const lockUrl = new URL("../scripts/lock.mjs", import.meta.url).href;
+  const lockUrl = new URL("../src/run/lock.mjs", import.meta.url).href;
   const workers = Array.from({ length: count }, () => new Worker(CONTENDER_SOURCE, {
     eval: true,
     workerData: { runDir, lockUrl, gate },
@@ -481,7 +481,7 @@ test("monitorInvocation reads bounded live evidence and never throws", () => {
     { type: "item.completed", item: { type: "tool_call" } },
     { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
   ].map((event) => JSON.stringify(event)).join("\n") + "\n");
-  const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
+  const job = /** @type {import("../src/cli.mjs").Job} */ ({
     runtime: { harness: "codex" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
@@ -503,7 +503,7 @@ test("monitorInvocation keeps counting codex turns after the transcript outgrows
   const first = [];
   for (let index = 0; index < 40; index += 1) first.push(fatItem, turn);
   writeFileSync(stdout, `${first.join("\n")}\n`);
-  const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
+  const job = /** @type {import("../src/cli.mjs").Job} */ ({
     runtime: { harness: "codex" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
@@ -534,7 +534,7 @@ test("monitorInvocation observes claude turns and the session total beyond a fix
   lines.push(JSON.stringify({ type: "result", session_id: "fat-session", usage: { input_tokens: 9, cache_read_input_tokens: 123_456 } }));
   writeFileSync(stdout, `${lines.join("\n")}\n`);
   assert.ok(statSync(stdout).size > 128 * 1024, "the transcript outgrew the old fixed live window");
-  const job = /** @type {import("../scripts/runner.mjs").Job} */ ({
+  const job = /** @type {import("../src/cli.mjs").Job} */ ({
     runtime: { harness: "claude" },
     paths: { prompt: join(logs, "worker.prompt"), stdout, stderr: join(logs, "worker.err") },
   });
@@ -576,7 +576,7 @@ test("stall supervision uses the latest persisted timeout override", async () =>
   });
   try {
     await new Promise((resolve) => setTimeout(resolve, 80));
-    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    /** @type {{currentJob: import("../src/cli.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let timeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       timeout = { currentJob, status, error };
@@ -629,7 +629,7 @@ test("stall supervision kills a runtime whose harness declares streamed output o
     // poll finds nothing new.
     await detectStalls(contract, new Map([["build", job]]), async () => {});
     await new Promise((resolve) => setTimeout(resolve, 300));
-    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    /** @type {{currentJob: import("../src/cli.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let timeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       timeout = { currentJob, status, error };
@@ -679,7 +679,7 @@ test("stall supervision never kills a runtime whose harness declares no streamed
   try {
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(statSync(job.paths.stdout, { throwIfNoEntry: false })?.size ?? 0, 0, "the replay process has written nothing yet");
-    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    /** @type {{currentJob: import("../src/cli.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let firstTimeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       firstTimeout = { currentJob, status, error };
@@ -693,7 +693,7 @@ test("stall supervision never kills a runtime whose harness declares no streamed
     // further change here 250ms later, would call it stalled — well inside
     // this 0.6s wall-clock budget. The fix must stay silent here.
     await new Promise((resolve) => setTimeout(resolve, 250));
-    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    /** @type {{currentJob: import("../src/cli.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let secondTimeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       secondTimeout = { currentJob, status, error };
@@ -701,7 +701,7 @@ test("stall supervision never kills a runtime whose harness declares no streamed
     assert.equal(secondTimeout, undefined, "a harness that never reports streamed output must survive well past stallTimeoutSec");
 
     await new Promise((resolve) => setTimeout(resolve, 300));
-    /** @type {{currentJob: import("../scripts/runner.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
+    /** @type {{currentJob: import("../src/cli.mjs").Job, status: "exhausted"|"stalled", error: {code: string, message: string}}|undefined} */
     let thirdTimeout;
     await detectStalls(contract, new Map([["build", job]]), async (currentJob, status, error) => {
       thirdTimeout = { currentJob, status, error };

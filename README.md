@@ -53,7 +53,7 @@ campaign together, from what the runs recorded. Detail:
 Quickstart, in the repository that will receive the implementation:
 
 ```bash
-INTENT_FACTORY=/path/to/skills/skills/mine/intent-factory/scripts/runner.mjs
+INTENT_FACTORY=/path/to/skills/skills/mine/intent-factory/src/cli.mjs
 TARGET=/path/to/target-repository
 
 rg -qxF '.runs/' "$TARGET/.gitignore" || printf '\n.runs/\n' >> "$TARGET/.gitignore"

@@ -5,20 +5,20 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acknowledgeJournalEvent, campaignDir, readJournal } from "../scripts/campaign.mjs";
-import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/harnesses/index.mjs";
-import { liveInputTokens, liveSessionMetrics, liveUsage } from "../scripts/harnesses/exec-jsonl/index.mjs";
-import { replayHarness } from "../scripts/harnesses/replay/index.mjs";
-import { JUDGE_SCHEMA } from "../scripts/lib.mjs";
-import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
-import { runContract, resumeRun } from "../scripts/runner.mjs";
-import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../scripts/integrate.mjs";
-import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../scripts/worktree.mjs";
-import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
+import { acknowledgeJournalEvent, campaignDir, readJournal } from "../src/campaign/index.mjs";
+import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../src/harnesses/index.mjs";
+import { liveInputTokens, liveSessionMetrics, liveUsage } from "../src/harnesses/exec-jsonl/index.mjs";
+import { replayHarness } from "../src/harnesses/replay/index.mjs";
+import { JUDGE_SCHEMA } from "../src/engine/prompts.mjs";
+import { projectMetrics, readMetricsSources } from "../src/campaign/metrics.mjs";
+import { runContract, resumeRun } from "../src/cli.mjs";
+import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../src/repo/integrate.mjs";
+import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../src/repo/worktree.mjs";
+import { captureWorkspaceSnapshot } from "../src/contract/verification.mjs";
 import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
-const bin = fileURLToPath(new URL("../scripts/harnesses/replay/bin.mjs", import.meta.url));
-const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+const bin = fileURLToPath(new URL("../src/harnesses/replay/bin.mjs", import.meta.url));
+const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
 const zeroUsage = Object.freeze({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 });
 
 /**
@@ -749,7 +749,7 @@ async function driveReplayedContract({ id, nodes, worker, judge = [{ envelope: e
   };
 }
 
-/** @param {string} campaignPath @param {string} runsDir @returns {import("../scripts/metrics.mjs").CampaignMetrics} */
+/** @param {string} campaignPath @param {string} runsDir @returns {import("../src/campaign/metrics.mjs").CampaignMetrics} */
 function campaignMetrics(campaignPath, runsDir) {
   return projectMetrics(readMetricsSources(campaignPath, { runsDir }));
 }
@@ -757,11 +757,11 @@ function campaignMetrics(campaignPath, runsDir) {
 /** @typedef {{repo: string, runDir: string, id: string, head: string|null}} IntegrationFixture */
 /**
  * @typedef {{
- *   verifyCandidate?: import("../scripts/integrate.mjs").CandidateVerifier,
- *   onAccepted?: import("../scripts/integrate.mjs").AcceptedCallback,
- *   onVerificationFailure?: import("../scripts/integrate.mjs").VerificationFailureCallback,
- *   onConflict?: import("../scripts/integrate.mjs").AcceptedCallback,
- *   onConcurrentMove?: import("../scripts/integrate.mjs").ConcurrentMoveCallback,
+ *   verifyCandidate?: import("../src/repo/integrate.mjs").CandidateVerifier,
+ *   onAccepted?: import("../src/repo/integrate.mjs").AcceptedCallback,
+ *   onVerificationFailure?: import("../src/repo/integrate.mjs").VerificationFailureCallback,
+ *   onConflict?: import("../src/repo/integrate.mjs").AcceptedCallback,
+ *   onConcurrentMove?: import("../src/repo/integrate.mjs").ConcurrentMoveCallback,
  *   interrupt?: (stage: string) => void,
  * }} IntegrationFixtureOptions
  */

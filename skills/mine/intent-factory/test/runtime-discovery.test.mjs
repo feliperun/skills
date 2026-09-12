@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { composeAssignments, nextSameTierRuntime, normalizeProviderAvailability } from "../scripts/runtime-discovery.mjs";
-import { normalizeProviderResult, probeRuntime } from "../scripts/harnesses/index.mjs";
+import { composeAssignments, nextSameTierRuntime, normalizeProviderAvailability } from "../src/engine/runtime-discovery.mjs";
+import { normalizeProviderResult, probeRuntime } from "../src/harnesses/index.mjs";
 
 const ready = { available: true, exhaustedUntil: null, reason: "ready" };
 

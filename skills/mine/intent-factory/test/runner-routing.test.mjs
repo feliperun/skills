@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { preflightContract, runContract } from "../scripts/runner.mjs";
-import { livenessState } from "../scripts/node.mjs";
-import { failoverEdges, nextHop, nextSynthesizedRuntime } from "../scripts/failover.mjs";
-import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "../scripts/backoff.mjs";
-import { getHarness } from "../scripts/harnesses/index.mjs";
+import { preflightContract, runContract } from "../src/cli.mjs";
+import { livenessState } from "../src/engine/node.mjs";
+import { failoverEdges, nextHop, nextSynthesizedRuntime } from "../src/engine/failover.mjs";
+import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "../src/engine/backoff.mjs";
+import { getHarness } from "../src/harnesses/index.mjs";
 import { fakeCodex, fakeExecJsonl, fixture, packet, withFakeAgy, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, fakeClaudeLike, flagValue, failoverContract, RESET_NOW, NETWORK_NOW, NETWORK_DEADLINE, halfJitter } from "./runner-helpers.mjs";
 
@@ -549,14 +549,14 @@ test("liveness state reports paused_quota only while a provider backoff is pendi
   // reset window and exercise this end to end through runContract. This
   // exercises livenessState directly against the exact shape the runner
   // persists for a pending phase parked on a future routing backoff.
-  const pendingWithActiveBackoff = /** @type {Map<string, import("../scripts/contract.mjs").NodeSnapshot>} */ (new Map([["build", {
+  const pendingWithActiveBackoff = /** @type {Map<string, import("../src/contract/index.mjs").NodeSnapshot>} */ (new Map([["build", {
     status: "pending",
     phase: "worker",
     routing: { currentOverride: { role: "worker", backoffUntil: new Date(Date.now() + 60_000).toISOString() } },
   }]]));
   assert.equal(livenessState(pendingWithActiveBackoff), "paused_quota");
 
-  const pendingWithElapsedBackoff = /** @type {Map<string, import("../scripts/contract.mjs").NodeSnapshot>} */ (new Map([["build", {
+  const pendingWithElapsedBackoff = /** @type {Map<string, import("../src/contract/index.mjs").NodeSnapshot>} */ (new Map([["build", {
     status: "pending",
     phase: "worker",
     routing: { currentOverride: { role: "worker", backoffUntil: new Date(Date.now() - 1_000).toISOString() } },

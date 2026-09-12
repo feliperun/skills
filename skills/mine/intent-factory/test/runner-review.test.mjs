@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runContract } from "../scripts/runner.mjs";
+import { runContract } from "../src/cli.mjs";
 import { fakeCodex, fixture, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withAdvisoryGateCodex, withBrokenGateCodex, withJudgeDefectCodex, withStallingJudgeCodex } from "./runner-helpers.mjs";
 

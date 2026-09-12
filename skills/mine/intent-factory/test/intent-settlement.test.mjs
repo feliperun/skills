@@ -4,9 +4,9 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture, orphan, withFakeCodex, writeContract } from "./helpers.mjs";
-import { resumeRun, runContract } from "../scripts/runner.mjs";
+import { resumeRun, runContract } from "../src/cli.mjs";
 
-/** @param {import("../scripts/runner.mjs").RunOutcome} result @param {string} [id] @returns {import("../scripts/contract.mjs").NodeSnapshot} */
+/** @param {import("../src/cli.mjs").RunOutcome} result @param {string} [id] @returns {import("../src/contract/index.mjs").NodeSnapshot} */
 function nodeState(result, id = "build") {
   const state = result.states.get(id);
   if (!state) throw new Error(`missing node state for ${id}`);
@@ -74,7 +74,7 @@ test("every provider invocation persists an intent before spawn and a settlement
     nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), definitionOfDone: [{ id: "works", text: "The requested behavior works and is reviewed.", judgment: true }], gate: { enabled: true } }],
   }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocations = nodeState(first).invocations ?? [];
   assert.ok(invocations.length >= 2, "expected worker and judge invocations");
   for (const invocation of invocations) {
@@ -101,7 +101,7 @@ test("an intent withheld from settlement classifies unknown_effect and resolves 
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-adopt-"));
   const path = writeContract(directory, fixture({ id: "intent-adopt-run", pollIntervalMs: 10 }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
 
@@ -141,7 +141,7 @@ test("the terminal settlement of an attempt with an advisory scope finding persi
     nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture(), gate: false }],
   }));
   const first = await withFakeCodex(directory, "write-unexpected", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const state = nodeState(first);
   // A completed attempt with green verification is advisory, not terminal.
   assert.equal(state.status, "done");
@@ -168,7 +168,7 @@ test("the first terminal settlement from a scope failure persists provider recei
   // An incomplete worker (a failed turn) that wrote outside its scope keeps
   // the terminal verdict: only a completed attempt is advisory.
   const first = await withFakeCodex(directory, "write-unexpected-failed", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const state = nodeState(first);
   assert.equal(state.status, "failed");
   assert.equal(state.error?.code, "unexpected_write");
@@ -187,7 +187,7 @@ test("a controller-loss safe replay settlement persists the provider receipt fro
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-tail-receipts-"));
   const path = writeContract(directory, fixture({ id: "intent-tail-receipts-run", pollIntervalMs: 10 }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
   reopenCrashWindowKeepingThread(runDir, invocationId);
@@ -222,7 +222,7 @@ test("a controller-loss reconciled settlement persists the provider receipt from
     nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture({ verification: failingVerification }), gate: false }],
   }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
   reopenCrashWindowKeepingThread(runDir, invocationId);
@@ -247,7 +247,7 @@ test("safe replay retries exactly once after deterministic verification passes",
   // The ambiguous window must prove replay cannot duplicate effects: a worker
   // that wrote nothing leaves the declared workspace untouched.
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
   reopenCrashWindow(runDir, invocationId);
@@ -273,7 +273,7 @@ test("declared workspace writes across the ambiguous window reconcile instead of
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-declared-write-"));
   const path = writeContract(directory, fixture({ id: "intent-declared-write-run", pollIntervalMs: 10 }));
   const first = await withFakeCodex(directory, "write-allowed", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   assert.equal(nodeState(first).status, "done");
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
@@ -297,7 +297,7 @@ test("a persisted worker checkpoint is adopted when the provider stream is unava
   const directory = mkdtempSync(join(tmpdir(), "runner-intent-checkpoint-"));
   const path = writeContract(directory, fixture({ id: "intent-checkpoint-run", pollIntervalMs: 10 }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const state = nodeState(first);
   const invocationId = state.invocations?.at(-1)?.id;
   assert.ok(invocationId);
@@ -327,7 +327,7 @@ test("reconcile surfaces a durable blocked finding when deterministic verificati
     nodes: [{ id: "build", type: "backend", taskPacket: packetForFixture({ verification: failingVerification }), gate: false }],
   }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
   reopenCrashWindow(runDir, invocationId);
@@ -359,7 +359,7 @@ test("replayPolicy never forces the reconcile outcome without an automatic retry
     nodes: [{ id: "build", type: "backend", replayPolicy: "never", taskPacket: packetForFixture(), gate: false }],
   }));
   const first = await withFakeCodex(directory, "pass", async () => runContract(path));
-  const runDir = /** @type {import("../scripts/runner.mjs").RunOutcome} */ (first).runDir;
+  const runDir = /** @type {import("../src/cli.mjs").RunOutcome} */ (first).runDir;
   const invocationId = nodeState(first).invocations?.at(-1)?.id;
   assert.ok(invocationId);
   reopenCrashWindow(runDir, invocationId);

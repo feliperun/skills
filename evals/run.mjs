@@ -16,13 +16,13 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { preflightContract, runContract, resumeRun } from "../skills/mine/intent-factory/scripts/runner.mjs";
-import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../skills/mine/intent-factory/scripts/lock.mjs";
-import { writeJsonAtomic } from "../skills/mine/intent-factory/scripts/store.mjs";
-import { initializeCampaign } from "../skills/mine/intent-factory/scripts/campaign.mjs";
-import { readIntegrationJournal } from "../skills/mine/intent-factory/scripts/integrate.mjs";
-import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/scripts/worktree.mjs";
-import { validateVerificationCommands } from "../skills/mine/intent-factory/scripts/verification.mjs";
+import { preflightContract, runContract, resumeRun } from "../skills/mine/intent-factory/src/cli.mjs";
+import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../skills/mine/intent-factory/src/run/lock.mjs";
+import { writeJsonAtomic } from "../skills/mine/intent-factory/src/run/store.mjs";
+import { initializeCampaign } from "../skills/mine/intent-factory/src/campaign/index.mjs";
+import { readIntegrationJournal } from "../skills/mine/intent-factory/src/repo/integrate.mjs";
+import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../skills/mine/intent-factory/src/repo/worktree.mjs";
+import { validateVerificationCommands } from "../skills/mine/intent-factory/src/contract/verification.mjs";
 import { compareEvalReports, mergeEvalRunSources, projectEvalIndicators, readEvalRunSources, renderEvalComparisonReport } from "./metrics.mjs";
 
 /** @typedef {Record<string, unknown>} JsonObject */

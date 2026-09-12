@@ -40,9 +40,9 @@ function messageFile(message) {
   return file;
 }
 
-const SCRIPTS_DIR = join(ROOT, "skills", "mine", "intent-factory", "scripts");
+const SRC_DIR = join(ROOT, "skills", "mine", "intent-factory", "src");
 
-/** @returns {string[]} production .mjs paths under SCRIPTS_DIR, relative with forward slashes */
+/** @returns {string[]} production .mjs paths under SRC_DIR, relative with forward slashes */
 function productionScriptFiles() {
   /** @type {string[]} */
   const files = [];
@@ -55,11 +55,11 @@ function productionScriptFiles() {
       if (entry.isDirectory()) {
         walk(path);
       } else if (entry.isFile() && entry.name.endsWith(".mjs") && !entry.name.endsWith(".test.mjs")) {
-        files.push(relative(SCRIPTS_DIR, path));
+        files.push(relative(SRC_DIR, path));
       }
     }
   };
-  walk(SCRIPTS_DIR);
+  walk(SRC_DIR);
   return files;
 }
 
@@ -163,7 +163,7 @@ test("AGENT.md, CLAUDE.md, CURSOR.md and GEMINI.md stay symlinks to AGENTS.md", 
 test("empty catch blocks in production scripts never increase", () => {
   let count = 0;
   for (const rel of productionScriptFiles()) {
-    const contents = readFileSync(join(SCRIPTS_DIR, rel), "utf8");
+    const contents = readFileSync(join(SRC_DIR, rel), "utf8");
     count += (contents.match(/catch\s*\{\s*\}/g) ?? []).length;
   }
   assert.ok(count <= EMPTY_CATCH_CEILING, `${count} empty catch blocks exceed ceiling ${EMPTY_CATCH_CEILING}`);

@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderMetricsJson, renderMetricsReport } from "../scripts/metrics-report.mjs";
-import { projectMetrics, readMetricsSources } from "../scripts/metrics.mjs";
+import { renderMetricsJson, renderMetricsReport } from "../src/report/metrics-report.mjs";
+import { projectMetrics, readMetricsSources } from "../src/campaign/metrics.mjs";
 
 /** Every indicator of TECH-SPEC lean section 6 with the direction the spec table gives it. */
 const DIRECTIONS = {
@@ -233,7 +233,7 @@ const FIXTURE_DIR = fileURLToPath(new URL("fixtures/lean-campaign-baseline", imp
 /** @typedef {{campaign: {id: string, goal: string, status: string, linkedRunIds: string[]}}} BaselineCampaign */
 const CAMPAIGN_DOC = /** @type {BaselineCampaign} */ (JSON.parse(readFileSync(join(FIXTURE_DIR, "campaign.json"), "utf8")));
 const BASELINE_CAMPAIGN = CAMPAIGN_DOC.campaign.id;
-const RUNNER = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+const RUNNER = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
 
 /** @type {string|null} */
 let materialized = null;

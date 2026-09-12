@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runContract } from "../scripts/runner.mjs";
-import { validateContract } from "../scripts/lib.mjs";
+import { runContract } from "../src/cli.mjs";
+import { validateContract } from "../src/engine/prompts.mjs";
 import { fixture, packet, writeContract } from "./helpers.mjs";
 
 
 
-/** @param {import("../scripts/runner.mjs").RunOutcome} result @param {string} [id] @returns {import("../scripts/contract.mjs").NodeSnapshot} */
+/** @param {import("../src/cli.mjs").RunOutcome} result @param {string} [id] @returns {import("../src/contract/index.mjs").NodeSnapshot} */
 export function nodeState(result, id = "build") {
   const state = result.states.get(id);
   if (!state) throw new Error(`missing node state for ${id}`);
@@ -162,7 +162,7 @@ if (process.argv.includes("--version")) {
 }
 
 
-/** @param {string} directory @param {"file-first"|"missing-then-mutates"|"missing-then-file-vs-message"|"missing-then-noop"|"revision-regrinds"} mode @param {string} path @returns {Promise<import("../scripts/runner.mjs").RunOutcome>} */
+/** @param {string} directory @param {"file-first"|"missing-then-mutates"|"missing-then-file-vs-message"|"missing-then-noop"|"revision-regrinds"} mode @param {string} path @returns {Promise<import("../src/cli.mjs").RunOutcome>} */
 export async function withResultFileCodex(directory, mode, path) {
   const previous = process.env.INTENT_FACTORY_CODEX_BIN;
   process.env.INTENT_FACTORY_CODEX_BIN = resultFileCodex(directory, mode);
@@ -464,7 +464,7 @@ export async function withStallingJudgeCodex(directory, runner) {
 }
 
 
-/** @param {string} prefix @param {Record<string, unknown>} overrides @returns {import("../scripts/contract.mjs").ValidatedContract} */
+/** @param {string} prefix @param {Record<string, unknown>} overrides @returns {import("../src/contract/index.mjs").ValidatedContract} */
 export function failoverContract(prefix, overrides) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   const path = writeContract(directory, fixture({
@@ -490,7 +490,7 @@ export const NETWORK_DEADLINE = "2026-09-04T12:00:00.000Z";
 export const halfJitter = () => 0.5;
 
 
-export const RUNNER_CLI = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+export const RUNNER_CLI = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
 
 
 /**

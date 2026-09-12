@@ -4,8 +4,8 @@ import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { renderFindings } from "../scripts/lib.mjs";
-import { runContract, resumeRun } from "../scripts/runner.mjs";
+import { renderFindings } from "../src/engine/prompts.mjs";
+import { runContract, resumeRun } from "../src/cli.mjs";
 import { fakeCodex, fixture, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withBrokenGateCodex } from "./runner-helpers.mjs";
 
@@ -80,7 +80,7 @@ test("oversized judge prompt fails before judge spawn or persistence", async () 
     nodes: [{
       id: "build",
       type: "backend",
-      definitionOfDone: /** @type {import("../scripts/definition-of-done.mjs").DefinitionOfDoneItem[]} */ ([
+      definitionOfDone: /** @type {import("../src/contract/definition-of-done.mjs").DefinitionOfDoneItem[]} */ ([
         { id: "huge-0", text: "x".repeat(2 * 1024), judgment: true },
         ...Array.from({ length: 40 }, (_, index) => ({ id: `huge-${index + 1}`, text: "y".repeat(2 * 1024), proof: { kind: "command", ref: "true" } })),
       ]),

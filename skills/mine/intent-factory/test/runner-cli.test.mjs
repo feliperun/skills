@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { renderFindings, renderReport, renderStatus, validateContract } from "../scripts/lib.mjs";
-import { INTENT_FACTORY_VERSION } from "../scripts/contract.mjs";
-import { renderStatusJson } from "../scripts/render.mjs";
-import { runContract, resumeRun } from "../scripts/runner.mjs";
-import { invocationAlive } from "../scripts/node.mjs";
-import { processStartToken } from "../scripts/lock.mjs";
-import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "../scripts/store.mjs";
+import { renderFindings, renderReport, renderStatus, validateContract } from "../src/engine/prompts.mjs";
+import { INTENT_FACTORY_VERSION } from "../src/contract/index.mjs";
+import { renderStatusJson } from "../src/report/render.mjs";
+import { runContract, resumeRun } from "../src/cli.mjs";
+import { invocationAlive } from "../src/engine/node.mjs";
+import { processStartToken } from "../src/run/lock.mjs";
+import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "../src/run/store.mjs";
 import { delay, fakeCodex, fixture, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withAdvisoryGateCodex, withBrokenGateCodex, RUNNER_CLI } from "./runner-helpers.mjs";
 
@@ -26,7 +26,7 @@ test("runs the CLI through an installed symlink", () => {
     ],
   }));
   const link = join(directory, "runner-link.mjs");
-  symlinkSync(fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), link);
+  symlinkSync(fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), link);
   const result = spawnSync(process.execPath, [link, "validate", contractPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "valid\n");
@@ -39,7 +39,7 @@ test("doctor checks repository prerequisites without mutating anything", () => {
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
   execFileSync("git", ["-C", directory, "add", ".gitignore"]);
   execFileSync("git", ["-C", directory, "-c", "user.email=doctor@example.test", "-c", "user.name=doctor", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory], { encoding: "utf8" });
   assert.equal(text.status, 0, text.stderr);
   const payload = /** @type {{schemaVersion: number, ok: boolean, checks: {name: string, ok: boolean, detail: string}[]}} */ (JSON.parse(text.stdout));
@@ -60,7 +60,7 @@ test("doctor reports an unborn repository as a failing git check", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-unborn-"));
   execFileSync("git", ["init", "-q", directory]);
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const text = spawnSync(process.execPath, [cli, "doctor", "--json", "--cwd", directory], { encoding: "utf8" });
   const payload = /** @type {{schemaVersion: number, ok: boolean, checks: {name: string, ok: boolean, detail: string}[]}} */ (JSON.parse(text.stdout));
   assert.equal(payload.ok, false, "an unborn repository must not report doctor as healthy");
@@ -78,7 +78,7 @@ test("doctor does not fail a harness resolved through an explicit executable", (
   writeFileSync(join(directory, ".gitignore"), ".runs/\n");
   execFileSync("git", ["-C", directory, "add", ".gitignore"]);
   execFileSync("git", ["-C", directory, "-c", "user.email=doctor@example.test", "-c", "user.name=doctor", "-c", "commit.gpgSign=false", "commit", "-qm", "fixture"]);
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const worker = join(directory, "my-worker.mjs");
   writeFileSync(worker, "#!/usr/bin/env node\nif (process.argv.includes('--version')) console.log('my-worker 1.0.0');\n");
   chmodSync(worker, 0o755);
@@ -113,7 +113,7 @@ test("status --json and report --json emit stable machine-readable output", asyn
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const status = spawnSync(process.execPath, [cli, "status", "--json", runDir], { encoding: "utf8" });
   assert.equal(status.status, 0, status.stderr);
   const statusPayload = JSON.parse(status.stdout);
@@ -139,7 +139,7 @@ test("incident freeze rejects resume mutations while status and report remain re
     () => resumeRun(runDir),
     (error) => error instanceof Error && /** @type {{code?: string}} */ (error).code === "incident_frozen",
   );
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   for (const command of ["status", "report"]) {
     const result = spawnSync(process.execPath, [cli, command, "--json", runDir], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
@@ -157,7 +157,7 @@ test("cancel subcommand terminates a stale running node", async () => {
   }));
   const runDir = await withFakeCodex(directory, "pass", async () => (await runContract(path)).runDir);
   orphan(runDir, "build");
-  const cli = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const cli = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const result = spawnSync(process.execPath, [cli, "cancel", runDir], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const node = JSON.parse(readFileSync(join(runDir, "nodes", "build.json"), "utf8"));
@@ -176,7 +176,7 @@ test("run --detach leaves a controller that outlives the invoker and completes t
   const runDir = join(contract.cwd, ".runs", contract.id);
   const nodePath = join(runDir, "nodes", "build.json");
   const result = await withFakeCodex(directory, "pass", () =>
-    spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "run", "--detach", contractPath], {
+    spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "run", "--detach", contractPath], {
       encoding: "utf8",
     }),
   );
@@ -222,7 +222,7 @@ test("resume --detach restarts a failed node through a detached controller", asy
   await withFakeCodex(directory, "worker-fail", () => runContract(contractPath));
   assert.equal(readStatus(nodePath), "failed");
   const result = await withFakeCodex(directory, "pass", () =>
-    spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "resume", "--detach", runDir], {
+    spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "resume", "--detach", runDir], {
       encoding: "utf8",
     }),
   );
@@ -405,7 +405,7 @@ test("idle polls emit no notification, and resume never re-notifies an already-t
 test("a finished run prints the token report", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-auto-report-"));
   const path = writeContract(directory, fixture({ pollIntervalMs: 10 }));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const result = await withFakeCodex(directory, "pass", () => spawnSync(process.execPath, [runner, "run", path], { encoding: "utf8" }));
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /totals · in 10/u, "auto-report table");
@@ -442,7 +442,7 @@ test("run warns when a node id is already done in another run", async () => {
 
   const secondPath = writeContract(directory, fixture({ id: "second-run", pollIntervalMs: 10 }));
   const result = await withFakeCodex(directory, "pass", () =>
-    spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "run", secondPath], {
+    spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "run", secondPath], {
       encoding: "utf8",
     }),
   );
@@ -459,7 +459,7 @@ test("run warnings ignore an unrelated historical run with an obsolete contract"
   writeFileSync(join(obsoleteRun, "nodes", "old-node.json"), "{}\n");
   const result = await withFakeCodex(directory, "pass", () => spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "run", currentPath],
+    [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "run", currentPath],
     { encoding: "utf8" },
   ));
   assert.equal(result.status, 0, result.stderr);
@@ -479,7 +479,7 @@ test("run warnings ignore a historical snapshot from an older capability schema"
   const secondPath = writeContract(directory, fixture({ id: "current-run", pollIntervalMs: 10 }));
   const result = await withFakeCodex(directory, "pass", () => spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "run", secondPath],
+    [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "run", secondPath],
     { encoding: "utf8" },
   ));
   assert.equal(result.status, 0, result.stderr);
@@ -495,7 +495,7 @@ test("detached resume surfaces bootstrap failure before reporting success", asyn
   const metadata = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   metadata.sourceIdentity.cwd = "/unexpected-source";
   writeFileSync(join(runDir, "run.json"), JSON.stringify(metadata));
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "resume", "--detach", runDir], {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "resume", "--detach", runDir], {
     env: { ...process.env, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") },
     encoding: "utf8",
   });
@@ -536,7 +536,7 @@ test("detached ACK timeout and parse errors clean only their nonce attempt and A
   writeFileSync(bootstrapAckPath(runDir, errorNonce), "not json\n");
   const errorResult = spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "resume", runDir],
+    [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "resume", runDir],
     { env: { ...process.env, INTENT_FACTORY_BOOTSTRAP_NONCE: errorNonce, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
   );
   assert.notEqual(errorResult.status, 0);
@@ -546,7 +546,7 @@ test("detached ACK timeout and parse errors clean only their nonce attempt and A
   const timeoutNonce = "22222222-2222-4222-8222-222222222222";
   const timeoutResult = spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url)), "resume", runDir],
+    [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "resume", runDir],
     { env: { ...process.env, INTENT_FACTORY_BOOTSTRAP_NONCE: timeoutNonce, INTENT_FACTORY_CODEX_BIN: fakeCodex(directory, "pass") }, encoding: "utf8" },
   );
   assert.equal(timeoutResult.status, 0, timeoutResult.stderr);

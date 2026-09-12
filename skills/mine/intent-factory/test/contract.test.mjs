@@ -15,12 +15,12 @@ import {
   validateEvent,
   validateNodeSnapshot,
   validateRunMetadata,
-} from "../scripts/contract.mjs";
-import { SIGNAL_END, SIGNAL_START } from "../scripts/signal-block.mjs";
-import { judgePrompt } from "../scripts/lib.mjs";
-import { JUDGE_LIMITS } from "../scripts/judge-envelope.mjs";
-import { runContract } from "../scripts/runner.mjs";
-import { harnessCapabilities } from "../scripts/harnesses/index.mjs";
+} from "../src/contract/index.mjs";
+import { SIGNAL_END, SIGNAL_START } from "../src/repo/signal-block.mjs";
+import { judgePrompt } from "../src/engine/prompts.mjs";
+import { JUDGE_LIMITS } from "../src/contract/judge-envelope.mjs";
+import { runContract } from "../src/cli.mjs";
+import { harnessCapabilities } from "../src/harnesses/index.mjs";
 import * as helpers from "./helpers.mjs";
 
 /** @param {string} directory */
@@ -771,10 +771,10 @@ test("validate rejects a symlink followed by dotdot escaping cwd", () => {
 });
 
 test("judge prompt exposes only the write-file evidence boundary", () => {
-  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
+  const node = /** @type {import("../src/engine/prompts.mjs").JudgeNode} */ ({
     id: "build",
     type: "backend",
-    taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
+    taskPacket: /** @type {import("../src/contract/index.mjs").TaskPacket} */ (helpers.packet()),
     definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
   });
   const prompt = judgePrompt(node, "worker complete");
@@ -785,10 +785,10 @@ test("judge prompt exposes only the write-file evidence boundary", () => {
 });
 
 test("judge prompt advertises the envelope the parser enforces", () => {
-  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
+  const node = /** @type {import("../src/engine/prompts.mjs").JudgeNode} */ ({
     id: "build",
     type: "backend",
-    taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
+    taskPacket: /** @type {import("../src/contract/index.mjs").TaskPacket} */ (helpers.packet()),
     definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
   });
   const prompt = judgePrompt(node, "worker complete");
@@ -803,10 +803,10 @@ test("judge prompt advertises the envelope the parser enforces", () => {
 });
 
 test("judge prompt lists scope findings only when the node carries an advisory finding", () => {
-  const node = /** @type {import("../scripts/lib.mjs").JudgeNode} */ ({
+  const node = /** @type {import("../src/engine/prompts.mjs").JudgeNode} */ ({
     id: "build",
     type: "backend",
-    taskPacket: /** @type {import("../scripts/contract.mjs").TaskPacket} */ (helpers.packet()),
+    taskPacket: /** @type {import("../src/contract/index.mjs").TaskPacket} */ (helpers.packet()),
     definitionOfDone: [{ id: "works", text: "It works", judgment: true }],
   });
   const clean = judgePrompt(node, "worker complete");

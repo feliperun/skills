@@ -4,9 +4,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../scripts/runtime-discovery.mjs";
-import { MODEL_HARNESS_ORDER, parseAgyModels } from "../scripts/models.mjs";
-import { registeredHarnesses, resolveVendor } from "../scripts/harnesses/index.mjs";
+import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../src/engine/runtime-discovery.mjs";
+import { MODEL_HARNESS_ORDER, parseAgyModels } from "../src/harnesses/catalogue.mjs";
+import { registeredHarnesses, resolveVendor } from "../src/harnesses/index.mjs";
 import { fakeAgy } from "./helpers.mjs";
 import { RUNNER_CLI } from "./runner-helpers.mjs";
 

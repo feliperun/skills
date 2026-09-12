@@ -2,9 +2,9 @@ import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { campaignDir, initializeCampaign } from "../scripts/campaign.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../scripts/contract.mjs";
-import { createAttemptWorktree } from "../scripts/worktree.mjs";
+import { campaignDir, initializeCampaign } from "../src/campaign/index.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../src/contract/index.mjs";
+import { createAttemptWorktree } from "../src/repo/worktree.mjs";
 
 // The suite must never pop a macOS desktop notification: when
 // INTENT_FACTORY_NOTIFY_BIN is unset the outbox drain falls back to the
@@ -56,8 +56,8 @@ export async function waitForValue(read, timeoutMs = 5_000, intervalMs = 25) {
  * seal and verify, exactly as an interrupted run would.
  *
  * @param {string} runDir
- * @param {{id: string, attempt: number, worktree?: import("../scripts/contract.mjs").WorktreeState|null}} state
- * @returns {import("../scripts/contract.mjs").WorktreeState|null|undefined} the worktree to persist on the node
+ * @param {{id: string, attempt: number, worktree?: import("../src/contract/index.mjs").WorktreeState|null}} state
+ * @returns {import("../src/contract/index.mjs").WorktreeState|null|undefined} the worktree to persist on the node
  */
 export function ensureAttemptWorktree(runDir, state) {
   if (state.worktree?.status !== "removed" || !state.worktree.branch) return state.worktree;

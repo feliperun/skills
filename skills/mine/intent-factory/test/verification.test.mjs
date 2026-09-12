@@ -4,13 +4,13 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../scripts/contract.mjs";
-import { parseJudge, retryPrompt } from "../scripts/lib.mjs";
-import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../scripts/judge-envelope.mjs";
-import { judgeReaskInstruction } from "../scripts/review-modes.mjs";
-import { mechanicalVerdict } from "../scripts/judge-gate.mjs";
-import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands, validateWorkspaceScopeBoundary } from "../scripts/verification.mjs";
-import { parseDiscoveryResult, parseWorkerResult } from "../scripts/worker-result.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract, validateNodeSnapshot } from "../src/contract/index.mjs";
+import { parseJudge, retryPrompt } from "../src/engine/prompts.mjs";
+import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../src/contract/judge-envelope.mjs";
+import { judgeReaskInstruction } from "../src/contract/review-modes.mjs";
+import { mechanicalVerdict } from "../src/engine/judge-gate.mjs";
+import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands, validateWorkspaceScopeBoundary } from "../src/contract/verification.mjs";
+import { parseDiscoveryResult, parseWorkerResult } from "../src/contract/worker-result.mjs";
 
 /** @param {string} directory */
 function initializeGit(directory) {
@@ -396,8 +396,8 @@ test("scope exact files and roots respect prefix boundaries", () => {
 });
 
 /** A boundary is always re-validated against the scope that declared it.
- * @param {import("../scripts/verification.mjs").WorkspaceScopeBoundary} boundary
- * @returns {import("../scripts/verification.mjs").WorkspaceScope} */
+ * @param {import("../src/contract/verification.mjs").WorkspaceScopeBoundary} boundary
+ * @returns {import("../src/contract/verification.mjs").WorkspaceScope} */
 function declared(boundary) {
   return { files: [], roots: ["docs/NOTES.md"], boundary };
 }

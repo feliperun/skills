@@ -12,7 +12,7 @@ import {
   probeRuntime,
   providerCommand,
   resolvePermissionExecution,
-} from "../scripts/harnesses/index.mjs";
+} from "../src/harnesses/index.mjs";
 import {
   EXEC_JSONL_PROTOCOL,
   TOOL_OUTPUT_LIMIT_BYTES,
@@ -21,14 +21,14 @@ import {
   liveUsage,
   normalizeExecJsonlResult,
   truncateToolOutput,
-} from "../scripts/harnesses/exec-jsonl/index.mjs";
-import { ensureZcodeAvailable } from "../scripts/harnesses/zcode/index.mjs";
-import { normalizeCodexResult, parseVersion } from "../scripts/harnesses/protocol.mjs";
-import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../scripts/tool-policy-hook.mjs";
-import { DEFAULT_CLAUDE_TOOLS } from "../scripts/harnesses/claude/index.mjs";
-import { CODEX_PREAMBLE_OVERRIDES } from "../scripts/harnesses/codex/index.mjs";
-import { JUDGE_SCHEMA, routeRuntime } from "../scripts/lib.mjs";
-import { validateContract } from "../scripts/contract.mjs";
+} from "../src/harnesses/exec-jsonl/index.mjs";
+import { ensureZcodeAvailable } from "../src/harnesses/zcode/index.mjs";
+import { normalizeCodexResult, parseVersion } from "../src/harnesses/protocol.mjs";
+import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../src/host/tool-policy-hook.mjs";
+import { DEFAULT_CLAUDE_TOOLS } from "../src/harnesses/claude/index.mjs";
+import { CODEX_PREAMBLE_OVERRIDES } from "../src/harnesses/codex/index.mjs";
+import { JUDGE_SCHEMA, routeRuntime } from "../src/engine/prompts.mjs";
+import { validateContract } from "../src/contract/index.mjs";
 import { fixture, packet, withEmptyPath, writeContract } from "./helpers.mjs";
 
 test("all provider adapters report explicit capabilities and transport", () => {
@@ -727,7 +727,7 @@ test("codex preamble diet keeps the code-mode host enabled", () => {
 });
 
 test("codex preamble measurement comment pins the four code-mode-host outcomes", () => {
-  const source = readFileSync(new URL("../scripts/harnesses/codex/index.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/harnesses/codex/index.mjs", import.meta.url), "utf8");
   const declaration = "export const CODEX_PREAMBLE_OVERRIDES";
   const symbolIndex = source.indexOf(declaration);
   assert.ok(symbolIndex !== -1, "codex.mjs must keep exporting CODEX_PREAMBLE_OVERRIDES");

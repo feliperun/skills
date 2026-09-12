@@ -22,10 +22,10 @@ import {
   renderHandoff,
   resolveCampaign,
   validateJournalEntry,
-} from "../scripts/campaign.mjs";
-import { appendJsonl } from "../scripts/store.mjs";
-import { validateContract } from "../scripts/contract.mjs";
-import { runContract } from "../scripts/runner.mjs";
+} from "../src/campaign/index.mjs";
+import { appendJsonl } from "../src/run/store.mjs";
+import { validateContract } from "../src/contract/index.mjs";
+import { runContract } from "../src/cli.mjs";
 import { fixture, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 
 test("semantic budget keeps critical sections and evicts oldest low-priority history above 16 KiB", () => {
@@ -731,7 +731,7 @@ test("refuses ambiguous campaign discovery", () => {
 
 test("campaign CLI initializes, attaches, records via stdin, and shows the handoff", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-"));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const init = spawnSync(process.execPath, [runner, "campaign", "init", "cli", "--cwd", directory, "--goal", "Ship CLI"], { encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
   assert.match(init.stdout, /cli initialized/u);
@@ -759,7 +759,7 @@ test("campaign CLI refuses a malformed checkpoint", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-invalid-"));
   const runsDir = join(directory, ".runs");
   initializeCampaign(runsDir, { campaignId: "cli-invalid", goal: "Prove CLI validation" });
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const result = spawnSync(process.execPath, [
     runner, "campaign", "note", "cli-invalid", "--cwd", directory,
     "--session-id", "codex-1", "--kind", "bogus", "--text", "bad",
@@ -770,7 +770,7 @@ test("campaign CLI refuses a malformed checkpoint", () => {
 
 test("campaign CLI lists, closes, and resolves questions", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-lifecycle-"));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const initA = spawnSync(process.execPath, [runner, "campaign", "init", "alpha", "--cwd", directory, "--goal", "Ship A"], { encoding: "utf8" });
   assert.equal(initA.status, 0, initA.stderr);
   const initB = spawnSync(process.execPath, [runner, "campaign", "init", "beta", "--cwd", directory, "--goal", "Ship B"], { encoding: "utf8" });
@@ -820,7 +820,7 @@ test("campaign CLI lists, closes, and resolves questions", () => {
 
 test("campaign CLI attach retries with a stable event id are idempotent", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-idem-"));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const init = spawnSync(process.execPath, [runner, "campaign", "init", "idem", "--cwd", directory, "--goal", "Ship"], { encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
   const args = [
@@ -840,7 +840,7 @@ test("campaign CLI attach retries with a stable event id are idempotent", () => 
 
 test("campaign CLI accepts --no-transcript and rejects unknown options", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-strict-"));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const init = spawnSync(process.execPath, [runner, "campaign", "init", "strict", "--cwd", directory, "--goal", "Ship"], { encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
   const attach = spawnSync(process.execPath, [
@@ -858,7 +858,7 @@ test("campaign CLI accepts --no-transcript and rejects unknown options", () => {
 
 test("campaign CLI scopes flags to operations and note kinds", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-scoped-"));
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const init = spawnSync(process.execPath, [runner, "campaign", "init", "scoped", "--cwd", directory, "--goal", "Ship"], { encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
   const listWithGoal = spawnSync(process.execPath, [runner, "campaign", "list", "--cwd", directory, "--goal", "ignored"], { encoding: "utf8" });
@@ -879,7 +879,7 @@ test("campaign CLI watch --wake parses --interval as a positive number of second
   const directory = mkdtempSync(join(tmpdir(), "runner-campaign-cli-interval-"));
   const runsDir = join(directory, ".runs");
   initializeCampaign(runsDir, { campaignId: "interval", goal: "Prove the public interval unit" });
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   for (const interval of ["0", "abc"]) {
     const result = spawnSync(process.execPath, [runner, "campaign", "watch", "interval", "--cwd", directory, "--wake", "--interval", interval], { encoding: "utf8" });
     assert.notEqual(result.status, 0, interval);

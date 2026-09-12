@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderReport, renderStatus, validateContract } from "../scripts/lib.mjs";
-import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "../scripts/render.mjs";
-import { runContract, resumeRun } from "../scripts/runner.mjs";
-import { runRefName } from "../scripts/worktree.mjs";
+import { renderReport, renderStatus, validateContract } from "../src/engine/prompts.mjs";
+import { MAX_NOTE_LENGTH, renderReportJson, renderStatusJson } from "../src/report/render.mjs";
+import { runContract, resumeRun } from "../src/cli.mjs";
+import { runRefName } from "../src/repo/worktree.mjs";
 import { ensureAttemptWorktree, fakeCodex, fakeExecJsonl, fixture, initializeGit, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, showRefFile, advisoryGateCodex } from "./runner-helpers.mjs";
 

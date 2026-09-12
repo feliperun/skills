@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import vm from "node:vm";
-import { buildSnapshot, snapshotSignature, startServer, tailJsonl } from "../dashboard/dashboard.mjs";
+import { buildSnapshot, snapshotSignature, startServer, tailJsonl } from "../src/web/server.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -345,9 +345,9 @@ function fixtureSnapshot(overrides = {}) {
   };
 }
 
-/** Loads dashboard/index.html's inline script into a minimal DOM-shimmed vm context. @returns {{window: any}} */
+/** Loads src/web/index.html's inline script into a minimal DOM-shimmed vm context. @returns {{window: any}} */
 function runDashboardScript() {
-  const html = readFileSync(join(HERE, "..", "dashboard", "index.html"), "utf8");
+  const html = readFileSync(join(HERE, "..", "src", "web", "index.html"), "utf8");
   const code = /** @type {string} */ (html.match(/<script>([\s\S]*?)<\/script>/u)?.[1]);
   const elements = new Map();
   const element = () => ({

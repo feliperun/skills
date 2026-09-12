@@ -2,7 +2,7 @@
 
 `run.mjs` discovers deterministic eval cases and runs them with zero model
 invocations: every runtime in every case uses the `replay` harness
-(`skills/mine/intent-factory/scripts/harnesses/replay.mjs`), consuming a
+(`skills/mine/intent-factory/src/harnesses/replay/index.mjs`), consuming a
 recorded envelope instead of calling a real provider CLI.
 
 ## Usage
@@ -70,7 +70,7 @@ and has:
 - `expected.json` — the facts the run must show at the end.
 - one recording file per runtime the contract declares (referenced from
   `case.json`'s `recordings`), each a `.jsonl` file consumed in order by the
-  `replay` harness (see `skills/mine/intent-factory/scripts/harnesses/replay.mjs`
+  `replay` harness (see `skills/mine/intent-factory/src/harnesses/replay/index.mjs`
   and `replay-bin.mjs` for the exact envelope schema).
 
 A recorded envelope's `error.resetAt` and top-level `exhaustedUntil` are both
@@ -264,7 +264,7 @@ using this needs a `preflight` step in its `setup` — this section, not a
 `nodes` entry, is how a case pins the live probe's own classification for a
 runtime no `run`/`resume` step ever dispatches.
 
-`gc` checks facts about `skills/mine/intent-factory/scripts/disk-gc.mjs`'s
+`gc` checks facts about `skills/mine/intent-factory/src/run/disk-gc.mjs`'s
 disk-pressure garbage collector, which can remove (or must never remove) a
 run directory no single node's own snapshot describes — there is no `nodes`
 entry to check this against:
@@ -321,7 +321,7 @@ repository's own history — never a hand-written scenario. `build-golden.mjs`
 the intent-factory itself integrated into `main` (see
 `docs/intent-factory/TECH-SPEC-2026-09-09.md` §C1.3), plus every `fix`
 commit whose own diff touches both
-`skills/mine/intent-factory/scripts/` and `skills/mine/intent-factory/test/`
+`skills/mine/intent-factory/src/` and `skills/mine/intent-factory/test/`
 in the same commit — a correction landed together with the test that pins
 it, discovered by walking `main`, not picked by hand.
 
@@ -338,7 +338,7 @@ Each task directory has:
   commit's own diff — `node --check <file>` for every non-test `.mjs` file
   it touches, `node --test <file>` for every `*.test.mjs` file it touches.
   Every command is the same `{argv, ...}` shape
-  `validateVerificationCommands` (`skills/mine/intent-factory/scripts/verification.mjs`)
+  `validateVerificationCommands` (`skills/mine/intent-factory/src/contract/verification.mjs`)
   already enforces on a real contract.
 - `meta.json` — `commitSha`, `parentSha`, `parentTreeSha` (the parent
   commit's git tree id, what `--verify-fixtures` checks the bundle against),

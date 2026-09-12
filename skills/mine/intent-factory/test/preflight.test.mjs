@@ -15,19 +15,19 @@ import {
   environmentPreflight,
   reachableRuntimes,
   timeVerificationCommands,
-} from "../scripts/env-preflight.mjs";
-import { validateContract } from "../scripts/contract.mjs";
+} from "../src/host/preflight.mjs";
+import { validateContract } from "../src/contract/index.mjs";
 import {
   DISK_PRESSURE_UNRECOVERABLE,
   describeRuns,
   runGarbageCollection,
   selectGarbageCollectableRuns,
   writeRunTextWithDiskPressureRetry,
-} from "../scripts/disk-gc.mjs";
-import { acquire as acquireLock } from "../scripts/lock.mjs";
-import { writeJsonAtomic } from "../scripts/store.mjs";
+} from "../src/run/disk-gc.mjs";
+import { acquire as acquireLock } from "../src/run/lock.mjs";
+import { writeJsonAtomic } from "../src/run/store.mjs";
 
-const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
 
 const EXPECTED_CHECK_KEYS = ["costUsd", "detail", "executable", "harness", "id", "live", "liveStatus", "model", "ok", "usage", "version"];
 
@@ -102,10 +102,10 @@ function gitRepo(prefix, commands = []) {
 
 /**
  * @param {string} executable
- * @returns {Map<string, {runtime: import("../scripts/contract.mjs").RuntimeSnapshot, requiredCapabilitySets: []}>}
+ * @returns {Map<string, {runtime: import("../src/contract/index.mjs").RuntimeSnapshot, requiredCapabilitySets: []}>}
  */
 function routedRuntimes(executable) {
-  const runtime = /** @type {import("../scripts/contract.mjs").RuntimeSnapshot} */ ({
+  const runtime = /** @type {import("../src/contract/index.mjs").RuntimeSnapshot} */ ({
     id: "luna",
     harness: "codex",
     executable,

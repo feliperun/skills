@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NotifyQueue, renderNotification } from "../scripts/notify/index.mjs";
+import { NotifyQueue, renderNotification } from "../src/notify/index.mjs";
 
 const SUMMARY_CHARS = 200;
 

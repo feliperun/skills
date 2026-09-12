@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { cancelRun, runContract, resumeRun } from "../scripts/runner.mjs";
-import { invocationAlive } from "../scripts/node.mjs";
-import { processStartToken } from "../scripts/lock.mjs";
-import { captureWorkspaceSnapshot } from "../scripts/verification.mjs";
+import { cancelRun, runContract, resumeRun } from "../src/cli.mjs";
+import { invocationAlive } from "../src/engine/node.mjs";
+import { processStartToken } from "../src/run/lock.mjs";
+import { captureWorkspaceSnapshot } from "../src/contract/verification.mjs";
 import { closeResult, ensureAttemptWorktree, fakeCodex, fixture, initializeGit, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, childPid, withCitedGateCodex, withAdvisoryGateCodex } from "./runner-helpers.mjs";
 
@@ -197,7 +197,7 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   }));
   const runDir = await withAdvisoryGateCodex(directory, async () => (await runContract(path)).runDir);
   const nodePath = join(runDir, "nodes", "build.json");
-  /** @type {{id: string, attempt: number, invocations: Array<{id: string, phase: string, stdoutPath: string}>, worktree?: import("../scripts/contract.mjs").WorktreeState|null}} */
+  /** @type {{id: string, attempt: number, invocations: Array<{id: string, phase: string, stdoutPath: string}>, worktree?: import("../src/contract/index.mjs").WorktreeState|null}} */
   const state = JSON.parse(readFileSync(nodePath, "utf8"));
   const judgeInvocation = state.invocations.at(-1);
   assert.ok(judgeInvocation, "persisted judge invocation exists");
@@ -234,7 +234,7 @@ test("simultaneous resumes allow one controller and reject the other", async () 
   const directory = mkdtempSync(join(tmpdir(), "runner-concurrent-resume-"));
   const path = writeContract(directory, fixture({ id: "concurrent-resume-run", pollIntervalMs: 10 }));
   const runDir = await withFakeCodex(directory, "worker-fail", async () => (await runContract(path)).runDir);
-  const runner = fileURLToPath(new URL("../scripts/runner.mjs", import.meta.url));
+  const runner = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
   const started = join(directory, ".runs", "provider-started");
   const release = join(directory, ".runs", "provider-release");
   const slow = fakeCodex(directory, "wait-for-release");

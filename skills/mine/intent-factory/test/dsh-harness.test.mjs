@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { validateContract } from "../scripts/contract.mjs";
-import { dshHarness } from "../scripts/harnesses/dsh/index.mjs";
-import { normalizeProviderAvailability, normalizeProviderResult, probeRuntime, providerCommand } from "../scripts/harnesses/index.mjs";
+import { validateContract } from "../src/contract/index.mjs";
+import { dshHarness } from "../src/harnesses/dsh/index.mjs";
+import { normalizeProviderAvailability, normalizeProviderResult, probeRuntime, providerCommand } from "../src/harnesses/index.mjs";
 import { closeResult, fixture, withFakeDsh, writeContract } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PATCH = join(HERE, "..", "scripts", "harnesses", "dsh", "closed-packet.patch.yml");
+const PATCH = join(HERE, "..", "src", "harnesses", "dsh", "closed-packet.patch.yml");
 
 /** @param {Record<string, unknown>} [patch] */
 function runtime(patch = {}) {
@@ -53,7 +53,7 @@ test("the dsh command runs the JSON-RPC client under this node, never the harnes
   assert.equal(command.promptTransport, "stdin");
   assert.equal(command.input, "hello");
   assert.deepEqual(command.args.slice(0, 7), [
-    join(HERE, "..", "scripts", "harnesses", "dsh", "runner.mjs"),
+    join(HERE, "..", "src", "harnesses", "dsh", "runner.mjs"),
     "--dsh", "dsh",
     "--provider", "deepseek-official",
     "--model", "deepseek-flash",
@@ -224,7 +224,7 @@ test("the closed-packet profile disables the rows a closed packet cannot use", (
  *
  * @param {string} directory
  * @param {"pass"|"no-usage"|"quota"|"two-verdicts"|"silent"|"blocked"} mode
- * @param {import("../scripts/harnesses/index.mjs").CommandOptions & {preferStructured?: boolean}} [options]
+ * @param {import("../src/harnesses/index.mjs").CommandOptions & {preferStructured?: boolean}} [options]
  */
 async function runClient(directory, mode, options = {}) {
   return withFakeDsh(directory, mode, async () => {

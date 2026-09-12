@@ -37,7 +37,7 @@ const FACTORY_SHAS = [
   "f150386d2c9f9e3057617319652cb2c9c9262981", // lease-liveness-fold
 ];
 
-/** Node fields in a `taskPacket`, per `skills/mine/intent-factory/scripts/task-packet.mjs`. */
+/** Node fields in a `taskPacket`, per `skills/mine/intent-factory/src/contract/task-packet.mjs`. */
 const FACTORY_MESSAGE_RE = /^intent-factory (?:candidate )?(\S+) (\S+) attempt (\d+)/u;
 
 /**
@@ -56,7 +56,7 @@ function runGit(args) {
 
 /**
  * Every commit on `main` whose subject starts with `fix` and whose own
- * first-parent diff touches both `skills/mine/intent-factory/scripts/` and
+ * first-parent diff touches both `skills/mine/intent-factory/src/` and
  * `skills/mine/intent-factory/test/` — a correction landed together with
  * the test that pins it. Walked mechanically over the whole branch so the
  * pool is regenerable, never a hand-picked list.
@@ -72,7 +72,7 @@ function discoverFixShas() {
     const parent = `${sha}^`;
     if (!gitRevExists(parent)) continue; // a root commit has no parent to diff against
     const files = diffNameStatus(parent, sha).map((entry) => entry.path);
-    const touchesScripts = files.some((path) => path.startsWith("skills/mine/intent-factory/scripts/"));
+    const touchesScripts = files.some((path) => path.startsWith("skills/mine/intent-factory/src/"));
     const touchesTest = files.some((path) => path.startsWith("skills/mine/intent-factory/test/"));
     if (touchesScripts && touchesTest) picked.push(sha);
   }

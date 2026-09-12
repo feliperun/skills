@@ -89,12 +89,12 @@ mode, attempt, revisions, usage, cost, verdict, note, `scopeFindings`,
 unix seconds) are written atomically every controller tick and at run
 terminal. `status <run-dir>` renders, in order: Needs you (attention nodes
 and orphans), Now (active node, elapsed, cost, or idle), Nodes (one row per
-node), Cost (run totals). `statusline/claude-code.sh` reads the pointer
+node), Cost (run totals). `integrations/claude-code/statusline.sh` reads the pointer
 directly for an ambient one-line prompt segment.
 
 ## Dashboard
 
-`node dashboard/dashboard.mjs [--port 4173] [--cwd <repo>]` serves a
+`node src/web/server.mjs [--port 4173] [--cwd <repo>]` serves a
 read-only page on `127.0.0.1:4173`, one column, SSE-refreshed, over
 `status.json`, node JSON, `events.jsonl`, `usage.jsonl`, `notify.jsonl`, and
 `HANDOFF.md` only — it never writes campaign state. Sections: a campaign
@@ -128,18 +128,18 @@ Every contract requires `campaignId`; campaign state lives at
 `HANDOFF.md`) and can link multiple runs.
 
 ```bash
-node scripts/runner.mjs campaign list [--cwd <dir>]
-node scripts/runner.mjs campaign init <id> --cwd <dir> --goal "Goal"
-node scripts/runner.mjs campaign attach <id> --cwd <dir> --tool codex --session-id <s> \
+node src/cli.mjs campaign list [--cwd <dir>]
+node src/cli.mjs campaign init <id> --cwd <dir> --goal "Goal"
+node src/cli.mjs campaign attach <id> --cwd <dir> --tool codex --session-id <s> \
   --transcript <path> --format jsonl [--cursor <c>]
-node scripts/runner.mjs campaign note <id> --cwd <dir> --session-id <s> \
+node src/cli.mjs campaign note <id> --cwd <dir> --session-id <s> \
   --kind <intent|decision|supersede|constraint|outcome|next|open-question|retrospective> --text <t>
-node scripts/runner.mjs campaign resolve <id> --cwd <dir> --session-id <s> --question-id <q> --text <a>
-node scripts/runner.mjs campaign sync <id> --cwd <dir> --session-id <s>
-node scripts/runner.mjs campaign ack <id> --cwd <dir> --session-id <s> --event-id <e>
-node scripts/runner.mjs campaign watch <id> --cwd <dir> --wake
-node scripts/runner.mjs campaign close <id> --cwd <dir>
-node scripts/runner.mjs campaign show <id> --cwd <dir>
+node src/cli.mjs campaign resolve <id> --cwd <dir> --session-id <s> --question-id <q> --text <a>
+node src/cli.mjs campaign sync <id> --cwd <dir> --session-id <s>
+node src/cli.mjs campaign ack <id> --cwd <dir> --session-id <s> --event-id <e>
+node src/cli.mjs campaign watch <id> --cwd <dir> --wake
+node src/cli.mjs campaign close <id> --cwd <dir>
+node src/cli.mjs campaign show <id> --cwd <dir>
 ```
 
 `sync` is the user-pull read: campaign header, the newest linked run's

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runContract, resumeRun } from "../scripts/runner.mjs";
-import { invocationResult } from "../scripts/node.mjs";
+import { runContract, resumeRun } from "../src/cli.mjs";
+import { invocationResult } from "../src/engine/node.mjs";
 import { fakeCodex, fixture, orphan, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withResultFileCodex, withAdvisoryGateCodex } from "./runner-helpers.mjs";
 
