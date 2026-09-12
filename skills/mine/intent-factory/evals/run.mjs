@@ -1,29 +1,20 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import {
-  copyFileSync,
-  existsSync,
   mkdirSync,
-  mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { hostname, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { hostname } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import { runContract, resumeRun } from "../src/cli.mjs";
+import { resumeRun } from "../src/engine/resume.mjs";
+import { runContract } from "../src/engine/scheduler.mjs";
 import { preflightContract } from "../src/engine/live-preflight.mjs";
 import { acquire as acquireControllerLock, lockPath, processStartToken as computeProcessStartToken } from "../src/run/lock.mjs";
 import { writeJsonAtomic } from "../src/run/store.mjs";
-import { initializeCampaign } from "../src/campaign/index.mjs";
-import { readIntegrationJournal } from "../src/repo/integrate.mjs";
-import { attemptWorktreePath, candidateWorktreePath, createAttemptWorktree, gitHead, runRefName } from "../src/repo/worktree.mjs";
-import { validateVerificationCommands } from "../src/contract/verification.mjs";
+import { createAttemptWorktree } from "../src/repo/worktree.mjs";
 import { compareEvalReports, mergeEvalRunSources, projectEvalIndicators, readEvalRunSources, renderEvalComparisonReport } from "./metrics.mjs";
 import { discoverCaseIds, loadCase, materializeCase, safeJoin, withEnvOverlay, withModelBinsUnavailable } from "./case.mjs";
 import { applyDiscriminator, compareGc, compareIntegration, compareNode, comparePreflight, normalizedSteps } from "./compare.mjs";

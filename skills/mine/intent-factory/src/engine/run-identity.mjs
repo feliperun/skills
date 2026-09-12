@@ -14,10 +14,8 @@
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, probeRuntime } from "../harnesses/index.mjs";
 import { appendJsonl, writeJsonAtomic } from "../run/store.mjs";
 import { blockingChecks, environmentPreflight, reachableRuntimes } from "../host/preflight.mjs";
-import { captureSourceIdentity } from "../contract/source-identity.mjs";
-import { gitHead } from "../repo/worktree.mjs";
+import { captureSourceIdentity } from "../repo/source-identity.mjs";
 import { join } from "node:path";
-import { processStartToken } from "../run/lock.mjs";
 import { spawnSync } from "node:child_process";
 import { stableJson } from "../util.mjs";
 import { validateRunMetadata } from "../contract/snapshot.mjs";

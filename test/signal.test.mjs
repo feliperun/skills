@@ -36,7 +36,7 @@ function writeRunNodes(runsDir, runId, statuses) {
 }
 
 test("writes a signal block for an active campaign and an active run", () => {
-  const { repo, runsDir, agentsPath } = makeRepo();
+  const { runsDir, agentsPath } = makeRepo();
   initializeCampaign(runsDir, { campaignId: "demo", goal: "deliver demo" });
   writeRunNodes(runsDir, "run-a", ["done", "running"]);
   assert.equal(syncAgentSignal(runsDir), true);

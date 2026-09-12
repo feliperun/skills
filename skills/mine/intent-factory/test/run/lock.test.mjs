@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,19 +9,17 @@ import { appendJsonl, readJson, writeJsonAtomic } from "../../src/run/store.mjs"
 import {
   LockBusyError,
   acquire,
-  bootstrapMatchesChild,
   lockPath,
   lockStale,
   pidAlive,
   processStartToken,
   readLock,
 } from "../../src/run/lock.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../../src/contract/index.mjs";
-import { resumeRun, runContract } from "../../src/cli.mjs";
-import { detectStalls, invocationAlive, monitorInvocation, startProcess, terminateInvocation } from "../../src/engine/process.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
+import { invocationAlive, terminateInvocation } from "../../src/engine/process.mjs";
 
 import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
-import { validateNodeSnapshot } from "../../src/contract/snapshot.mjs";
 
 // A pid the kernel will not hand out while the test runs: its holder is dead.
 const DEAD_PID = 2_147_483_647;
@@ -30,64 +28,6 @@ const DEAD_PID = 2_147_483_647;
 function lockRecord(runDir) {
   const value = readLock(runDir);
   return value && !("invalid" in value) ? value : null;
-}
-
-/**
- * @param {string} runDir
- * @param {Record<string, unknown>} [overrides]
- * @returns {{contract: import("../../src/contract/index.mjs").ValidatedContract, node: import("../../src/contract/index.mjs").ValidatedNode}}
- */
-function validatedRun(runDir, overrides = {}) {
-  const contractPath = writeContract(runDir, fixture({ pollIntervalMs: 10, ...overrides }));
-  const contract = validateContract(JSON.parse(readFileSync(contractPath, "utf8")), contractPath);
-  const node = contract.nodes[0];
-  if (!node) throw new Error("fixture has no build node");
-  return { contract, node };
-}
-
-/**
- * @param {import("../../src/contract/index.mjs").ValidatedNode} node
- * @param {unknown[]} executionOverrides
- * @returns {import("../../src/contract/index.mjs").NodeSnapshot}
- */
-function nodeSnapshot(node, executionOverrides) {
-  const now = new Date().toISOString();
-  return validateNodeSnapshot({
-    schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: INTENT_FACTORY_VERSION,
-    id: node.id,
-    type: node.type,
-    sourceIdentity: node.sourceIdentity,
-    packetHash: node.packetHash,
-    status: "running",
-    phase: "worker",
-    attempt: 1,
-    revisions: 0,
-    runtime: null,
-    blockedBy: [],
-    startedAt: now,
-    updatedAt: now,
-    result: null,
-    gate: null,
-    error: null,
-    invocations: [],
-    executionOverrides,
-    verification: null,
-    scope: {
-      boundary: {
-        schemaVersion: 1,
-        files: [...(node.taskPacket.writeFiles ?? [])],
-        roots: [...(node.taskPacket.writeRoots ?? [])],
-        fileOrigins: [...(node.taskPacket.writeFiles ?? [])].map((literal) => ({ literal, paths: [literal] })),
-        rootOrigins: [...(node.taskPacket.writeRoots ?? [])].map((literal) => ({ literal, paths: [literal] })),
-      },
-      changedPaths: [],
-      unexpectedPaths: [],
-      changedPathCount: 0,
-      unexpectedPathCount: 0,
-      truncated: false,
-    },
-  }, node);
 }
 
 const CONTENDER_SOURCE = `

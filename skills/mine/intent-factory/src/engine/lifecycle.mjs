@@ -1,133 +1,65 @@
 /**
- * One node's lifecycle: dispatch a worker, run the mechanical gate, dispatch a
- * judge or settle, and absorb whatever the provider did instead.
+ * The control loop's view of one node: absorb what a closed invocation
+ * produced, route it (settle, re-judge, retry, fail over), and decide what an
+ * unusable worker result or a spent provider costs.
  *
- * This is what was left after node.mjs -- 3,766 lines and 146 definitions -- was
- * cut into process, state, scope, verify, result-file, recover, operations,
- * usage, notify-queue and the final report. What did not come out is dispatch
- * and settlement, and that is not an oversight: `startJudge` evaluates the
- * deterministic gate and then either dispatches a judge or settles the node
- * outright, so the two halves meet inside one function. Separating them is a
- * design change (have `startJudge` return a decision and let the caller settle),
- * not a move, and it is also what would end the last import cycle in `src/`:
- * lifecycle <-> review.
+ * Dispatch left for `engine/dispatch.mjs` and settlement for
+ * `engine/settle.mjs`; what stays is the policy that chooses between them.
+ * `finalizeClosedJobs` is the whole of it in one function -- every terminal
+ * decision a node can reach passes through there.
  */
-import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
-  closeSync,
-  fsyncSync,
-  openSync,
-  readSync,
-  statSync,
-  mkdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-  writeSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
-  JUDGE_SCHEMA,
   TERMINAL,
-  judgePrompt,
-  parseJudge,
 } from "./prompts.mjs";
 import {
-  deterministicGate,
-  candidateOnlyFailures,
   judgeReaskOutstanding,
-  judgeReaskReason,
-  judgeRequired,
-  verificationFailureVerdict,
 } from "./judge-gate.mjs";
 import {
-  judgeReaskInstruction,
   judgeVerdictEvidence,
-  reviewMode,
 } from "../contract/review-modes.mjs";
 import {
   JUDGE_MAX_FAILURES,
   applyJudgeProtocolFailure,
   applyJudgeResult,
   applyJudgeRound,
-  applyRejection,
-  applyVerificationFailure,
   settleUnavailableJudge,
 } from "./review.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, harnessCapabilities, normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";
-import { liveUsage, SessionMetricsParser, TOOL_OUTPUT_LIMIT_BYTES } from "../harnesses/exec-jsonl/index.mjs";
-import { extractJson } from "../harnesses/protocol.mjs";
 import { routeRuntimeForState, routingBackoffActive, runtimeSnapshot } from "./failover.mjs";
 import {
   NON_FAILOVER_CODES,
   buildRouting,
   classifyTransition,
   isRepairable,
-  latestTimeoutSec,
   networkBackoffAttempts,
   networkTransition,
   nodeDeadlineAt,
   planRoute,
 } from "./backoff.mjs";
 import { exhaustedUntilOf } from "./runtime-discovery.mjs";
-import { statusNote, writeStatusArtifacts } from "../report/render.mjs";
 
-import {
-  appendJsonl,
-  readJson,
-  writeJsonAtomic,
-  writeTextAtomic,
-} from "../run/store.mjs";
-import { acquire as acquireLock, LockLostError, processStartToken } from "../run/lock.mjs";
-import { writeRunTextWithDiskPressureRetry } from "../run/disk-gc.mjs";
-import {
-  compactVerification,
-} from "../contract/verification.mjs";
-import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "../contract/scope-findings.mjs";
-import { finalVerificationCommands } from "../contract/final-verification.mjs";
-import { parseDiscoveryResult, parseWorkerResult } from "../contract/worker-result.mjs";
-import { renderHandoff } from "../campaign/index.mjs";
-import { appendPreviousAttempt } from "./retry.mjs";
-import { NotifyQueue } from "../notify/index.mjs";
-import {
-  attemptWorktreePath,
-  createAttemptWorktree,
-  gitHead,
-  removeWorktree,
-  sealAttempt,
-} from "../repo/worktree.mjs";
-import { integrateAttempt } from "../repo/integrate.mjs";
-import { boundedUtf8, delay, errorCode, errorMessage, excerpt, stableJson } from "../util.mjs";
-import { alreadyNotified, notifyQueueFor } from "./notify-queue.mjs";
-import { invocationAlive, invocationResult, logPaths, readBoundedTail, startProcess, terminateInvocation } from "./process.mjs";
-import { hasOperationIntent, hasOperationSettlement, operationNeedsRecovery, operationNextState, persistInvocationIntent, providerReceipts, providerReceiptsFromInvocationTail, readOperationSettlement, settleInvocation } from "../run/operations.mjs";
-import { appendTransitionEvent, ensureTerminalEvent, recordExecutionOverride, transition, writeNode } from "./state.mjs";
+import { acquire as acquireLock } from "../run/lock.mjs";
+import { parseDiscoveryResult } from "../contract/worker-result.mjs";
+import { boundedUtf8, errorMessage, excerpt } from "../util.mjs";
+import { invocationAlive } from "./process.mjs";
+import { operationNextState, providerReceipts, settleInvocation } from "../run/operations.mjs";
+import { appendTransitionEvent, transition, writeNode } from "./state.mjs";
 import { appendUsageRecord, invocationCost, invocationUsage, recordInvocationUsage } from "../run/usage.mjs";
 import { attemptWorkspace } from "../repo/worktree.mjs";
-import { executeControllerVerification, verifyCandidateWorkspace } from "./verify.mjs";
+import { executeControllerVerification } from "./verify.mjs";
 import {
-  RESULT_MATERIALIZATION_PROMPT_HEADER,
-  attemptWorkerResultPath,
-  clearAttemptWorkerResult,
-  clearWorkerResultFile,
   materializeAttemptResult,
-  persistedJudgeResult,
-  persistedWorkerResult,
   readWorkerResultFile,
   resolveWorkerResult,
-  workerProtocolPrompt,
   workerResultPath,
 } from "./result-file.mjs";
-import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerScope, emptyScope, persistedScopeBoundary, recordScopeFinding, sourceWorkerRuntime, workerScope } from "./scope.mjs";
-import { runVerification } from "./run-command.mjs";
-import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../repo/workspace.mjs";
-import { routeRuntime } from "../contract/runtime.mjs";
-import { validateEvent, validateNodeSnapshot } from "../contract/snapshot.mjs";
-import { campaignIdOf } from "../campaign/record.mjs";
+import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerScope, recordScopeFinding, sourceWorkerRuntime } from "./scope.mjs";
 import { startJudge, startResultMaterialization } from "./dispatch.mjs";
+import { raiseNodeAttention, settleDone } from "./settle.mjs";
+import { applyRejection, applyVerificationFailure } from "./settle.mjs";
 
 /** @typedef {import("../repo/integrate.mjs").IntegrationResult} IntegrationResult */
 /** @typedef {import("./backoff.mjs").Transition} Transition */
@@ -601,106 +533,6 @@ function applyRoute(contract, runDir, state, lock, { role, error, current, plan,
 }
 
 /**
- * Seal the current attempt, verify its candidate in a detached worktree, and
- * only then perform the single done-state transition. The integration module
- * owns the journal and conditional ref update; this callback owns node state.
- *
- * @param {ValidatedContract} contract
- * @param {ValidatedNode} node
- * @param {NodeSnapshot} state
- * @param {string} runDir
- * @param {LockHandle} lock
- * @param {Map<string, NodeSnapshot>} states
- * @param {string} campaignPath
- * @param {Partial<NodeSnapshot>} [patch]
- * @returns {Promise<import("../repo/integrate.mjs").IntegrationResult|null|undefined>}
- */
-export async function settleDone(contract, node, state, runDir, lock, states, campaignPath, patch = {}) {
-  const workspace = attemptWorkspace(state);
-  if (!workspace || !state.worktree?.branch || !state.worktree.baseSha) {
-    transition(runDir, state, "failed", {
-      phase: "complete",
-      error: { code: "attempt_worktree_missing", message: "completed attempt has no isolated worktree" },
-    }, lock);
-    return;
-  }
-  let sealed;
-  try {
-    sealed = sealAttempt({
-      repo: contract.cwd,
-      path: workspace,
-      baseSha: state.worktree.baseSha,
-      runId: contract.id,
-      nodeId: node.id,
-      attempt: state.attempt,
-    });
-    state.worktree = { ...state.worktree, commit: sealed.sha, status: "ready" };
-    writeNode(runDir, state, lock);
-  } catch (error) {
-    transition(runDir, state, "failed", {
-      phase: "complete",
-      error: { code: errorCode(error) ?? "attempt_seal_failed", message: errorMessage(error) },
-    }, lock);
-    return;
-  }
-  const result = await integrateAttempt({
-    repo: contract.cwd,
-    runDir,
-    runId: contract.id,
-    nodeId: node.id,
-    attempt: state.attempt,
-    attemptSha: sealed.sha,
-    branch: state.worktree.branch,
-    verificationEvidence: state.verification,
-    verifyCandidate: (candidateWorkspace) => verifyCandidateWorkspace(contract, node, state, runDir, candidateWorkspace),
-    onAccepted: async (transaction) => {
-      const acceptedPath = state.worktree?.path ?? attemptWorktreePath(runDir, contract.id, node.id, transaction.attempt);
-      if (state.attempt === transaction.attempt && state.status !== "done") {
-        transition(runDir, state, "done", {
-          ...patch,
-          integratedHead: transaction.candidateSha,
-          worktree: { ...(state.worktree ?? {}), status: "removed", commit: transaction.attemptSha, baseSha: transaction.previousRunRefTip },
-        }, lock);
-      }
-      if (state.attempt === transaction.attempt) ensureTerminalEvent(runDir, state, lock);
-      removeWorktree(contract.cwd, acceptedPath);
-    },
-    onVerificationFailure: async (transaction) => {
-      const verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope);
-      verdict.summary = "integrated candidate verification failed";
-      const divergent = candidateOnlyFailures(state.verification, transaction.candidateEvidence);
-      verdict.findings = [...(verdict.findings ?? []), {
-        severity: "critical",
-        description: divergent.length
-          ? `the integration worktree failed a verification the attempt passed (${boundedUtf8(divergent.join("; "), 512)}): the two worktrees disagree about the environment, not about the work`
-          : "the sealed candidate did not pass the node verification in its integration worktree",
-        evidence: boundedUtf8(JSON.stringify(transaction.candidateEvidence ?? {}), 4 * 1024),
-      }];
-      applyRejection(contract, node, state, runDir, null, lock, states, campaignPath, verdict, {
-        code: "verification_failed",
-        label: "candidate-verification",
-      });
-    },
-    onConflict: async (transaction) => {
-      const paths = transaction.conflictingPaths?.length ? transaction.conflictingPaths.join(", ") : "unknown paths";
-      transition(runDir, state, "blocked", {
-        phase: "complete",
-        error: { code: "integration_conflict", message: `integration conflict in: ${paths}` },
-      }, lock);
-      if (campaignPath) await raiseNodeAttention(campaignPath, runDir, state, "integration_conflict");
-    },
-    onConcurrentMove: async (transaction) => {
-      transition(runDir, state, "blocked", {
-        phase: "complete",
-        error: { code: "integration_concurrent_move", message: `run ref moved from ${transaction.previousRunRefTip} to ${transaction.currentRunRefTip ?? "unknown"}` },
-      }, lock);
-      if (campaignPath) await raiseNodeAttention(campaignPath, runDir, state, "integration_concurrent_move");
-    },
-  });
-  return result;
-}
-
-/**
  * A worker result that does not match the structured protocol gets one bounded
  * repair on the same provider, then stops asking it.
  *
@@ -753,27 +585,6 @@ export async function applyInvalidWorkerResult(contract, node, state, runDir, ru
   }
   transition(runDir, state, "blocked", { phase: "worker", gate: verdict, result: state.result, usage: state.usage, error }, lock);
   await raiseNodeAttention(campaignPath, runDir, state, "protocol_failure");
-}
-
-/**
- * Surface a node attention state through the run's notify queue.
- * @param {string} campaignPath
- * @param {string} runDir
- * @param {NodeSnapshot} state
- * @param {string} code
- */
-export async function raiseNodeAttention(campaignPath, runDir, state, code) {
-  const runId = basename(runDir);
-  const dedupeKey = `attention:${runId}:${state.id}:${code}`;
-  if (alreadyNotified(runDir, dedupeKey)) return;
-  await notifyQueueFor(runDir).enqueue({
-    type: "attention",
-    campaignId: campaignIdOf(campaignPath),
-    runId,
-    nodeId: state.id,
-    errorCode: code,
-    dedupeKey,
-  });
 }
 
 /**

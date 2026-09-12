@@ -1,120 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   INTENT_FACTORY_VERSION,
   PROTOCOL_SCHEMA_VERSION,
-  hashPacket,
   validateContract,
 } from "../../src/contract/index.mjs";
-import { SIGNAL_END, SIGNAL_START } from "../../src/repo/signal-block.mjs";
-import { judgePrompt } from "../../src/engine/prompts.mjs";
-import { JUDGE_LIMITS } from "../../src/contract/judge-envelope.mjs";
-import { runContract } from "../../src/cli.mjs";
-import { harnessCapabilities } from "../../src/harnesses/index.mjs";
 import * as helpers from "../helpers.mjs";
 import { routeRuntime } from "../../src/contract/runtime.mjs";
-import { validateEvent, validateNodeSnapshot, validateRunMetadata } from "../../src/contract/snapshot.mjs";
-import { captureSourceIdentity } from "../../src/contract/source-identity.mjs";
-
-/** @param {string} directory */
-function initializeGit(directory) {
-  try {
-    execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { stdio: "ignore" });
-    return;
-  } catch {}
-  execFileSync("git", ["init", "-q", directory]);
-  execFileSync("git", ["-C", directory, "add", "."]);
-  execFileSync("git", ["-C", directory, "-c", "commit.gpgSign=false", "-c", "user.email=runner@example.test", "-c", "user.name=runner", "commit", "-qm", "fixture"]);
-}
-
-function packet(overrides = {}) {
-  return {
-    mode: "execution",
-    objective: "Implement it",
-    instructions: ["Implement the behavior"],
-    readFiles: ["README.md"],
-    writeFiles: ["output.txt"],
-    symbols: [],
-    decisions: [],
-    nonGoals: [],
-    verification: [{ argv: ["node", "--check", "output.txt"] }],
-    ...overrides,
-  };
-}
-
-function budgetProfile(overrides = {}) {
-  return {
-    estimatedWeightedInputTokens: 100,
-    estimatedTurns: 2,
-    contextWindowTokens: 1_000,
-    safetyFraction: 0.75,
-    minimumSegmentTokens: 25,
-    growthIncrementTokens: 25,
-    preambleBytes: 40,
-    tokenizerEstimate: { bytes: 4, tokens: 1, source: "test measurement" },
-    continuation: { enabled: true, maxSegments: 2, segmentReserveTokens: 25 },
-    ...overrides,
-  };
-}
-
-/** @param {Record<string, unknown>} [overrides] */
-function fixture(overrides = {}) {
-  return {
-    schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: INTENT_FACTORY_VERSION,
-    id: "contract-test",
-    campaignId: "campaign-test",
-    goal: "validate protocol",
-    cwd: ".",
-    runtimeDefaults: { worker: "worker", judge: "worker" },
-    runtimes: { worker: { harness: "codex", model: "test-model", executable: "/nonexistent/codex" } },
-    ...overrides,
-    nodes: /** @type {Record<string, unknown>[]} */ (overrides.nodes ?? [{ id: "build", type: "backend", taskPacket: packet(), gate: false }]).map((node, index) => ({
-      phase: `fixture-phase-${index}`,
-      ...node,
-    })),
-  };
-}
-
-function writeFixture(overrides = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "runner-contract-"));
-  writeFileSync(join(directory, "README.md"), "read me\n");
-  const path = join(directory, "contract.json");
-  writeFileSync(path, `${JSON.stringify(fixture(overrides), null, 2)}\n`);
-  return { directory, path };
-}
+import { validateNodeSnapshot, validateRunMetadata } from "../../src/contract/snapshot.mjs";
+import { packet, snapshot, writeFixture } from "./helpers.mjs";
 
 // The other half of contract.test.mjs: task packets, the prompts rendered from
 // them, and the write boundaries they declare.
-
-function snapshot(overrides = {}) {
-  return {
-    schemaVersion: PROTOCOL_SCHEMA_VERSION,
-    contractVersion: INTENT_FACTORY_VERSION,
-    id: "build",
-    type: "backend",
-    sourceIdentity: { kind: "node", contractId: "contract-test", nodeId: "build" },
-    packetHash: "a".repeat(64),
-    status: "pending",
-    phase: "waiting",
-    attempt: 0,
-    revisions: 0,
-    runtime: null,
-    blockedBy: [],
-    startedAt: null,
-    updatedAt: "2026-01-01T00:00:00.000Z",
-    result: null,
-    gate: null,
-    error: null,
-    usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 },
-    ...overrides,
-  };
-}
 
 // Runtime declaration in a contract: fields, harness names, the one-hop
 // fallback edge, and the cross-vendor rule a gate depends on.

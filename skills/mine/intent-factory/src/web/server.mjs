@@ -19,7 +19,6 @@ const HANDOFF_MAX_CHARS = 16 * 1024;
 const DIFF_PATH_CAP = 400;
 const GOAL_MAX_CHARS = 200;
 const TERMINAL_STATUSES = new Set(["done", "no-op", "failed", "blocked", "exhausted", "stalled", "canceled", "cancelled"]);
-const HAPPY_TERMINAL = new Set(["done", "no-op"]);
 const RESUME_STATES = new Set(["blocked", "failed", "exhausted", "stalled", "canceled", "cancelled"]);
 
 /** @typedef {{campaignId?: string|null, runId?: string|null, nodeId?: string|null}} Selection */

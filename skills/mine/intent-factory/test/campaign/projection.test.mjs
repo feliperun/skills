@@ -1,13 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  closeCampaign,
-  discoverCampaigns,
   initializeCampaign,
   registerRun,
   renderHandoff,
@@ -15,10 +13,10 @@ import {
 } from "../../src/campaign/index.mjs";
 import { appendJsonl } from "../../src/run/store.mjs";
 import { validateContract } from "../../src/contract/index.mjs";
-import { runContract } from "../../src/cli.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { appendJournal, readJournal, validateJournalEntry } from "../../src/campaign/journal.mjs";
-import { HANDOFF_BYTES, HANDOFF_FILE, HANDOFF_LIMIT, JOURNAL_FILE, JOURNAL_TEXT_BYTES, PROJECTION_FILE, campaignDir } from "../../src/campaign/layout.mjs";
+import { HANDOFF_BYTES, HANDOFF_LIMIT, PROJECTION_FILE, campaignDir } from "../../src/campaign/layout.mjs";
 
 // The other half of campaign.test.mjs: folding the journal into state and
 // rendering HANDOFF.md inside its byte budget.
@@ -211,7 +209,7 @@ test("run registration links the run and handoff reflects fresh node status", as
     pollIntervalMs: 10,
     nodes: [{ id: "build", type: "backend", taskPacket: packet(), gate: false }],
   }));
-  const contract = validateContract(JSON.parse(readFileSync(path, "utf8")), path);
+  validateContract(JSON.parse(readFileSync(path, "utf8")), path);
   const result = await withFakeCodex(directory, "pass", () => runContract(path));
   assert.equal(result.ok, true);
   const runsDir = join(directory, ".runs");

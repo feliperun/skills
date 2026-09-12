@@ -8,9 +8,9 @@ import { fileURLToPath } from "node:url";
 
 import { INTENT_FACTORY_VERSION, validateContract } from "../../src/contract/index.mjs";
 import { renderFindings, renderReport, renderStatus, renderStatusJson } from "../../src/report/render.mjs";
-import { runContract, resumeRun } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 
-import { processStartToken } from "../../src/run/lock.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "../../src/run/store.mjs";
 import { delay, fakeCodex, fixture, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, notifications, withAdvisoryGateCodex, withBrokenGateCodex, RUNNER_CLI } from "../runner-helpers.mjs";

@@ -1,14 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendJsonl, readJson, writeJsonAtomic } from "../../src/run/store.mjs";
+import { writeJsonAtomic } from "../../src/run/store.mjs";
 import {
-  LockBusyError,
-  acquire,
   bootstrapMatchesChild,
   lockPath,
   lockStale,
@@ -17,20 +13,10 @@ import {
   readLock,
 } from "../../src/run/lock.mjs";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../../src/contract/index.mjs";
-import { resumeRun, runContract } from "../../src/cli.mjs";
 import { detectStalls, invocationAlive, monitorInvocation, startProcess, terminateInvocation } from "../../src/engine/process.mjs";
 
-import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
+import { fixture, writeContract } from "../helpers.mjs";
 import { validateNodeSnapshot } from "../../src/contract/snapshot.mjs";
-
-// A pid the kernel will not hand out while the test runs: its holder is dead.
-const DEAD_PID = 2_147_483_647;
-
-/** @param {string} runDir @returns {import("../../src/run/lock.mjs").LockRecord|null} */
-function lockRecord(runDir) {
-  const value = readLock(runDir);
-  return value && !("invalid" in value) ? value : null;
-}
 
 /**
  * @param {string} runDir
@@ -88,63 +74,6 @@ function nodeSnapshot(node, executionOverrides) {
       truncated: false,
     },
   }, node);
-}
-
-const CONTENDER_SOURCE = `
-const { parentPort, workerData } = require("node:worker_threads");
-const gate = new Int32Array(workerData.gate);
-import(workerData.lockUrl).then((lockModule) => {
-  parentPort.postMessage({ ready: true });
-  Atomics.wait(gate, 0, 0, 10_000);
-  try {
-    const handle = lockModule.acquire(workerData.runDir);
-    parentPort.postMessage({ won: true, pid: handle.pid });
-  } catch (error) {
-    parentPort.postMessage({ won: false, name: error.name, message: error.message });
-  }
-}).catch((error) => parentPort.postMessage({ won: false, name: "ImportError", message: String(error && error.message) }));
-`;
-
-/**
- * Start `count` real contenders that all reach acquire() before any of them is
- * allowed to run: worker threads, not long-running children.
- * @param {string} runDir
- * @param {number} count
- * @returns {Promise<{won: boolean, pid?: number, name?: string, message?: string}[]>}
- */
-async function raceForLock(runDir, count) {
-  const gate = new SharedArrayBuffer(4);
-  const open = new Int32Array(gate);
-  const lockUrl = new URL("../../src/run/lock.mjs", import.meta.url).href;
-  const workers = Array.from({ length: count }, () => new Worker(CONTENDER_SOURCE, {
-    eval: true,
-    workerData: { runDir, lockUrl, gate },
-  }));
-  /** @type {{won: boolean, pid?: number, name?: string, message?: string}[]} */
-  const outcomes = [];
-  let ready = 0;
-  try {
-    await new Promise((settle, fail) => {
-      for (const worker of workers) {
-        worker.on("error", fail);
-        worker.on("message", (message) => {
-          if (message.ready) {
-            ready += 1;
-            if (ready === count) {
-              Atomics.store(open, 0, 1);
-              Atomics.notify(open, 0);
-            }
-            return;
-          }
-          outcomes.push(message);
-          if (outcomes.length === count) settle(undefined);
-        });
-      }
-    });
-  } finally {
-    await Promise.all(workers.map((worker) => worker.terminate()));
-  }
-  return outcomes;
 }
 
 // The other half of lock.test.mjs: spawning an invocation behind the gate,

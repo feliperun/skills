@@ -1,25 +1,18 @@
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
-  readSync,
-  statSync,
-  writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { writeJsonAtomic, writeTextAtomic } from "../run/store.mjs";
-import { requireId, requireText, requireTimestamp } from "../contract/assert.mjs";
-import { CAMPAIGN_FILE, CRITICAL_FLOOR_BYTES, GOAL_TEXT_BYTES, HANDOFF_BYTES, HANDOFF_FILE, HANDOFF_LIMIT, ID_CAP_FLOOR, JOURNAL_FILE, JOURNAL_TAIL_BYTES, JOURNAL_TEXT_BYTES, JOURNAL_WATCH_CURSOR_DIR, JOURNAL_WATCH_CURSOR_SCHEMA_VERSION, PROJECTION_ACTIVE_CAP, PROJECTION_FILE, PROJECTION_LIST_CAP, RENDER_NOTE_BYTES, basenameSafe, campaignDir, campaignsDir } from "./layout.mjs";
-import { campaignIdOf, readCampaign } from "./record.mjs";
-import { appendJournal, normalizeText, readJournal, readJournalForDedupe, validateJournalEntry, withoutLegacyLivenessFields } from "./journal.mjs";
+import { join, resolve } from "node:path";
+import { writeJsonAtomic } from "../run/store.mjs";
+import { requireId, requireTimestamp } from "../contract/assert.mjs";
+import { CAMPAIGN_FILE, GOAL_TEXT_BYTES, PROJECTION_FILE, campaignDir, campaignsDir } from "./layout.mjs";
+import { readCampaign } from "./record.mjs";
+import { appendJournal, normalizeText, readJournalForDedupe } from "./journal.mjs";
 import { readProjectionState } from "./projection.mjs";
 import { handoffFromState, materializeHandoff } from "./handoff.mjs";
-import { boundedText, collapseLines, errorCode } from "../util.mjs";
 
 /** @typedef {Record<string, unknown>} JsonObject */
 /** @typedef {{id: string, goal: string, status: "active"|"closed", linkedRunIds: string[], createdAt: string, updatedAt: string, closedAt?: string}} Campaign */

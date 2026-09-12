@@ -1,10 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import {
   closeCampaign,
   discoverCampaigns,
@@ -13,12 +11,8 @@ import {
   renderHandoff,
   resolveCampaign,
 } from "../../src/campaign/index.mjs";
-import { appendJsonl } from "../../src/run/store.mjs";
-import { validateContract } from "../../src/contract/index.mjs";
-import { runContract } from "../../src/cli.mjs";
-import { fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { appendJournal, readJournal, validateJournalEntry } from "../../src/campaign/journal.mjs";
-import { HANDOFF_BYTES, HANDOFF_FILE, HANDOFF_LIMIT, JOURNAL_FILE, JOURNAL_TEXT_BYTES, PROJECTION_FILE, campaignDir } from "../../src/campaign/layout.mjs";
+import { HANDOFF_BYTES, HANDOFF_FILE, JOURNAL_FILE, JOURNAL_TEXT_BYTES, PROJECTION_FILE } from "../../src/campaign/layout.mjs";
 
 // Campaign lifecycle: init, discover, resolve, journal append, close.
 // Projection and handoff rendering are in projection.test.mjs.

@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
 
-import { runContract, resumeRun } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { fakeCodex, fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, notifications, withBrokenGateCodex } from "../runner-helpers.mjs";
 import { renderFindings } from "../../src/report/render.mjs";

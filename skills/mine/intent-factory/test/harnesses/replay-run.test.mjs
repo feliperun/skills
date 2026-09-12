@@ -1,17 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCommand } from "../../src/harnesses/index.mjs";
-import { liveInputTokens, liveSessionMetrics, liveUsage } from "../../src/harnesses/exec-jsonl/index.mjs";
-import { replayHarness } from "../../src/harnesses/replay/index.mjs";
-import { JUDGE_SCHEMA } from "../../src/engine/prompts.mjs";
 import { projectMetrics, readMetricsSources } from "../../src/campaign/metrics.mjs";
-import { runContract, resumeRun } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../../src/repo/integrate.mjs";
 import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../../src/repo/worktree.mjs";
 
@@ -19,81 +16,14 @@ import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "..
 import { captureWorkspaceSnapshot } from "../../src/repo/workspace.mjs";
 import { acknowledgeJournalEvent, readJournal } from "../../src/campaign/journal.mjs";
 import { campaignDir } from "../../src/campaign/layout.mjs";
+import { assertExecutable, envelope, workerResult, writeRecording } from "./replay-helpers.mjs";
 
-const bin = fileURLToPath(new URL("../../src/harnesses/replay/bin.mjs", import.meta.url));
 const runner = fileURLToPath(new URL("../../src/cli.mjs", import.meta.url));
-const zeroUsage = Object.freeze({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 });
-
-/**
- * The runner spawns the replay executable directly (never through
- * process.execPath), so replay/bin.mjs must stay executable in git
- * (mode 0o755) for every replay test below to run.
- */
-function assertExecutable() {
-  assert.ok(existsSync(bin), "replay/bin.mjs must exist");
-  assert.notEqual(statSync(bin).mode & 0o111, 0, "replay/bin.mjs must be executable (mode 0o755)");
-}
-
-/** @param {string} summary @returns {Record<string, unknown>} */
-function workerResult(summary) {
-  return { status: "done", summary, changedFiles: [], verification: [], artifacts: [], missingContext: [] };
-}
-
-/** @param {Record<string, unknown>} [overrides] @returns {Record<string, unknown>} */
-function envelope(overrides = {}) {
-  return {
-    status: "done",
-    result: "ok",
-    continuationId: null,
-    usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0 },
-    costUsd: null,
-    error: null,
-    ...overrides,
-  };
-}
-
-/** @param {string} directory @param {unknown[]} lines @param {string} [name] @returns {string} */
-function writeRecording(directory, lines, name = "recording.jsonl") {
-  const path = join(directory, name);
-  writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-  return path;
-}
-
-/** @param {string} path @returns {string|null} */
-function readIfExists(path) {
-  return existsSync(path) ? readFileSync(path, "utf8") : null;
-}
 
 /** @param {string} path @returns {Record<string, unknown>[]} */
 function readJsonlRecords(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
-}
-
-/** @param {string} stdout @returns {Record<string, unknown>} */
-function parseEnvelopeLine(stdout) {
-  const line = stdout.trim().split(/\r?\n/u).filter(Boolean).at(-1);
-  assert.ok(line, "stdout must carry one envelope line");
-  return /** @type {Record<string, unknown>} */ (JSON.parse(/** @type {string} */ (line)));
-}
-
-/**
- * @param {{args?: string[], input?: string, cwd: string}} options
- * @returns {Promise<{code: number|null, signal: string|null, stdout: string, stderr: string}>}
- */
-function runBin({ args = [], input = "", cwd }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
-    child.stdin.end(input);
-  });
 }
 
 // The other half of replay.test.mjs: whole runs driven through the replay

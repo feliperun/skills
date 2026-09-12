@@ -1,59 +1,33 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import {
   existsSync,
-  mkdtempSync,
   readFileSync,
-  readdirSync,
   realpathSync,
-  rmSync,
-  unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
-import {
-  TERMINAL,
-} from "./engine/prompts.mjs";
-import { normalizeProviderResult, probeRuntime, providerCommand } from "./harnesses/index.mjs";
 import { modelsCommand } from "./harnesses/catalogue.mjs";
 import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./host/preflight.mjs";
 import { renderFindings, renderReport, renderReportJson, renderStatus, renderStatusJson } from "./report/render.mjs";
 
 import {
-  bootstrapAckPath,
-  bootstrapAttemptPath,
-  bootstrapPath,
-  cleanupBootstrapAttempts,
-  readJson,
-  writeJsonAtomic,
   writeTextAtomic,
 } from "./run/store.mjs";
 import {
   acquire as acquireLock,
-  bootstrapFailureMatchesChild,
-  bootstrapMatchesChild,
-  processStartToken,
-  readLock,
-  sameProcessStartToken,
   validBootstrapNonce,
 } from "./run/lock.mjs";
 import { renderRunHandoff } from "./campaign/index.mjs";
 import { campaignCli } from "./cli/campaign.mjs";
 import { contractCli, validateContractFile } from "./cli/contract.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./campaign/metrics.mjs";
-import { readRunNodes, runContract } from "./engine/scheduler.mjs";
+import { runContract } from "./engine/scheduler.mjs";
 import { resumeRun } from "./engine/resume.mjs";
 import { cancelRun } from "./engine/cancel.mjs";
 
-import { delay, errorCode, errorMessage } from "./util.mjs";
-import { bootstrapNonceForProcess, cleanupBootstrapNonce, waitForBootstrapAcknowledgement } from "./engine/detach.mjs";
-import { render } from "./report/final.mjs";
-import { emptyUsage } from "./run/usage.mjs";
+import { errorMessage } from "./util.mjs";
 import { validateContract } from "./contract/index.mjs";
-import { validateNodeSnapshot } from "./contract/snapshot.mjs";
 import { detachSelf, waitForBootstrap, writeBootstrapFailure } from "./cli/launch.mjs";
 import { preflightContract, reusedDoneWarnings } from "./engine/live-preflight.mjs";
 
@@ -80,15 +54,6 @@ import { preflightContract, reusedDoneWarnings } from "./engine/live-preflight.m
 /** @typedef {import("./engine/scheduler.mjs").RunOutcome} RunOutcome */
 /** @typedef {import("node:child_process").ChildProcess & {bootstrapNonce?: string, bootstrapProcessStartToken?: string|null}} DetachedChild */
 /** @typedef {{status?: string, nonce?: string, pid?: number, processStartToken?: string|null, holderId?: string, generation?: number, error?: unknown, runDir?: string}} BootstrapRecord */
-
-export { runContract } from "./engine/scheduler.mjs";
-export { resumeRun } from "./engine/resume.mjs";
-export { cancelRun } from "./engine/cancel.mjs";
-
-/** @param {number|null|undefined} value */
-function formatCost(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(6)}` : "-";
-}
 
 /**
  * Whether this process is a detached bootstrap child of the CLI: it carries a

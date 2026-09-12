@@ -1,17 +1,17 @@
 /**
  * Judge round arbitration: interpret a returned verdict, decide re-ask versus
- * settlement, and apply worker/verification rejections. `node.mjs` launches
- * the judge invocation (prompt rendering, provider dispatch) and hands the
- * result here; this module never starts a provider invocation itself.
- */
-import { parseJudge, retryPrompt } from "./prompts.mjs";
+ * settlement, and route what `startJudge` decided.
+ *
+ * `engine/dispatch.mjs` launches the judge invocation and hands the result
+ * here; this module never starts a provider invocation itself. The rejection
+ * paths themselves live in `engine/settle.mjs`, because the control loop
+ * settles too and having them here made the two import each other.
+ */import { parseJudge } from "./prompts.mjs";
 import {
   clearJudgeReask,
   judgeReaskOutstanding,
   markJudgeReask,
-  resetPhaseRouting,
   uncitedRejection,
-  verificationFailureVerdict,
 } from "./judge-gate.mjs";
 import {
   JUDGE_UNAVAILABLE_CODE,
@@ -19,14 +19,11 @@ import {
   invalidJudgeVerdict,
   reviewMode,
 } from "../contract/review-modes.mjs";
-import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
-import {
-  raiseNodeAttention,
-  settleDone,
-} from "./lifecycle.mjs";
+
 import { errorMessage, excerpt } from "../util.mjs";
 import { appendTransitionEvent, transition } from "./state.mjs";
-import { startJudge, startWorker } from "./dispatch.mjs";
+import { startJudge } from "./dispatch.mjs";
+import { applyRejection, raiseNodeAttention, settleDone } from "./settle.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -194,31 +191,6 @@ export async function applyJudgeResult(contract, node, state, result, runDir, lo
     label: "gate",
     phase: "judge",
   });
-}
-
-/** Settle one worker-generation rejection: bounded revision when one remains, otherwise terminal exhausted/failed. @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} verdict @param {{code: string, label: string, phase?: "worker"|"judge", message?: string}} options */
-export function applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, options) {
-  const { code, label, phase = "worker", message = verdict.summary } = options;
-  state.gate = verdict;
-  if (node.gate.enabled && state.revisions < (node.gate.maxRevisions ?? 1)) {
-    resetPhaseRouting(state);
-    state.revisions += 1;
-    state.attempt += 1;
-    process.stdout.write(`[${label}] ${node.id} retry · ${verdict.summary}\n`);
-    if (running) startWorker(contract, node, state, runDir, running, retryPrompt(node, verdict), lock, states, campaignPath);
-    else transition(runDir, state, "pending", { phase: "worker", error: null }, lock);
-    return;
-  }
-  transition(runDir, state, node.gate.enabled ? "exhausted" : "failed", {
-    phase,
-    gate: verdict,
-    error: { code, message },
-  }, lock);
-}
-
-/** Deterministic verification failure settles through the shared rejection path. The verdict carries this attempt's unexpected paths, so a red attempt reports them whether it stops here or starts its revision (TECH-SPEC lean, rule 1). @param {ValidatedContract} contract @param {ValidatedNode} node @param {NodeSnapshot} state @param {string} runDir @param {Map<string, Job>|null} running @param {LockHandle} lock @param {Map<string, NodeSnapshot>} states @param {string} campaignPath @param {JudgeVerdict} [verdict] */
-export function applyVerificationFailure(contract, node, state, runDir, running, lock, states, campaignPath, verdict = verificationFailureWithScope(verificationFailureVerdict(state), state.scope)) {
-  applyRejection(contract, node, state, runDir, running, lock, states, campaignPath, verdict, { code: "verification_failed", label: "verification" });
 }
 
 /**

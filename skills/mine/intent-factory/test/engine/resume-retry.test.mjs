@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { runContract, resumeRun } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { fakeCodex, fixture, initializeGit, orphan, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, persistFailure, promptLoggingCodex, withCodexBinary, runMetadata, recoveryDecisions, retryJudgeCodex } from "../runner-helpers.mjs";
 

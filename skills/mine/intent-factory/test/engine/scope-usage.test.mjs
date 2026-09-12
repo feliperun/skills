@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MAX_NOTE_LENGTH, renderReport, renderReportJson, renderStatus, renderStatusJson } from "../../src/report/render.mjs";
-import { runContract, resumeRun } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { runRefName } from "../../src/repo/worktree.mjs";
 import { ensureAttemptWorktree, fakeCodex, fakeExecJsonl, fixture, initializeGit, packet, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, showRefFile, advisoryGateCodex } from "../runner-helpers.mjs";

@@ -14,14 +14,13 @@
  */
 import { TERMINAL } from "./prompts.mjs";
 import { acquire as acquireLock } from "../run/lock.mjs";
-import { applyInvalidWorkerResult, assertRunMutable, handleProviderExhaustion, raiseNodeAttention, settleDone } from "./lifecycle.mjs";
-import { applyJudgeResult, applyRejection, applyVerificationFailure } from "./review.mjs";
+import { applyInvalidWorkerResult, assertRunMutable, handleProviderExhaustion } from "./lifecycle.mjs";
+import { applyJudgeResult } from "./review.mjs";
 import { assertSourceUnchanged, captureRunIdentity } from "./run-identity.mjs";
 import { attemptWorkspace, attemptWorktreePath, gitHead, removeWorktree, runRefName } from "../repo/worktree.mjs";
 import { canonicalWorkerResultText, isResultMaterializationInvocation, materializeAttemptResult, recoverWorkerResult } from "./result-file.mjs";
 import { checkPersistedWorkerScope, persistedScopeBoundary, reconcileAmbiguousWorkerRestart, resolveUnknownEffect } from "./scope.mjs";
 import { closePersistedInvocation, recoverOrphan, recoveryFromOverride } from "./recover.mjs";
-import { composeAssignments, discoverRuntimes } from "./runtime-discovery.mjs";
 import { driveRun, readRunNodes } from "./scheduler.mjs";
 import { emptyUsage, invocationCost, invocationUsage, persistRecoveryUsage } from "../run/usage.mjs";
 import { ensureTerminalEvent, hasDoneEvent, recordExecutionOverride, transition, writeNode } from "./state.mjs";
@@ -41,6 +40,7 @@ import { validateContract } from "../contract/index.mjs";
 import { validateRunMetadata } from "../contract/snapshot.mjs";
 import { verificationFailureVerdict } from "./judge-gate.mjs";
 import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
+import { applyRejection, applyVerificationFailure, raiseNodeAttention, settleDone } from "./settle.mjs";
 
 /** @typedef {import("../repo/integrate.mjs").IntegrationResult} IntegrationResult */
 /** @typedef {import("./lifecycle.mjs").Invocation} Invocation */

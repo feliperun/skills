@@ -9,27 +9,23 @@ import {
   missingCapabilities,
   normalizeProviderAvailability,
   normalizeProviderResult,
-  probeRuntime,
   providerCommand,
-  resolvePermissionExecution,
 } from "../../src/harnesses/index.mjs";
 import {
-  EXEC_JSONL_PROTOCOL,
   TOOL_OUTPUT_LIMIT_BYTES,
   liveInputTokens,
   liveSessionMetrics,
   liveUsage,
-  normalizeExecJsonlResult,
   truncateToolOutput,
 } from "../../src/harnesses/exec-jsonl/index.mjs";
 import { ensureZcodeAvailable } from "../../src/harnesses/zcode/index.mjs";
-import { normalizeCodexResult, parseVersion } from "../../src/harnesses/protocol.mjs";
+import { normalizeCodexResult } from "../../src/harnesses/protocol.mjs";
 import { FOREGROUND_ONLY_DENIAL, HOOK_PATH } from "../../src/host/tool-policy-hook.mjs";
 import { DEFAULT_CLAUDE_TOOLS } from "../../src/harnesses/claude/index.mjs";
 import { CODEX_PREAMBLE_OVERRIDES } from "../../src/harnesses/codex/index.mjs";
 import { JUDGE_SCHEMA } from "../../src/engine/prompts.mjs";
 import { validateContract } from "../../src/contract/index.mjs";
-import { fixture, packet, withEmptyPath, writeContract } from "../helpers.mjs";
+import { fixture, withEmptyPath, writeContract } from "../helpers.mjs";
 import { routeRuntime } from "../../src/contract/runtime.mjs";
 
 // The other half of harnesses.test.mjs: turning provider output into an

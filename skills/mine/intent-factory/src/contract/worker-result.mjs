@@ -11,8 +11,6 @@ const RESULT_LIMITS = Object.freeze({
   missingContextItems: 16,
 });
 
-const STATUSES = new Set(["done", "blocked_context"]);
-
 /** @typedef {"done"|"blocked_context"} WorkerResultStatus */
 
 /**

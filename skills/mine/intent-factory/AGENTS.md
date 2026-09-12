@@ -12,7 +12,7 @@ layer, and the layer names are the vocabulary:
 | directory | owns |
 | --- | --- |
 | `cli.mjs`, `cli/` | argv, dispatch, usage. No domain logic. |
-| `contract/` | the authored artefact: schema and validation. Reads nothing, spawns nothing. |
+| `contract/` | the authored artefact: schema and validation. Reads only files the contract itself names (`taskPacketFile`); spawns nothing. |
 | `engine/` | the control loop: scheduler, node lifecycle, routing, gates. |
 | `harnesses/` | one adapter per provider harness, plus what each one can run. |
 | `campaign/` | the durable layer above runs. |
@@ -38,20 +38,29 @@ These fail `npm test`. `test/repo/source-shape.test.mjs` is where they live.
   (`engine/lifecycle.mjs` ↔ `engine/review.mjs`) and that allowance shrinks to
   zero, never grows. JSDoc `import("…")` type references do not count — they are
   erased at runtime.
-- **No function body defined twice in `src/`.** If two modules need it, it has
-  one home and both import it. Eight copies of `errorCode` drifted into five
-  behaviours this way.
+- **No top-level body defined twice in `src/`.** Compared by body with the
+  declaration's *name stripped*, because a copy that was renamed is still a
+  copy — a name-keyed version of this gate let a byte-identical `compactCost`
+  live on in `cli.mjs` as `formatCost`. If two modules need it, it has one home
+  and both import it.
 - **No name exported from two `src/` modules.** A module-private helper may
   share a name — a standalone spawned program with its own `fail` or `usage` is
   idiomatic and nobody can import it by mistake. Two *exported* ones is the
   hazard: this tree had two `stableJson`s (a comparator and a pretty-printer)
-  and two `requireText`s, one of which read a file.
+  and two `requireText`s, one of which read a file. `harness` is exempt by name:
+  every adapter exports it, and that uniformity *is* the registry interface.
 - **No barrel modules.** A module that only re-exports gives every symbol two
   homes and makes "where does this come from" unanswerable. `lib.mjs` was one;
   it is gone.
-- **Empty `catch {}` blocks never increase** (`test/../ci-policy.test.mjs`
-  ratchet). A swallowed error either gets a body or a comment saying why the
-  failure is genuinely uninteresting.
+- **Empty `catch {}` blocks never increase**, asserted at the measured count
+  (28) rather than a ceiling above it. A swallowed error either gets a body or
+  a comment saying why the failure is genuinely uninteresting. Target is zero.
+- **Every module header stays**, ratcheted the same way: the count of `src/`
+  modules with no leading block comment (30 of 84) only falls.
+- **No unused declaration anywhere.** `noUnusedLocals` is on, so `npm run
+  typecheck` is the gate. Turning it on after the splits found 392 dead
+  imports, typedefs and helpers, most of them left behind by the splits
+  themselves.
 
 ## Conventions
 
@@ -66,7 +75,8 @@ These fail `npm test`. `test/repo/source-shape.test.mjs` is where they live.
   count has no measurement behind it, say that too.
 - **No dead exports.** If nothing imports it, delete it. Two "shared" numeric
   helpers survived here for months with exactly one reference each: their own
-  definition.
+  definition. `noUnusedLocals` catches the module-private half of this; the
+  exported half still needs a reader.
 - **Name a function for what it does, not for what it resembles.** Two
   `requireText`s existed; one read a file. Two `stableJson`s existed; one was a
   pretty-printer.
@@ -78,9 +88,12 @@ Splitting a module is mechanical and should be scripted, not retyped — but:
 - **Run `node --check` after every step, not at the end.** A scripted extractor
   that tracks braces and not brackets will cut `new Set([…])` in half, and the
   result parses as far as the next file.
-- **Never anchor a generated import on "the last `import` in the file".**
-  Several test files build worker programs inside template literals, and those
-  carry `import` lines.
+- **Beware template literals holding code.** Three separate tools of mine were
+  fooled by them in one day: an import anchored on "the last `import` in the
+  file" landed inside a generated worker program; a dead-code deleter cut a
+  template's opening line and left its body; and a definition scanner treated
+  the template's column-0 contents as top-level. Mask them, or anchor on the
+  leading import block only.
 - **Check the module dependency graph before choosing boundaries.** If two
   candidate modules point at each other, the shared thing usually wants to be a
   third module — that is where `contract/schema-version.mjs`, `campaign/layout.mjs`
@@ -91,7 +104,9 @@ Splitting a module is mechanical and should be scripted, not retyped — but:
 
 ## Tests
 
-- `test/` mirrors `src/`; a test file is named for the module it exercises.
+- `test/` mirrors `src/` by directory. File names follow the module where one
+  exists and the behaviour otherwise (`test/engine/routing.test.mjs` covers
+  several modules) — the directory is the rule, the file name is a preference.
 - **A test that asserts a live model's exact words is not a test of this code.**
   Assert the envelope, the token count, the wire. One such assertion failed
   twice in a day on wording alone.

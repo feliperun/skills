@@ -1,16 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runContract } from "../../src/cli.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 import { livenessState } from "../../src/engine/lifecycle.mjs";
-import { failoverEdges, nextHop, nextSynthesizedRuntime } from "../../src/engine/failover.mjs";
-import { NETWORK_BACKOFF_CAP_MS, NETWORK_MAX_ATTEMPTS, backoffDelayMs, classifyTransition, isRepairable, isTimeoutOrStall, networkBackoffAttempts, quotaResetSchedule } from "../../src/engine/backoff.mjs";
 import { getHarness } from "../../src/harnesses/index.mjs";
-import { fakeCodex, fakeExecJsonl, fixture, packet, withFakeAgy, withFakeCodex, writeContract } from "../helpers.mjs";
-import { nodeState, notifications, fakeClaudeLike, flagValue, failoverContract, RESET_NOW, NETWORK_NOW, NETWORK_DEADLINE, halfJitter } from "../runner-helpers.mjs";
-import { preflightContract } from "../../src/engine/live-preflight.mjs";
+import { fakeCodex, fixture, packet, withFakeCodex, writeContract } from "../helpers.mjs";
+import { nodeState, fakeClaudeLike, flagValue } from "../runner-helpers.mjs";
 
 // The other half of routing.test.mjs: what happens when a provider is spent --
 // the declared one-hop edge, the announced reset, and the refusals.

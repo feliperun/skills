@@ -1,31 +1,19 @@
 import { createHash } from "node:crypto";
-import { Buffer } from "node:buffer";
-import { execFileSync } from "node:child_process";
-import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { loadTaskPacket, renderWorkerPrompt } from "./task-packet.mjs";
-import { validateWorkerResult } from "./worker-result.mjs";
-import { normalizeManagedSignalBlock } from "../repo/signal-block.mjs";
 import { validateDefinitionOfDone } from "./definition-of-done.mjs";
-import { validateFinalVerification, validateVerificationSnapshot } from "./final-verification.mjs";
-import { MAX_SCOPE_FINDING_PATHS } from "./scope-findings.mjs";
-import { REVIEW_MODES } from "./review-modes.mjs";
+import { validateFinalVerification } from "./final-verification.mjs";
 import { VERIFICATION_LIMITS } from "./verification.mjs";
 import {
-  INTENT_FACTORY_VERSION,
-  PROTOCOL_SCHEMA_VERSION,
-  harnessCapabilities,
-  resolvePermissionExecution,
-  resolveVendor,
   validateCapabilityRequirements,
 } from "../harnesses/index.mjs";
-import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../engine/runtime-discovery.mjs";
-import { errorCode, exitStatus, stableJson } from "../util.mjs";
-import { assertObject, boundedString, nonNegativeInteger, nonNegativeNumber, positiveInteger, positiveNumber, rejectUnknown, requireId, requireInteger, requirePacketHash, requireString, requireStringArray, requireTimestamp } from "./assert.mjs";
+import { DISCOVERY_RUNTIME_DEFINITIONS } from "../engine/runtime-discovery.mjs";
+import { stableJson } from "../util.mjs";
+import { assertObject, boundedString, nonNegativeInteger, positiveInteger, positiveNumber, rejectUnknown, requireId, requireString } from "./assert.mjs";
 import { validateMetadata } from "./schema-version.mjs";
-import { assertRuntimeExecutesCommands, requireRuntime, validateRuntime, validateSnapshotRuntime } from "./runtime.mjs";
-import { validateCompleteSourceIdentity, validateSourceIdentity } from "./source-identity.mjs";
+import { assertRuntimeExecutesCommands, requireRuntime, validateRuntime } from "./runtime.mjs";
+import { validateSourceIdentity } from "../repo/source-identity.mjs";
 import { commandCoverageWarnings, unsnapshottedWriteWarnings } from "../repo/declared-paths.mjs";
 
 export { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../harnesses/index.mjs";
@@ -100,7 +88,6 @@ const GATE_REVIEWS = new Set(["none", "advisory", "blocking"]);
  * @returns {ValidatedContract}
  */
 export function validateContract(raw, contractPath, options = {}) {
-  const { persisted = false } = options;
   assertObject(raw, "contract");
   rejectUnknown(raw, CONTRACT_FIELDS, "contract");
   validateMetadata(raw, "contract");

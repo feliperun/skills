@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixture, orphan, withFakeCodex, writeContract } from "../helpers.mjs";
-import { resumeRun, runContract } from "../../src/cli.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 
 /** @param {import("../../src/cli.mjs").RunOutcome} result @param {string} [id] @returns {import("../../src/contract/index.mjs").NodeSnapshot} */
 function nodeState(result, id = "build") {

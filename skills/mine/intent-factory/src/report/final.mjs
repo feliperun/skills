@@ -10,7 +10,7 @@ import { compactCost, compactTokens, errorCode } from "../util.mjs";
 import { basename, join } from "node:path";
 import { readJson, writeJsonAtomic, writeTextAtomic } from "../run/store.mjs";
 import { scopeFindingsNote } from "../contract/scope-findings.mjs";
-import { statusNote, writeStatusArtifacts } from "./render.mjs";
+import { MARK, fit, statusNote, writeStatusArtifacts } from "./render.mjs";
 import { unlinkSync } from "node:fs";
 
 /** @typedef {ReturnType<typeof import("../run/lock.mjs").acquire>} LockHandle */
@@ -29,17 +29,6 @@ export function render(runDir, runsDir, contract, states, lock = null) {
   writeTextAtomic(join(runDir, "STATUS.md"), renderFinalStatus(runDir, contract, states));
   writeStatusArtifacts(runDir, runsDir, contract, states);
 }
-const STATUS_MARK = {
-  pending: "[ ]",
-  running: "[>]",
-  done: "[+]",
-  "no-op": "[.]",
-  blocked: "[!]",
-  failed: "[x]",
-  exhausted: "[$]",
-  stalled: "[~]",
-  canceled: "[/]",
-};
 /**
  * @param {string} runDir
  * @param {ValidatedContract} contract
@@ -57,7 +46,7 @@ function renderFinalStatus(runDir, contract, states) {
   // review verdict, gate summary), so the cell holds the composed note whole.
   const widths = [3, 24, 9, 28, 7, 64];
   /** @param {unknown[]} cells */
-  const row = (cells) => cells.map((cell, index) => fitStatus(String(cell ?? ""), widths[index])).join(" ");
+  const row = (cells) => cells.map((cell, index) => fit(String(cell ?? ""), widths[index])).join(" ");
   const lines = [
     `# run ${basename(runDir)}`,
     "",
@@ -78,20 +67,14 @@ function renderFinalStatus(runDir, contract, states) {
     const note = scopeFindingsNote(node.scopeFindings)
       ? detail
       : `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
-    lines.push(row([STATUS_MARK[node.status] ?? "[?]", node.id, node.status, runtime, node.attempt ?? 0, note]));
+    lines.push(row([MARK[node.status] ?? "[?]", node.id, node.status, runtime, node.attempt ?? 0, note]));
   }
   lines.push("```", "", "## Needs you", "");
   const attention = nodes.filter((node) => !["pending", "running", "done"].includes(node.status));
   if (!attention.length && !identityWarnings.length) lines.push("Nothing needs you right now.");
   for (const warning of identityWarnings) lines.push(`- [~] ${warning}`);
-  for (const node of attention) lines.push(`- ${STATUS_MARK[node.status] ?? "[?]"} ${node.id}: ${node.gate?.summary ?? node.error?.message ?? node.status}`);
+  for (const node of attention) lines.push(`- ${MARK[node.status] ?? "[?]"} ${node.id}: ${node.gate?.summary ?? node.error?.message ?? node.status}`);
   return `${lines.join("\n")}\n`;
-}
-/** @param {string} value @param {number} width @returns {string} */
-function fitStatus(value, width) {
-  const clean = value.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
-  if (clean.length <= width) return clean + " ".repeat(width - clean.length);
-  return `${clean.slice(0, Math.max(0, width - 2))}..`.padEnd(width, " ");
 }
 /**
  * @param {string} runDir
@@ -106,7 +89,7 @@ export function renderFinalReport(runDir, contract, states) {
   const summary = [...counts].map(([status, count]) => `${count} ${status}`).join(" · ");
   const widths = [3, 24, 9, 7, 7, 28, 10, 10, 10, 12, 64];
   /** @param {unknown[]} cells */
-  const row = (cells) => cells.map((cell, index) => fitStatus(String(cell ?? ""), widths[index])).join(" ");
+  const row = (cells) => cells.map((cell, index) => fit(String(cell ?? ""), widths[index])).join(" ");
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 };
   let totalCostUsd = null;
   const lines = [
@@ -132,7 +115,7 @@ export function renderFinalReport(runDir, contract, states) {
       ? `${scopeFindingsNote(node.scopeFindings)} · ${detail}`
       : `${detail} · phase ${planNode?.phase ?? "-"} · ${node.invocations?.at(-1)?.continuationMode ?? "fresh"}`;
     lines.push(row([
-      STATUS_MARK[node.status] ?? "[?]",
+      MARK[node.status] ?? "[?]",
       node.id,
       node.status,
       node.attempt ?? 0,

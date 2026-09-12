@@ -1,3 +1,4 @@
+import { finite } from "../util.mjs";
 /**
  * Shared provider-protocol normalization and version parsing, extracted from
  * `exec-jsonl.mjs` because `claude.mjs`, `codex.mjs`, `agy.mjs`, `dsh.mjs`,
@@ -55,7 +56,6 @@ export function parseVersion(stdout, stderr = "") {
 export function toml(value) {
   return JSON.stringify(value);
 }
-
 
 /**
  * A stream that ended without its completion event says nothing about why.
@@ -486,10 +486,3 @@ export function canonicalUsage(usage = {}, options = {}) {
   };
 }
 
-/**
- * @param {unknown} value
- * @returns {number|null}
- */
-export function finite(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}

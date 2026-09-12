@@ -9,7 +9,7 @@
  */
 import { SessionMetricsParser } from "../harnesses/exec-jsonl/index.mjs";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { errorCode } from "../util.mjs";
 import { fileURLToPath } from "node:url";
 import { harnessCapabilities, normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";

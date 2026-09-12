@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,64 +10,19 @@ import { harnessCapabilities, normalizeProviderResult, probeRuntime, providerCom
 import { liveInputTokens, liveSessionMetrics, liveUsage } from "../../src/harnesses/exec-jsonl/index.mjs";
 import { replayHarness } from "../../src/harnesses/replay/index.mjs";
 import { JUDGE_SCHEMA } from "../../src/engine/prompts.mjs";
-import { projectMetrics, readMetricsSources } from "../../src/campaign/metrics.mjs";
-import { runContract, resumeRun } from "../../src/cli.mjs";
-import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../../src/repo/integrate.mjs";
-import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../../src/repo/worktree.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
+import { readIntegrationJournal } from "../../src/repo/integrate.mjs";
+import { runRefName } from "../../src/repo/worktree.mjs";
 
-import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "../helpers.mjs";
-import { captureWorkspaceSnapshot } from "../../src/repo/workspace.mjs";
-import { acknowledgeJournalEvent, readJournal } from "../../src/campaign/journal.mjs";
-import { campaignDir } from "../../src/campaign/layout.mjs";
+import { fixture, packet, writeContract } from "../helpers.mjs";
+import { assertExecutable, envelope, workerResult, writeRecording } from "./replay-helpers.mjs";
 
 const bin = fileURLToPath(new URL("../../src/harnesses/replay/bin.mjs", import.meta.url));
-const runner = fileURLToPath(new URL("../../src/cli.mjs", import.meta.url));
 const zeroUsage = Object.freeze({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0 });
-
-/**
- * The runner spawns the replay executable directly (never through
- * process.execPath), so replay/bin.mjs must stay executable in git
- * (mode 0o755) for every replay test below to run.
- */
-function assertExecutable() {
-  assert.ok(existsSync(bin), "replay/bin.mjs must exist");
-  assert.notEqual(statSync(bin).mode & 0o111, 0, "replay/bin.mjs must be executable (mode 0o755)");
-}
-
-/** @param {string} summary @returns {Record<string, unknown>} */
-function workerResult(summary) {
-  return { status: "done", summary, changedFiles: [], verification: [], artifacts: [], missingContext: [] };
-}
-
-/** @param {Record<string, unknown>} [overrides] @returns {Record<string, unknown>} */
-function envelope(overrides = {}) {
-  return {
-    status: "done",
-    result: "ok",
-    continuationId: null,
-    usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0 },
-    costUsd: null,
-    error: null,
-    ...overrides,
-  };
-}
-
-/** @param {string} directory @param {unknown[]} lines @param {string} [name] @returns {string} */
-function writeRecording(directory, lines, name = "recording.jsonl") {
-  const path = join(directory, name);
-  writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-  return path;
-}
 
 /** @param {string} path @returns {string|null} */
 function readIfExists(path) {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
-}
-
-/** @param {string} path @returns {Record<string, unknown>[]} */
-function readJsonlRecords(path) {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
 
 /** @param {string} stdout @returns {Record<string, unknown>} */

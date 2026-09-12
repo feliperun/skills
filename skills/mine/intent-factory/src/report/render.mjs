@@ -6,7 +6,7 @@ import { lockStale, pidAlive, readLock } from "../run/lock.mjs";
 import { scopeFindingsNote } from "../contract/scope-findings.mjs";
 import { reviewNote } from "../contract/review-modes.mjs";
 import { validateNodeSnapshot, validateRunMetadata } from "../contract/snapshot.mjs";
-import { compactCost, compactTokens, truncateChars } from "../util.mjs";
+import { compactCost, compactTokens, finite, truncateChars } from "../util.mjs";
 
 /** Advisory ceiling for status.json (TECH-SPEC lean, rule 5); never enforced destructively. */
 const STATUS_JSON_MAX_BYTES = 200 * 1024;
@@ -23,7 +23,8 @@ const POINTER_ATTENTION_CHARS = 80;
 /** @typedef {{id: string, status: NodeStatus, phase: string|null, executionPhase: string|null, runtime: string|null, continuation: string, attempt: number, revisions: number, startedAt: string|null, updatedAt: string|null, usage: StatusPayloadUsage|null, costUsd: number|null, verdict: string|null, pendingHandoff: {runtime: string, reason: string}|null, note: string|null, scopeFindings: string[]|null, errorCode: string|null, blockedBy: string[]}} StatusPayloadNode */
 /** @typedef {{schemaVersion: 1, run: string, contractId: string, campaignId: string, goal: string, usage: {inputTokens: number, outputTokens: number, cacheReadInputTokens: number, costUsd: number|null}, controller: JsonObject, identityWarnings: string[], summary: string, nodes: StatusPayloadNode[]}} StatusPayload */
 
-const MARK = {
+/** The glyph each terminal state prints in a status table. */
+export const MARK = {
   pending: "[ ]",
   running: "[>]",
   done: "[+]",
@@ -567,9 +568,9 @@ function nodeNote(node) {
  * @returns {CostProjection}
  */
 function costProjection(node) {
-  const nodeCost = finiteCost(node.costUsd);
+  const nodeCost = finite(node.costUsd);
   const invocations = Array.isArray(node.invocations) ? node.invocations : [];
-  const invocationCosts = invocations.map((invocation) => finiteCost(invocation.costUsd));
+  const invocationCosts = invocations.map((invocation) => finite(invocation.costUsd));
 
   if (invocations.length > 0) {
     if (!invocationCosts.every((cost) => cost !== null)) return { costUsd: null, status: "ambiguous" };
@@ -596,11 +597,6 @@ function aggregateCostProjection(costs) {
   };
 }
 
-/** @param {unknown} value @returns {number|null} */
-function finiteCost(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 /** @param {number} left @param {number} right @returns {boolean} */
 function sameCost(left, right) {
   return Math.abs(left - right) <= 1e-9;
@@ -616,7 +612,7 @@ function formatCost(projection) {
  * @param {number} width
  * @returns {string}
  */
-function fit(value, width) {
+export function fit(value, width) {
   const clean = value.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
   if (clean.length <= width) return clean + " ".repeat(width - clean.length);
   return `${clean.slice(0, Math.max(0, width - 2))}..`.padEnd(width, " ");

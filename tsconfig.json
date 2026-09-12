@@ -9,7 +9,8 @@
     "lib": ["es2023"],
     "strict": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "noUnusedLocals": true
   },
   "include": [".claude/hooks/**/*.mjs", "skills/mine/intent-factory/src/**/*.mjs",
     "skills/mine/intent-factory/test/**/*.mjs", "bin/**/*.mjs", "test/**/*.mjs", "skills/mine/intent-factory/evals/**/*.mjs"]

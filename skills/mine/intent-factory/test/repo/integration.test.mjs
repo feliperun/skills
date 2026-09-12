@@ -15,7 +15,7 @@ import {
   createRunRef,
   sealAttempt,
 } from "../../src/repo/worktree.mjs";
-import { captureSourceIdentity } from "../../src/contract/source-identity.mjs";
+import { captureSourceIdentity } from "../../src/repo/source-identity.mjs";
 
 test("run creation source identity includes resolved cwd and task-packet hashes", () => {
   const cwd = mkdtempSync(join(tmpdir(), "runner-source-"));

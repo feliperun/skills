@@ -13,7 +13,6 @@ import { attemptWorkspace } from "../repo/worktree.mjs";
 
 import { errorCode, errorMessage, excerpt } from "../util.mjs";
 import { executeControllerVerification } from "./verify.mjs";
-import { join } from "node:path";
 import { providerReceiptsFromInvocationTail, settleInvocation } from "../run/operations.mjs";
 import { readJson } from "../run/store.mjs";
 import { scopeFindingFromScope } from "../contract/scope-findings.mjs";

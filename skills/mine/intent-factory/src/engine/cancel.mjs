@@ -8,7 +8,7 @@
  * It refuses a lock held by its own process, because that is a bug and not a
  * cancellation.
  */
-import { LockBusyError, acquire as acquireLock, pidAlive, processStartToken, readLock } from "../run/lock.mjs";
+import { LockBusyError, acquire as acquireLock, pidAlive, readLock } from "../run/lock.mjs";
 import { TERMINAL } from "./prompts.mjs";
 import { assertRunMutable } from "./lifecycle.mjs";
 import { delay, errorCode } from "../util.mjs";

@@ -1,12 +1,7 @@
-import { spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { basename, isAbsolute, relative, resolve } from "node:path";
-import { normalizeManagedSignalBlock } from "../repo/signal-block.mjs";
-import { errorCode, fail, isContained, tailText } from "../util.mjs";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { fail, isContained, tailText } from "../util.mjs";
 
 export const VERIFICATION_LIMITS = Object.freeze({
   stdoutBytes: 16 * 1024,

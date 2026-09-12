@@ -1,24 +1,15 @@
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { syncAgentSignal } from "../repo/signal.mjs";
 import { JUDGE_SCHEMA, TERMINAL, retryPrompt } from "./prompts.mjs";
-import { verificationFailureVerdict } from "./judge-gate.mjs";
 import {
   applyJudgeProtocolFailure,
-  applyJudgeResult,
   applyJudgeRound,
-  applyRejection,
-  applyVerificationFailure,
 } from "./review.mjs";
-import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, probeRuntime } from "../harnesses/index.mjs";
-import { extractJson } from "../harnesses/protocol.mjs";
+import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION } from "../harnesses/index.mjs";
 import { routingBackoffActive } from "./failover.mjs";
-import { blockingChecks, environmentPreflight, reachableRuntimes } from "../host/preflight.mjs";
-import { composeAssignments, discoverRuntimes } from "./runtime-discovery.mjs";
 
 import {
-  appendJsonl,
   bootstrapAttemptPath,
   bootstrapPath,
   cleanupBootstrapAttempts,
@@ -27,48 +18,28 @@ import {
 } from "../run/store.mjs";
 import {
   acquire as acquireLock,
-  LockBusyError,
   LockLostError,
-  pidAlive,
   processStartToken,
-  readLock,
 } from "../run/lock.mjs";
-import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
-import { parseDiscoveryResult, parseWorkerResult } from "../contract/worker-result.mjs";
 import { registerRun, resolveCampaign } from "../campaign/index.mjs";
-import {
-  isUnknownEffectStop,
-  planResumeRetry,
-  renderPreviousAttemptSection,
-} from "./retry.mjs";
-import { attemptWorkspace, attemptWorktreePath, createRunRef, gitHead, removeWorktree, runRefName } from "../repo/worktree.mjs";
-import { recoverIntegrations } from "../repo/integrate.mjs";
+import { createRunRef, runRefName } from "../repo/worktree.mjs";
 import { bootstrapNonceForProcess, waitForBootstrapAcknowledgement } from "./detach.mjs";
 import {
-  applyInvalidWorkerResult,
-  assertRunMutable,
   finalizeClosedJobs,
-  handleProviderExhaustion,
-  raiseNodeAttention,
-  settleDone,
   terminalErrorCode,
 } from "./lifecycle.mjs";
-import { delay, errorCode, errorMessage, excerpt, stableJson } from "../util.mjs";
+import { delay, errorCode } from "../util.mjs";
 import { alreadyNotified, notifyQueueFor, notifyQueuesByRun, renderCampaignHandoffSafely } from "./notify-queue.mjs";
-import { detectStalls, invocationAlive, terminateInvocation, terminateProcess } from "./process.mjs";
-import { ensureTerminalEvent, hasDoneEvent, recordExecutionOverride, transition, writeNode } from "./state.mjs";
+import { detectStalls, terminateProcess } from "./process.mjs";
+import { transition, writeNode } from "./state.mjs";
 import { render, renderFinalReport, writeFindingsArtifact } from "../report/final.mjs";
-import { hasOperationIntent, hasOperationSettlement, operationNeedsRecovery, operationNextState, providerReceipts, providerReceiptsFromInvocationTail, readOperationSettlement, settleInvocation } from "../run/operations.mjs";
-import { appendUsageRecord, emptyUsage, invocationCost, invocationUsage, persistRecoveryUsage, recordInvocationUsage } from "../run/usage.mjs";
-import { closePersistedInvocation, recoverOrphan, recoveryFromOverride } from "./recover.mjs";
-import { canonicalWorkerResultText, isResultMaterializationInvocation, materializeAttemptResult, recoverWorkerResult } from "./result-file.mjs";
-import { captureNodeScopeBoundaries, checkPersistedWorkerScope, checkWorkerScope, emptyScope, persistedScopeBoundary, reconcileAmbiguousWorkerRestart, resolveUnknownEffect } from "./scope.mjs";
-import { executeControllerVerification, recoverVerificationAttempts, verifyCandidateWorkspace } from "./verify.mjs";
+import { operationNextState, providerReceipts, settleInvocation } from "../run/operations.mjs";
+import { appendUsageRecord, invocationCost, invocationUsage, recordInvocationUsage } from "../run/usage.mjs";
+import { captureNodeScopeBoundaries, checkWorkerScope, emptyScope } from "./scope.mjs";
 import { validateContract } from "../contract/index.mjs";
-import { validateNodeSnapshot, validateRunMetadata } from "../contract/snapshot.mjs";
-import { captureSourceIdentity } from "../contract/source-identity.mjs";
+import { validateNodeSnapshot } from "../contract/snapshot.mjs";
 import { startJudge, startWorker } from "./dispatch.mjs";
-import { assertEnvironmentReady, assertSourceUnchanged, captureRunIdentity, createRunMetadata, serializableContract, statesFingerprint } from "./run-identity.mjs";
+import { assertEnvironmentReady, captureRunIdentity, createRunMetadata, serializableContract, statesFingerprint } from "./run-identity.mjs";
 import { blockDependents, runtimeAssignments } from "./assignment.mjs";
 
 /** @typedef {import("../contract/index.mjs").WorkspaceScopeBoundary} WorkspaceScopeBoundary */

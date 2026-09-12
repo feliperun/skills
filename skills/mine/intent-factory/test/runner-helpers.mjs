@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runContract } from "../src/cli.mjs";
+import { runContract } from "../src/engine/scheduler.mjs";
 
 import { fixture, packet, writeContract } from "./helpers.mjs";
 import { validateContract } from "../src/contract/index.mjs";

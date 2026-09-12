@@ -8,16 +8,16 @@
  * approved, and `validateCompleteSourceIdentity` is where that is refused.
  */
 import { Buffer } from "node:buffer";
-import { assertObject, rejectUnknown, requireId, requirePacketHash, requireString } from "./assert.mjs";
+import { assertObject, rejectUnknown, requireId, requirePacketHash, requireString } from "../contract/assert.mjs";
 import { createHash } from "node:crypto";
 import { errorCode } from "../util.mjs";
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { resolve } from "node:path";
-import { normalizeManagedSignalBlock } from "../repo/signal-block.mjs";
+import { normalizeManagedSignalBlock } from "./signal-block.mjs";
 
 /** @typedef {import("../notify/index.mjs").JsonObject} JsonObject */
-/** @typedef {import("./index.mjs").SourceIdentity} SourceIdentity */
+/** @typedef {import("../contract/index.mjs").SourceIdentity} SourceIdentity */
 
 /**
  * @param {unknown} value

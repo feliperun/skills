@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { cancelRun, runContract, resumeRun } from "../../src/cli.mjs";
+import { cancelRun } from "../../src/engine/cancel.mjs";
+import { resumeRun } from "../../src/engine/resume.mjs";
+import { runContract } from "../../src/engine/scheduler.mjs";
 
 import { processStartToken } from "../../src/run/lock.mjs";
 

@@ -25,11 +25,11 @@ import {
   eventItem,
   extractJson,
   failed,
-  finite,
   parseJsonLines,
   parseVersion,
 } from "../protocol.mjs";
 import { rejectUnknown } from "../../contract/assert.mjs";
+import { finite } from "../../util.mjs";
 
 export { HARNESS_OUTPUT_LIMIT_BYTES } from "../protocol.mjs";
 
