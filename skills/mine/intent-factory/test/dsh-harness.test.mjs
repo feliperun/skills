@@ -299,6 +299,10 @@ test("a real harness turns one prompt into a result with real tokens", { skip: H
   const result = await closeResult(child);
   const envelope = normalizeProviderResult(runtime(), result.stdout, result.code, result.signal, {});
   assert.equal(envelope.status, "done", result.stderr.slice(-400));
-  assert.equal((envelope.result ?? "").trim(), "OK");
+  // The property under test is the wire, not the wording: this asserted the
+  // answer equalled "OK" and failed twice on 2026-09-11 when the model prefixed
+  // its restatement of the prompt. A live model's exact text is its own; what
+  // the adapter owes is a done envelope carrying the answer and real tokens.
+  assert.match(envelope.result ?? "", /OK/u);
   assert.ok((envelope.usage.inputTokens ?? 0) > 0, "a real turn reports the tokens it actually spent");
 });

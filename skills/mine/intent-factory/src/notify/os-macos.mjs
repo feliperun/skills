@@ -1,4 +1,5 @@
 import { spawn as defaultSpawn } from "node:child_process";
+import { errorMessage } from "../util.mjs";
 
 const TITLE = "intent-factory";
 const BODY_CHARS = 200;
@@ -86,10 +87,3 @@ function truncateChars(value, maxChars) {
   return chars.length <= maxChars ? value : chars.slice(0, maxChars).join("");
 }
 
-/**
- * @param {unknown} error
- * @returns {string}
- */
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}

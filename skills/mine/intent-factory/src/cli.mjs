@@ -51,12 +51,12 @@ import { contractCli, validateContractFile } from "./cli/contract.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./campaign/metrics.mjs";
 import { cancelRun, readRunNodes, resumeRun, runContract } from "./engine/scheduler.mjs";
 import {
-  delay,
   emptyUsage,
   errorCode,
-  errorMessage,
   render,
 } from "./engine/node.mjs";
+import { delay, errorMessage } from "./util.mjs";
+import { bootstrapNonceForProcess, cleanupBootstrapNonce, waitForBootstrapAcknowledgement } from "./engine/detach.mjs";
 
 /** @typedef {import("./contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -471,49 +471,6 @@ function writeBootstrapAcknowledgement(runDir, bootstrap, expectedProcessStartTo
   });
 }
 
-/**
- * @param {string} runDir
- * @param {{nonce: string, pid: number, processStartToken: string|null}} expected
- * @returns {Promise<void>}
- */
-export async function waitForBootstrapAcknowledgement(runDir, expected) {
-  if (!validBootstrapNonce(expected.nonce)) return;
-  const deadline = Date.now() + 5_000;
-  const path = bootstrapAckPath(runDir, expected.nonce);
-  try {
-    while (Date.now() < deadline) {
-      try {
-        const acknowledgement = /** @type {BootstrapRecord} */ (readJson(path));
-        if (
-          acknowledgement.status === "acknowledged" &&
-          acknowledgement.nonce === expected.nonce &&
-          acknowledgement.pid === expected.pid &&
-          sameProcessStartToken(acknowledgement.processStartToken, expected.processStartToken)
-        ) {
-          return;
-        }
-      } catch (error) {
-        if (errorCode(error) !== "ENOENT") throw error;
-      }
-      await delay(25);
-    }
-  } finally {
-    cleanupBootstrapNonce(runDir, expected.nonce);
-  }
-}
-
-/**
- * @param {string} runDir
- * @param {string} nonce
- */
-function cleanupBootstrapNonce(runDir, nonce) {
-  if (!validBootstrapNonce(nonce)) return;
-  for (const path of [bootstrapAttemptPath(runDir, nonce), bootstrapAckPath(runDir, nonce)]) {
-    try { unlinkSync(path); } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
-    }
-  }
-}
 
 /**
  * @param {string} runDir
@@ -596,7 +553,15 @@ function lockOwnedBy(lock, pid, processStartToken) {
     && sameProcessStartToken(lock.processStartToken, processStartToken);
 }
 
-/** @returns {boolean} */
+/**
+ * Whether this process is a detached bootstrap child of the CLI: it carries a
+ * launcher-issued nonce *and* this file is what was executed. The second half
+ * is why this stays here and not in `engine/detach.mjs` -- `evals/run.mjs` and
+ * the tests import `runContract` directly, and an inherited nonce must not make
+ * them wait for an acknowledgement nobody will write.
+ *
+ * @returns {boolean}
+ */
 export function hasDetachedBootstrapNonce() {
   if (!validBootstrapNonce(process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)) return false;
   try {
@@ -604,15 +569,6 @@ export function hasDetachedBootstrapNonce() {
   } catch {
     return false;
   }
-}
-
-/**
- * @returns {string}
- */
-export function bootstrapNonceForProcess() {
-  return validBootstrapNonce(process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)
-    ? /** @type {string} */ (process.env.INTENT_FACTORY_BOOTSTRAP_NONCE)
-    : randomUUID();
 }
 
 /** @type {Record<string, import("node:util").ParseArgsOptionsConfig>} */
@@ -711,7 +667,7 @@ async function main(argv) {
       return;
     }
     for (const warning of [...contract.warnings, ...reusedDoneWarnings(contract)]) process.stdout.write(`[warn] ${warning}\n`);
-    const result = await runContract(target);
+    const result = await runContract(target, { detachedBootstrap: hasDetachedBootstrapNonce() });
     if (!result.ok) process.exitCode = 1;
     return;
   }
@@ -731,7 +687,7 @@ async function main(argv) {
       process.stdout.write(`[resume] detached · pid ${pid} · ${runDir}\n`);
       return;
     }
-    const result = await resumeRun(target, resumeOptions);
+    const result = await resumeRun(target, { ...resumeOptions, detachedBootstrap: hasDetachedBootstrapNonce() });
     if (!result.ok) process.exitCode = 1;
     return;
   }

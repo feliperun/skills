@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { syncAgentSignal } from "../repo/signal.mjs";
-import { JUDGE_SCHEMA, TERMINAL, excerpt, retryPrompt, validateContract } from "./prompts.mjs";
+import { JUDGE_SCHEMA, TERMINAL, retryPrompt, validateContract } from "./prompts.mjs";
 import { verificationFailureVerdict } from "./judge-gate.mjs";
 import {
   applyJudgeProtocolFailure,
@@ -52,11 +52,7 @@ import {
   runRefName,
 } from "../repo/worktree.mjs";
 import { recoverIntegrations } from "../repo/integrate.mjs";
-import {
-  bootstrapNonceForProcess,
-  hasDetachedBootstrapNonce,
-  waitForBootstrapAcknowledgement,
-} from "../cli.mjs";
+import { bootstrapNonceForProcess, waitForBootstrapAcknowledgement } from "./detach.mjs";
 import {
   alreadyNotified,
   appendUsageRecord,
@@ -68,13 +64,11 @@ import {
   checkPersistedWorkerScope,
   checkWorkerScope,
   closePersistedInvocation,
-  delay,
   detectStalls,
   emptyScope,
   emptyUsage,
   ensureTerminalEvent,
   errorCode,
-  errorMessage,
   executeControllerVerification,
   finalizeClosedJobs,
   handleProviderExhaustion,
@@ -120,6 +114,7 @@ import {
   writeFindingsArtifact,
   writeNode,
 } from "./node.mjs";
+import { delay, errorMessage, excerpt } from "../util.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -148,9 +143,12 @@ import {
 
 /**
  * @param {string} contractPath
+ * @param {{detachedBootstrap?: boolean}} [options] `detachedBootstrap` is set
+ *   only by the CLI entry when this process is its own detached child, and
+ *   makes the controller wait for the launcher's acknowledgement
  * @returns {Promise<RunOutcome>}
  */
-export async function runContract(contractPath) {
+export async function runContract(contractPath, options = {}) {
   const absoluteContractPath = resolve(contractPath);
   const contract = validateContract(JSON.parse(readFileSync(absoluteContractPath, "utf8")), absoluteContractPath);
   const runDir = join(contract.cwd, ".runs", contract.id);
@@ -219,7 +217,7 @@ export async function runContract(contractPath) {
       writeNode(runDir, state, lock);
     }
     syncAgentSignal(runsDir);
-    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity);
+    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity, {}, options);
     syncAgentSignal(runsDir);
     return outcome;
   } catch (error) {
@@ -256,9 +254,11 @@ async function runtimeAssignments(contract) {
 
 /**
  * @param {string} runDirPath
- * @param {{node?: string, reconcile?: string}} [options] `node` limits the
- *   retry in place to one node and its dependants, and `reconcile`
- *   acknowledges a node stopped as `unknown_effect_reconciled`
+ * @param {{node?: string, reconcile?: string, detachedBootstrap?: boolean}} [options]
+ *   `node` limits the retry in place to one node and its dependants,
+ *   `reconcile` acknowledges a node stopped as `unknown_effect_reconciled`, and
+ *   `detachedBootstrap` is set only by the CLI entry when this process is its
+ *   own detached child
  * @returns {Promise<RunOutcome>}
  */
 export async function resumeRun(runDirPath, options = {}) {
@@ -641,7 +641,7 @@ export async function resumeRun(runDirPath, options = {}) {
       }
       transition(runDir, state, "pending", { phase: "waiting", error: null, blockedBy: [] }, lock);
     }
-    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resumeMetadata);
+    const outcome = await driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resumeMetadata, options);
     syncAgentSignal(runsDir);
     return outcome;
   } catch (error) {
@@ -666,14 +666,18 @@ function isBlockedContextTerminal(state) {
  * @param {LockHandle} lock
  * @param {SourceIdentity} sourceIdentity
  * @param {{identityWarnings?: string[]}} [resume] resume-only records persisted on the run metadata
+ * @param {{detachedBootstrap?: boolean}} [options] set by the CLI entry alone
  * @returns {Promise<RunOutcome>}
  */
-async function driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resume = {}) {
+async function driveRun(contract, runDir, states, campaign, lock, sourceIdentity, resume = {}, options = {}) {
   lock.assert();
   assertEnvironmentReady(contract, runDir, sourceIdentity);
   const runsDir = join(contract.cwd, ".runs");
   const bootstrapNonce = bootstrapNonceForProcess();
-  const detachedBootstrap = hasDetachedBootstrapNonce();
+  // Only the CLI entry can answer this: a nonce inherited by evals/run.mjs or
+  // by a test must not make the controller wait for an acknowledgement nobody
+  // is going to write.
+  const detachedBootstrap = options.detachedBootstrap === true;
   const runMetadata = createRunMetadata(lock, sourceIdentity, resume, runRefName(contract.id));
   writeJsonAtomic(join(runDir, "run.json"), runMetadata);
   writeJsonAtomic(bootstrapPath(runDir), {

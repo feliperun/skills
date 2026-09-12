@@ -14,10 +14,10 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   JUDGE_SCHEMA,
   TERMINAL,
-  excerpt,
   judgePrompt,
   normalizeProviderResult,
   parseJudge,
@@ -97,6 +97,7 @@ import {
   sealAttempt,
 } from "../repo/worktree.mjs";
 import { integrateAttempt } from "../repo/integrate.mjs";
+import { delay, errorMessage, excerpt } from "../util.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -136,129 +137,11 @@ export function errorCode(error) {
   return undefined;
 }
 
-/**
- * @param {unknown} error
- * @returns {string}
- */
-export function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_GRACE_MS = 2_000;
 
-const GATE_SCRIPT = String.raw`
-import { existsSync, readFileSync, statSync, openSync, closeSync, readSync, writeSync } from "node:fs";
-import { spawn } from "node:child_process";
-export const config = JSON.parse(readFileSync(process.env.INTENT_FACTORY_GATE_CONFIG, "utf8"));
-export const releasePath = process.env.INTENT_FACTORY_GATE_RELEASE;
-export const parentPid = Number(process.env.INTENT_FACTORY_GATE_PARENT_PID);
-export const parentToken = process.env.INTENT_FACTORY_GATE_PARENT_TOKEN || null;
-export const maxLogBytes = 512 * 1024;
-export function startToken(pid) {
-  if (process.platform !== "linux" || !pid) return null;
-  try {
-    const stat = readFileSync("/proc/" + pid + "/stat", "utf8").trim();
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
-  } catch { return null; }
-}
-export function parentAlive() {
-  try { process.kill(parentPid, 0); } catch (error) { return error.code === "EPERM"; }
-  return !parentToken || process.platform !== "linux" || startToken(parentPid) === parentToken;
-}
-let provider = null;
-let inputEnded = config.promptTransport !== "stdin";
-export const pendingInput = [];
-if (config.promptTransport === "stdin") {
-  process.stdin.on("data", (chunk) => {
-    if (provider) provider.stdin.write(chunk);
-    else pendingInput.push(chunk);
-  });
-  process.stdin.on("end", () => {
-    inputEnded = true;
-    if (provider) provider.stdin.end();
-  });
-}
-export function killGroup(signal) {
-  try { process.kill(-process.pid, signal); } catch {}
-}
-export function stopProvider() {
-  try { provider?.kill("SIGTERM"); } catch {}
-  setTimeout(() => killGroup("SIGKILL"), 100).unref();
-}
-// Providers write directly into the log files: a provider with non-blocking
-// stdout (EAGAIN on a full pipe) must never die because the controller's event
-// loop is briefly busy. Cap the files to the last maxLogBytes afterwards.
-export function capLog(path, preservePrefix = false) {
-  try {
-    const size = statSync(path).size;
-    if (size <= maxLogBytes) return;
-    if (preservePrefix) {
-      const prefixLimit = Math.min(64 * 1024, maxLogBytes - 1);
-      const prefix = Buffer.alloc(prefixLimit);
-      const prefixFd = openSync(path, "r");
-      readSync(prefixFd, prefix, 0, prefixLimit, 0);
-      closeSync(prefixFd);
-      const prefixEnd = prefix.lastIndexOf(10);
-      if (prefixEnd >= 0) {
-        const tailLimit = maxLogBytes - prefixEnd - 1;
-        const tail = Buffer.alloc(tailLimit);
-        const tailFd = openSync(path, "r");
-        readSync(tailFd, tail, 0, tailLimit, size - tailLimit);
-        closeSync(tailFd);
-        const tailStart = tail.indexOf(10);
-        const suffix = tailStart >= 0 ? tail.subarray(tailStart + 1) : Buffer.alloc(0);
-        const out = openSync(path, "w");
-        writeSync(out, Buffer.concat([prefix.subarray(0, prefixEnd + 1), suffix]));
-        closeSync(out);
-        return;
-      }
-    }
-    const fd = openSync(path, "r");
-    const buffer = Buffer.alloc(maxLogBytes);
-    readSync(fd, buffer, 0, maxLogBytes, size - maxLogBytes);
-    closeSync(fd);
-    const out = openSync(path, "w");
-    writeSync(out, buffer);
-    closeSync(out);
-  } catch {}
-}
-export function childEnv() {
-  const merged = { ...process.env };
-  for (const [key, value] of Object.entries(config.env ?? {})) {
-    if (value === null) delete merged[key];
-    else merged[key] = value;
-  }
-  // Worker providers are not a notification surface: strip the controller-only
-  // transport after the harness overlay so no harness can reintroduce it.
-  delete merged.INTENT_FACTORY_NOTIFY_BIN;
-  return merged;
-}
-process.on("SIGTERM", () => stopProvider());
-process.on("SIGINT", () => stopProvider());
-export const timer = setInterval(() => {
-  if (!parentAlive()) { clearInterval(timer); stopProvider(); return; }
-  if (!existsSync(releasePath)) return;
-  clearInterval(timer);
-  const stdoutFd = openSync(config.stdoutPath, "wx", 0o600);
-  const stderrFd = openSync(config.stderrPath, "wx", 0o600);
-  provider = spawn(config.executable, config.args, {
-    cwd: config.cwd,
-    env: childEnv(),
-    stdio: [config.promptTransport === "stdin" ? "pipe" : "ignore", stdoutFd, stderrFd],
-  });
-  if (config.promptTransport === "stdin") {
-    for (const chunk of pendingInput) provider.stdin.write(chunk);
-    pendingInput.length = 0;
-    if (inputEnded) provider.stdin.end();
-  }
-  provider.once("error", () => process.exitCode = 127);
-  provider.once("close", (code) => {
-    capLog(config.stdoutPath, config.harness === "codex");
-    capLog(config.stderrPath);
-    process.exit(code ?? 1);
-  });
-}, 10);
-`;
+const GATE_PATH = join(HERE, "gate.mjs");
 
 const MAX_PROVIDER_LOG_BYTES = 512 * 1024;
 
@@ -295,7 +178,7 @@ export function startProcess({ contract, node, state, runtime, prompt, paths, ph
   });
   let child;
   try {
-    child = spawn(process.execPath, ["-e", GATE_SCRIPT], {
+    child = spawn(process.execPath, [GATE_PATH], {
       cwd: workspace,
       env: {
         ...process.env,
@@ -3881,8 +3764,3 @@ export function emptyUsage() {
   return { inputTokens: null, outputTokens: null, cacheReadInputTokens: null };
 }
 
-/**
- * @param {number} milliseconds
- * @returns {Promise<void>}
- */
-export const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));

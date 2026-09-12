@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMacosNotifier } from "./os-macos.mjs";
+import { errorMessage } from "../util.mjs";
 
 const NOTIFY_BIN_ENV = "INTENT_FACTORY_NOTIFY_BIN";
 const MACOS_TRANSPORT = "os-macos";
@@ -246,11 +247,6 @@ export class NotifyQueue {
       entry.nextAttemptAt = this.now() + (this.backoffMs[entry.attempts - 1] ?? this.backoffMs.at(-1) ?? 0);
     }
   }
-}
-
-/** @param {unknown} error @returns {string} */
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**

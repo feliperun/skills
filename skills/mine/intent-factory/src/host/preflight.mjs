@@ -21,6 +21,7 @@ import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, getHarness, probeRunti
 import { addRuntimeRequirement, failoverTargets, runtimeSnapshot } from "../engine/failover.mjs";
 import { routeRuntime, validateContract } from "../contract/index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, discoverRuntimes } from "../engine/runtime-discovery.mjs";
+import { errorMessage } from "../util.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").RuntimeSnapshot} RuntimeSnapshot */
@@ -280,7 +281,6 @@ export function timeVerificationCommands(contract, probes = {}) {
   });
 }
 
-
 /**
  * Collect initial worker/judge runtimes and every runtime reachable through
  * the one declared fallback hop, preserving each capability requirement so a
@@ -489,10 +489,3 @@ function findExecutable(name) {
   return null;
 }
 
-/**
- * @param {unknown} error
- * @returns {string}
- */
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}

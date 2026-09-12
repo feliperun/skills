@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { getHarness, probeRuntime, registeredHarnesses, resolveVendor } from "./index.mjs";
 import { DISCOVERY_RUNTIME_DEFINITIONS, composeAssignments } from "../engine/runtime-discovery.mjs";
+import { errorMessage } from "../util.mjs";
 
 /**
  * Model catalogue report: which models each registered harness can run, the
@@ -227,7 +228,7 @@ export async function modelsReport(options = {}) {
  */
 export async function modelsCommand(options = {}) {
   const report = await modelsReport(options);
-  process.stdout.write(options.json === true ? stableJson(report) : renderModelsReport(report));
+  process.stdout.write(options.json === true ? stableJsonDocument(report) : renderModelsReport(report));
 }
 
 /**
@@ -488,11 +489,6 @@ function codepointOrder(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** @param {unknown} error @returns {string} */
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * JSON with every object's keys in codepoint order, so the same report always
  * serializes to the same bytes.
@@ -500,7 +496,7 @@ function errorMessage(error) {
  * @param {unknown} value
  * @returns {string}
  */
-export function stableJson(value) {
+export function stableJsonDocument(value) {
   return `${JSON.stringify(sortedKeys(value), null, 2)}\n`;
 }
 

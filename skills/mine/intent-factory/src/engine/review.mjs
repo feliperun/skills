@@ -4,7 +4,7 @@
  * the judge invocation (prompt rendering, provider dispatch) and hands the
  * result here; this module never starts a provider invocation itself.
  */
-import { excerpt, parseJudge, retryPrompt } from "./prompts.mjs";
+import { parseJudge, retryPrompt } from "./prompts.mjs";
 import {
   clearJudgeReask,
   judgeReaskOutstanding,
@@ -22,13 +22,13 @@ import {
 import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
 import {
   appendTransitionEvent,
-  errorMessage,
   raiseNodeAttention,
   settleDone,
   startJudge,
   startWorker,
   transition,
 } from "./node.mjs";
+import { errorMessage, excerpt } from "../util.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */

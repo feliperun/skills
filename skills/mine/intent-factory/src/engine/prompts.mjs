@@ -206,13 +206,3 @@ function boundedPromptText(value, maxBytes) {
   return bytes.length <= maxBytes ? text : `${bytes.subarray(0, maxBytes - 1).toString("utf8")}…`;
 }
 
-/**
- * @param {unknown} text
- * @returns {string|null}
- */
-export function excerpt(text) {
-  if (typeof text !== "string") return null;
-  const clean = text.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
-  if (!clean) return null;
-  return clean.length > 120 ? `${clean.slice(0, 119)}…` : clean;
-}
