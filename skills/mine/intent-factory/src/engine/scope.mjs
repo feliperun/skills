@@ -10,13 +10,14 @@
 import { TERMINAL } from "./prompts.mjs";
 import { appendTransitionEvent, recordExecutionOverride, transition, writeNode } from "./state.mjs";
 import { attemptWorkspace } from "../repo/worktree.mjs";
-import { captureWorkspaceScope, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../contract/verification.mjs";
+
 import { errorCode, errorMessage, excerpt } from "../util.mjs";
 import { executeControllerVerification } from "./verify.mjs";
 import { join } from "node:path";
 import { providerReceiptsFromInvocationTail, settleInvocation } from "../run/operations.mjs";
 import { readJson } from "../run/store.mjs";
 import { scopeFindingFromScope } from "../contract/scope-findings.mjs";
+import { captureWorkspaceScope, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../repo/workspace.mjs";
 
 /** @typedef {import("../contract/index.mjs").BoundedScope} BoundedScope */
 /** @typedef {import("./lifecycle.mjs").Invocation} Invocation */
@@ -24,12 +25,12 @@ import { scopeFindingFromScope } from "../contract/scope-findings.mjs";
 /** @typedef {import("../cli.mjs").LockHandle} LockHandle */
 /** @typedef {import("../contract/index.mjs").NodeSnapshot} NodeSnapshot */
 /** @typedef {import("../run/usage.mjs").RecoveryOutcome} RecoveryOutcome */
-/** @typedef {import("../contract/verification.mjs").ScopeComparison} ScopeComparison */
+/** @typedef {import("../repo/workspace.mjs").ScopeComparison} ScopeComparison */
 /** @typedef {import("../contract/index.mjs").TaskPacket} TaskPacket */
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
-/** @typedef {import("../contract/verification.mjs").WorkspaceScopeBoundary} WorkspaceScopeBoundary */
-/** @typedef {import("../contract/verification.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
+/** @typedef {import("../repo/workspace.mjs").WorkspaceScopeBoundary} WorkspaceScopeBoundary */
+/** @typedef {import("../repo/workspace.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
 
 /**
  * @param {NodeSnapshot} state
@@ -42,7 +43,7 @@ export function sourceWorkerRuntime(state) {
 }
 /**
  * @param {ScopeComparison} scope
- * @param {import("../contract/verification.mjs").WorkspaceScopeBoundary} boundary
+ * @param {import("../repo/workspace.mjs").WorkspaceScopeBoundary} boundary
  * @returns {BoundedScope}
  */
 function boundedScope(scope, boundary) {
@@ -56,7 +57,7 @@ function boundedScope(scope, boundary) {
   };
 }
 /**
- * @param {import("../contract/verification.mjs").WorkspaceScopeBoundary} boundary
+ * @param {import("../repo/workspace.mjs").WorkspaceScopeBoundary} boundary
  * @returns {BoundedScope}
  */
 export function emptyScope(boundary) {
@@ -72,7 +73,7 @@ export function emptyScope(boundary) {
 }
 /**
  * @param {ValidatedContract} contract
- * @returns {Map<string, import("../contract/verification.mjs").WorkspaceScopeBoundary>}
+ * @returns {Map<string, import("../repo/workspace.mjs").WorkspaceScopeBoundary>}
  */
 export function captureNodeScopeBoundaries(contract) {
   return new Map(contract.nodes.map((node) => [node.id, captureWorkspaceScope(contract.cwd, workerScope(node.taskPacket))]));
@@ -81,7 +82,7 @@ export function captureNodeScopeBoundaries(contract) {
  * @param {ValidatedContract} contract
  * @param {ValidatedNode} node
  * @param {NodeSnapshot|undefined} state
- * @returns {import("../contract/verification.mjs").WorkspaceScopeBoundary}
+ * @returns {import("../repo/workspace.mjs").WorkspaceScopeBoundary}
  */
 export function persistedScopeBoundary(contract, node, state, workspace = contract.cwd) {
   const boundary = state?.scope?.boundary;

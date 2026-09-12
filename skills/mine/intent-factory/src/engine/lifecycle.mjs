@@ -90,12 +90,7 @@ import {
 import { acquire as acquireLock, LockLostError, processStartToken } from "../run/lock.mjs";
 import { writeRunTextWithDiskPressureRetry } from "../run/disk-gc.mjs";
 import {
-  captureWorkspaceSnapshot,
-  captureWorkspaceScope,
-  compareWorkspaceSnapshot,
   compactVerification,
-  runVerification,
-  validateWorkspaceScopeBoundary,
 } from "../contract/verification.mjs";
 import { scopeFindingFromScope, scopeFindingsNote, verificationFailureWithScope } from "../contract/scope-findings.mjs";
 import { finalVerificationCommands } from "../contract/final-verification.mjs";
@@ -133,6 +128,8 @@ import {
   workerResultPath,
 } from "./result-file.mjs";
 import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerScope, emptyScope, persistedScopeBoundary, recordScopeFinding, sourceWorkerRuntime, workerScope } from "./scope.mjs";
+import { runVerification } from "./run-command.mjs";
+import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../repo/workspace.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -145,7 +142,7 @@ import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerSco
 /** @typedef {import("../contract/index.mjs").GateResult} GateResult */
 /** @typedef {import("../contract/index.mjs").SnapshotError} SnapshotError */
 /** @typedef {import("../contract/index.mjs").BoundedScope} BoundedScope */
-/** @typedef {import("../contract/verification.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
+/** @typedef {import("../repo/workspace.mjs").WorkspaceSnapshot} WorkspaceSnapshot */
 /** @typedef {import("../run/lock.mjs").LockRecord} LockRecord */
 /** @typedef {ReturnType<typeof acquireLock>} LockHandle */
 /** @typedef {import("../harnesses/index.mjs").HarnessRuntime} HarnessRuntime */
@@ -154,7 +151,7 @@ import { canReuseResultEvidence, checkResultMaterializationScope, checkWorkerSco
 /** @typedef {import("../contract/verification.mjs").VerificationAttempt} VerificationAttempt */
 /** @typedef {import("../contract/verification.mjs").VerificationAttemptResult} VerificationAttemptResult */
 /** @typedef {import("../contract/verification.mjs").VerificationResult} VerificationResult */
-/** @typedef {import("../contract/verification.mjs").ScopeComparison} ScopeComparison */
+/** @typedef {import("../repo/workspace.mjs").ScopeComparison} ScopeComparison */
 /** @typedef {import("../contract/worker-result.mjs").WorkerResult} WorkerResult */
 /** @typedef {import("../campaign/index.mjs").Campaign} Campaign */
 /** @typedef {{path: string, campaign: Campaign}} CampaignRef */
@@ -484,7 +481,7 @@ export function startWorker(contract, node, state, runDir, running, prompt, lock
     transition(runDir, state, "failed", { phase: "worker", error: { code: "worker_prompt_too_large", message: "worker prompt exceeds 65536 bytes" } }, lock);
     return;
   }
-  /** @type {import("../contract/verification.mjs").WorkspaceScopeBoundary} */
+  /** @type {import("../repo/workspace.mjs").WorkspaceScopeBoundary} */
   let boundary;
   /** @type {unknown} */
   let baseline;

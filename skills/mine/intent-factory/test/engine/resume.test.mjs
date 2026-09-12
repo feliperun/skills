@@ -8,10 +8,11 @@ import { fileURLToPath } from "node:url";
 import { cancelRun, runContract, resumeRun } from "../../src/cli.mjs";
 
 import { processStartToken } from "../../src/run/lock.mjs";
-import { captureWorkspaceSnapshot } from "../../src/contract/verification.mjs";
+
 import { closeResult, ensureAttemptWorktree, fakeCodex, fixture, initializeGit, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "../helpers.mjs";
 import { nodeState, childPid, withCitedGateCodex, withAdvisoryGateCodex } from "../runner-helpers.mjs";
 import { invocationAlive } from "../../src/engine/process.mjs";
+import { captureWorkspaceSnapshot } from "../../src/repo/workspace.mjs";
 
 test("resume adopts an orphaned worker result instead of repeating the work", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-"));

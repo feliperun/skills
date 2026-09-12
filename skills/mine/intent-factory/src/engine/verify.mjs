@@ -10,12 +10,13 @@
  */
 import { attemptWorkspace } from "../repo/worktree.mjs";
 import { boundedUtf8, errorMessage } from "../util.mjs";
-import { compactVerification, runVerification } from "../contract/verification.mjs";
+import { compactVerification } from "../contract/verification.mjs";
 import { finalVerificationCommands } from "../contract/final-verification.mjs";
 import { join } from "node:path";
 import { processStartToken } from "../run/lock.mjs";
 import { terminateInvocation } from "./process.mjs";
 import { writeNode } from "./state.mjs";
+import { runVerification } from "./run-command.mjs";
 
 /** @typedef {import("../repo/integrate.mjs").CandidateEvidence} CandidateEvidence */
 /** @typedef {import("../cli.mjs").LockHandle} LockHandle */

@@ -151,7 +151,7 @@ export async function runContract(contractPath, options = {}) {
         updatedAt: new Date().toISOString(),
         result: null,
         verification: null,
-        scope: emptyScope(/** @type {import("../contract/verification.mjs").WorkspaceScopeBoundary} */ (scopeBoundaries.get(node.id))),
+        scope: emptyScope(/** @type {import("../repo/workspace.mjs").WorkspaceScopeBoundary} */ (scopeBoundaries.get(node.id))),
         gate: null,
         error: null,
         judgeFailures: 0,
@@ -994,7 +994,7 @@ async function probeRuntimeVersionStable(runtime, cwd) {
  * resume can refuse a harness that was upgraded or broke mid-campaign.
  *
  * @param {ValidatedContract} contract
- * @param {Map<string, import("../contract/verification.mjs").WorkspaceScopeBoundary>} scopeBoundaries
+ * @param {Map<string, import("../repo/workspace.mjs").WorkspaceScopeBoundary>} scopeBoundaries
  * @returns {Promise<SourceIdentity>}
  */
 async function captureRunIdentity(contract, scopeBoundaries) {

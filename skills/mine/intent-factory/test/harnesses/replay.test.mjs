@@ -14,8 +14,9 @@ import { projectMetrics, readMetricsSources } from "../../src/campaign/metrics.m
 import { runContract, resumeRun } from "../../src/cli.mjs";
 import { integrateAttempt, readIntegrationJournal, recoverIntegrations } from "../../src/repo/integrate.mjs";
 import { createAttemptWorktree, createRunRef, gitHead, runRefName, sealAttempt } from "../../src/repo/worktree.mjs";
-import { captureWorkspaceSnapshot } from "../../src/contract/verification.mjs";
+
 import { fixture, initializeGit, packet, withFakeCodex, writeContract } from "../helpers.mjs";
+import { captureWorkspaceSnapshot } from "../../src/repo/workspace.mjs";
 
 const bin = fileURLToPath(new URL("../../src/harnesses/replay/bin.mjs", import.meta.url));
 const runner = fileURLToPath(new URL("../../src/cli.mjs", import.meta.url));

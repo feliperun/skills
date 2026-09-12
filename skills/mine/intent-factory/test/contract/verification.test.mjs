@@ -9,8 +9,10 @@ import { parseJudge, retryPrompt } from "../../src/engine/prompts.mjs";
 import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../../src/contract/judge-envelope.mjs";
 import { judgeReaskInstruction } from "../../src/contract/review-modes.mjs";
 import { mechanicalVerdict } from "../../src/engine/judge-gate.mjs";
-import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, runVerification, validateVerificationCommands, validateWorkspaceScopeBoundary } from "../../src/contract/verification.mjs";
+import { validateVerificationCommands } from "../../src/contract/verification.mjs";
 import { parseDiscoveryResult, parseWorkerResult } from "../../src/contract/worker-result.mjs";
+import { runVerification } from "../../src/engine/run-command.mjs";
+import { captureWorkspaceScope, captureWorkspaceSnapshot, compareWorkspaceSnapshot, validateWorkspaceScopeBoundary } from "../../src/repo/workspace.mjs";
 
 /** @param {string} directory */
 function initializeGit(directory) {
@@ -396,8 +398,8 @@ test("scope exact files and roots respect prefix boundaries", () => {
 });
 
 /** A boundary is always re-validated against the scope that declared it.
- * @param {import("../../src/contract/verification.mjs").WorkspaceScopeBoundary} boundary
- * @returns {import("../../src/contract/verification.mjs").WorkspaceScope} */
+ * @param {import("../../src/repo/workspace.mjs").WorkspaceScopeBoundary} boundary
+ * @returns {import("../../src/repo/workspace.mjs").WorkspaceScope} */
 function declared(boundary) {
   return { files: [], roots: ["docs/NOTES.md"], boundary };
 }
