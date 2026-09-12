@@ -69,13 +69,18 @@ const CAPABILITY_NAMES = new Set([
 
 /**
  * Mechanical worker tool policy sent to the provider boundary:
- * `foregroundOnly` rejects background tool invocations and
- * `maxToolOutputBytes` bounds each tool result head-plus-tail. Claude-
- * compatible adapters enforce it through hook settings; an adapter that
- * cannot prove enforcement must never receive it.
+ * `foregroundOnly` rejects background tool invocations,
+ * `maxToolOutputBytes` bounds each tool result head-plus-tail, `workspace`
+ * names the attempt's working directory, `writeFiles`/`writeRoots` carry the
+ * node's declared write scope, and `maxReadLines` bounds a whole-file read.
+ * Claude-compatible adapters enforce it through hook settings; an adapter
+ * that cannot prove enforcement must never receive it.
  *
- * @typedef {{foregroundOnly: boolean, maxToolOutputBytes: number|null}} ToolPolicy
+ * @typedef {{foregroundOnly: boolean, maxToolOutputBytes: number|null, workspace: string, writeFiles: string[], writeRoots: string[], maxReadLines: number|null}} ToolPolicy
  */
+
+/** Line count above which a whole-file read is denied by the tool policy hook. */
+export const READ_LINE_LIMIT = 1500;
 
 /** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, toolPolicy?: ToolPolicy}} CommandOptions */
 

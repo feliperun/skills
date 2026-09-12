@@ -26,24 +26,35 @@ export const HOOK_PATH = fileURLToPath(import.meta.url);
 const BACKGROUND_OUTPUT_TOOLS = ["TaskOutput", "BashOutput", "Monitor"];
 
 /** PreToolUse matcher covering every tool the policy may deny. */
-const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS].join("|");
+export const PRE_TOOL_MATCHER = ["Bash", ...BACKGROUND_OUTPUT_TOOLS, "Write", "Edit", "NotebookEdit", "Read"].join("|");
 
 /** Standard foreground-only denial; it tells the model how to retry. */
 export const FOREGROUND_ONLY_DENIAL = "background tool invocation denied by the foreground-only tool policy; rerun the tool in the foreground and wait for it to finish";
 
 /**
  * @param {string[]} argv
- * @returns {{foregroundOnly: boolean, maxToolOutputBytes: number}}
+ * @returns {{foregroundOnly: boolean, maxToolOutputBytes: number, workspace: string|null, writeFiles: string[], writeRoots: string[], maxReadLines: number|null}}
  */
 function parsePolicy(argv) {
   const flags = parseArgs({ args: argv, options: {
     "foreground-only": { type: "boolean", default: false },
     "max-tool-output-bytes": { type: "string" },
+    "workspace": { type: "string" },
+    "write-file": { type: "string", multiple: true, default: [] },
+    "write-root": { type: "string", multiple: true, default: [] },
+    "max-read-lines": { type: "string" },
   } });
   const raw = Number(flags.values["max-tool-output-bytes"]);
+  const rawMaxReadLines = Number(flags.values["max-read-lines"]);
   return {
     foregroundOnly: Boolean(flags.values["foreground-only"]),
     maxToolOutputBytes: Number.isInteger(raw) && raw > 0 ? raw : TOOL_OUTPUT_LIMIT_BYTES,
+    workspace: typeof flags.values.workspace === "string" ? flags.values.workspace : null,
+    writeFiles: /** @type {string[]} */ (flags.values["write-file"] ?? []),
+    writeRoots: /** @type {string[]} */ (flags.values["write-root"] ?? []),
+    maxReadLines: flags.values["max-read-lines"] === undefined
+      ? null
+      : (Number.isInteger(rawMaxReadLines) && rawMaxReadLines > 0 ? rawMaxReadLines : null),
   };
 }
 
@@ -60,6 +71,12 @@ export function hookCommand(policy) {
   if (typeof policy.maxToolOutputBytes === "number" && policy.maxToolOutputBytes > 0) {
     argv.push("--max-tool-output-bytes", String(policy.maxToolOutputBytes));
   }
+  if (typeof policy.workspace === "string" && policy.workspace) argv.push("--workspace", policy.workspace);
+  for (const file of policy.writeFiles ?? []) argv.push("--write-file", file);
+  for (const root of policy.writeRoots ?? []) argv.push("--write-root", root);
+  if (typeof policy.maxReadLines === "number" && policy.maxReadLines > 0) {
+    argv.push("--max-read-lines", String(policy.maxReadLines));
+  }
   return argv.map(shellQuote).join(" ");
 }
 
@@ -74,7 +91,9 @@ export function hookCommand(policy) {
 export function hookSettings(policy) {
   /** @type {Record<string, {matcher: string, hooks: {type: "command", command: string}[]}[]>} */
   const hooks = {};
-  if (policy.foregroundOnly) {
+  const hasWriteScope = Boolean((policy.writeFiles ?? []).length || (policy.writeRoots ?? []).length);
+  const hasReadThreshold = typeof policy.maxReadLines === "number" && policy.maxReadLines > 0;
+  if (policy.foregroundOnly || hasWriteScope || hasReadThreshold) {
     hooks.PreToolUse = [{ matcher: PRE_TOOL_MATCHER, hooks: [hookEntry(policy)] }];
   }
   if (typeof policy.maxToolOutputBytes === "number" && policy.maxToolOutputBytes > 0) {

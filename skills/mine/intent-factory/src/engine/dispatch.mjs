@@ -33,7 +33,7 @@ import { hasOperationIntent, hasOperationSettlement, operationNeedsRecovery, ope
 import { invocationCost, invocationUsage } from "../run/usage.mjs";
 import { logPaths, readBoundedTail, startProcess } from "./process.mjs";
 import { mkdirSync } from "node:fs";
-import { normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";
+import { READ_LINE_LIMIT, normalizeProviderResult, providerCommand } from "../harnesses/index.mjs";
 import { readJson, writeJsonAtomic } from "../run/store.mjs";
 import { judgeReaskInstruction, reviewMode } from "../contract/review-modes.mjs";
 import { routeRuntimeForState, runtimeSnapshot } from "./failover.mjs";
@@ -200,11 +200,20 @@ function phaseHandoffPrompt(contract, node, state, runDir, role) {
  * enforcement.
  *
  * @param {RuntimeSnapshot} runtime
+ * @param {ValidatedNode} node
+ * @param {string} workspace
  * @returns {import("../harnesses/index.mjs").ToolPolicy|undefined}
  */
-function workerToolPolicy(runtime) {
+function workerToolPolicy(runtime, node, workspace) {
   if (runtime.capabilities.toolPolicy !== true) return undefined;
-  return { foregroundOnly: true, maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES };
+  return {
+    foregroundOnly: true,
+    maxToolOutputBytes: TOOL_OUTPUT_LIMIT_BYTES,
+    workspace,
+    writeFiles: node.taskPacket.writeFiles ?? [],
+    writeRoots: node.taskPacket.writeRoots ?? [],
+    maxReadLines: READ_LINE_LIMIT,
+  };
 }
 /**
  * Build the bounded options shared by workers, judges, and gate revisions.
@@ -369,7 +378,7 @@ export function startWorker(contract, node, state, runDir, running, prompt, lock
     const job = startProcess({
       contract, node, state, runtime, workspace, prompt: effectivePrompt, paths, phase: "worker",
       commandOptions: invocationCommandOptions(contract, node, state, runtime, phasePlan, runDir, lock, {
-        toolPolicy: workerToolPolicy(runtime),
+        toolPolicy: workerToolPolicy(runtime, node, workspace),
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, runtime, state, runDir, "worker", phasePlan.mode, phasePlan.continuationId);
@@ -454,7 +463,7 @@ export function startResultMaterialization(contract, node, state, runDir, runnin
         continuationId,
         mode: "reuse",
       }, runDir, lock, {
-        toolPolicy: workerToolPolicy(materializationRuntime),
+        toolPolicy: workerToolPolicy(materializationRuntime, node, workspace),
       }),
       onInvocation: (invocation, currentJob) => {
         stampInvocation(invocation, contract, node, materializationRuntime, state, runDir, "worker", "reuse", continuationId);
