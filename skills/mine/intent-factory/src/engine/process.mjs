@@ -189,7 +189,9 @@ function observeInvocation(job) {
     };
     job.onInvocationUpdate?.(job.invocation);
   } catch {
-    // Observation is best-effort: a failed metrics tick must not stop the run.
+    // monitorInvocation already swallows its own IO, so the only thing left that
+    // can throw here is the caller's onInvocationUpdate: observing a continuation
+    // id must not be able to kill the job that is being observed.
   }
 }
 /**
