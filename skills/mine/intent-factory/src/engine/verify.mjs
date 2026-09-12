@@ -89,6 +89,7 @@ export async function executeControllerVerification(contract, runDir, node, stat
   try {
     const result = await runVerification([...node.taskPacket.verification, ...finalVerificationCommands(contract, node)], workspace, {
       logDir: join(runDir, "logs", `${node.id}.${state.attempt}.verification`),
+      writeFiles: node.taskPacket.writeFiles ?? [],
       onAttemptStart: (attempt) => persistVerificationAttempt(runDir, state, lock, attempt),
       onAttemptSpawn: (attempt) => persistVerificationAttempt(runDir, state, lock, {
         ...attempt,
@@ -161,6 +162,7 @@ export async function verifyCandidateWorkspace(contract, node, state, runDir, wo
   try {
     const result = await runVerification([...node.taskPacket.verification, ...finalVerificationCommands(contract, node)], workspace, {
       logDir: join(runDir, "logs", `${node.id}.${state.attempt}.candidate-verification`),
+      writeFiles: node.taskPacket.writeFiles ?? [],
     });
     return compactVerification(result);
   } catch (error) {

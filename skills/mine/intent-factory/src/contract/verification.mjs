@@ -26,7 +26,7 @@ export const VERIFICATION_LIMITS = Object.freeze({
 /**
  * One declared deterministic check: an argv command run by the controller.
  *
- * @typedef {{argv: string[], cwd?: string, timeoutSec?: number, repeat?: number, env?: string[]}} VerificationCommand
+ * @typedef {{argv: string[], cwd?: string, timeoutSec?: number, repeat?: number, env?: string[], mutation?: {threshold: number}}} VerificationCommand
  */
 
 /**
@@ -56,7 +56,7 @@ export const VERIFICATION_LIMITS = Object.freeze({
 /**
  * Callbacks and options for {@link runVerification}.
  *
- * @typedef {{signal?: AbortSignal, logDir?: string, onAttemptStart?: (attempt: VerificationAttempt) => void, onAttemptSpawn?: (attempt: VerificationAttempt) => void, onAttemptComplete?: (attempt: VerificationAttempt) => void}} VerificationOptions
+ * @typedef {{signal?: AbortSignal, logDir?: string, writeFiles?: string[], onAttemptStart?: (attempt: VerificationAttempt) => void, onAttemptSpawn?: (attempt: VerificationAttempt) => void, onAttemptComplete?: (attempt: VerificationAttempt) => void}} VerificationOptions
  */
 
 /**
@@ -106,7 +106,7 @@ export function validateVerificationCommands(commands, label = "verification") {
 function validateVerificationCommand(command, label = "verification command") {
   if (!command || typeof command !== "object" || Array.isArray(command)) throw new TypeError(`${label} must be an argv command object`);
   const record = /** @type {Record<string, unknown>} */ (command);
-  const allowed = new Set(["argv", "cwd", "timeoutSec", "repeat", "env"]);
+  const allowed = new Set(["argv", "cwd", "timeoutSec", "repeat", "env", "mutation"]);
   for (const key of Object.keys(record)) if (!allowed.has(key)) throw new TypeError(`${label} has unexpected field ${key}`);
   if (!Array.isArray(record.argv) || record.argv.length === 0 || record.argv.length > 64 || record.argv.some((item) => typeof item !== "string" || !item.trim() || Buffer.byteLength(item, "utf8") > 8 * 1024)) {
     throw new TypeError(`${label}.argv must be a non-empty array of strings`);
@@ -125,9 +125,26 @@ function validateVerificationCommand(command, label = "verification command") {
   if (!Array.isArray(env) || env.some((name) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))) throw new TypeError(`${label}.env must be an array of environment-variable names`);
   const envBytes = env.reduce((sum, name) => sum + Buffer.byteLength(/** @type {string} */ (name), "utf8"), 0);
   if (envBytes > VERIFICATION_LIMITS.maxEnvBytes) throw new TypeError(`${label}.env exceeds aggregate byte limit`);
+  // Mutation testing is opt-in per entry: it re-runs the same argv against
+  // deliberately broken copies of the node's written files. `threshold` is the
+  // fraction of mutants the suite must kill, so 0 accepts any suite and 1
+  // demands every sampled mutant fail it.
+  /** @type {{threshold: number}|undefined} */
+  let mutation;
+  if (record.mutation !== undefined) {
+    const rawMutation = record.mutation;
+    if (!rawMutation || typeof rawMutation !== "object" || Array.isArray(rawMutation)) throw new TypeError(`${label}.mutation must be an object with a threshold between 0 and 1`);
+    const mutationRecord = /** @type {Record<string, unknown>} */ (rawMutation);
+    for (const key of Object.keys(mutationRecord)) if (key !== "threshold") throw new TypeError(`${label}.mutation has unexpected field ${key}`);
+    if (typeof mutationRecord.threshold !== "number" || !Number.isFinite(mutationRecord.threshold) || mutationRecord.threshold < 0 || mutationRecord.threshold > 1) {
+      throw new TypeError(`${label}.mutation.threshold must be a number between 0 and 1`);
+    }
+    mutation = { threshold: mutationRecord.threshold };
+  }
   /** @type {VerificationCommand} */
   const normalized = { argv: [.../** @type {string[]} */ (record.argv)], timeoutSec, repeat, env: [.../** @type {string[]} */ (env)] };
   if (record.cwd !== undefined) normalized.cwd = /** @type {string} */ (record.cwd);
+  if (mutation !== undefined) normalized.mutation = mutation;
   return normalized;
 }
 
