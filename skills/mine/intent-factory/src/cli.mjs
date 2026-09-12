@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { modelsCommand } from "./harnesses/catalogue.mjs";
+import { bulkReadCommand } from "./engine/bulk-read.mjs";
 import { doctorCommand, environmentPreflight, reachableRuntimes, timeVerificationCommands } from "./host/preflight.mjs";
 import { renderFindings, renderReport, renderReportJson, renderStatus, renderStatusJson } from "./report/render.mjs";
 
@@ -85,6 +86,7 @@ const COMMAND_OPTIONS = {
   findings: {},
   doctor: { cwd: { type: "string" }, json: { type: "boolean" }, discover: { type: "boolean" } },
   models: { probe: { type: "boolean" }, json: { type: "boolean" } },
+  "bulk-read": { question: { type: "string" }, paths: { type: "string", multiple: true }, json: { type: "boolean" } },
   metrics: METRICS_OPTIONS,
 };
 
@@ -108,7 +110,8 @@ function parseCli(argv, quiet = false) {
   }
   if (parsed.positionals.length > 1) return null;
   if (command === "models" && parsed.positionals.length !== 0) return null;
-  if (command !== "doctor" && command !== "models" && parsed.positionals.length !== 1) return null;
+  if (command === "bulk-read" && parsed.positionals.length !== 0) return null;
+  if (command !== "doctor" && command !== "models" && command !== "bulk-read" && parsed.positionals.length !== 1) return null;
   return {
     command,
     target: parsed.positionals[0],
@@ -151,6 +154,10 @@ async function main(argv) {
   }
   if (command === "models") {
     await modelsCommand({ probe: values.probe === true, json: values.json === true });
+    return;
+  }
+  if (command === "bulk-read") {
+    await bulkReadCommand({ question: values.question, paths: values.paths, json: values.json === true });
     return;
   }
   if (!target) { usage(); return; }
@@ -267,6 +274,7 @@ function usage() {
     "<resume|cancel> <run-dir> [--detach] | " +
     "<status|report> <run-dir> [--json] | findings <run-dir> | " +
     "doctor [<contract.json>] [--cwd <dir>] [--discover] [--json] | models [--probe] [--json] | " +
+    "bulk-read --question <text> --paths <a,b,c> [--json] | " +
     "contract validate <contract.json> | " +
     "metrics <campaign-id> [--cwd <dir>] [--json] | " +
     "campaign <init|watch|attach|note|resolve|close|show|list|sync|ack> ...\n",

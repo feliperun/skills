@@ -82,7 +82,7 @@ const CAPABILITY_NAMES = new Set([
 /** Line count above which a whole-file read is denied by the tool policy hook. */
 export const READ_LINE_LIMIT = 1500;
 
-/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, toolPolicy?: ToolPolicy}} CommandOptions */
+/** @typedef {{schema?: object, schemaPath?: string, continuationId?: string|null, toolPolicy?: ToolPolicy, env?: Record<string, string>}} CommandOptions */
 
 /** @typedef {{preferStructured?: boolean, exitCode?: number|null, signal?: string|null, stderr?: string}} NormalizeOptions */
 
@@ -175,7 +175,8 @@ export function resolveVendor(runtime) {
  * Build one provider invocation. Prompt transport is explicit in the result:
  * stdin adapters return `input`, while argv adapters append the prompt. An
  * optional `env` overlay is merged over the runner environment at spawn time;
- * a null value removes the ambient variable.
+ * a null value removes the ambient variable. A caller-supplied `options.env`
+ * merges over the adapter's own overlay here, once, for every harness.
  *
  * @param {HarnessRuntime} runtime
  * @param {string} prompt
@@ -185,6 +186,7 @@ export function resolveVendor(runtime) {
 export function providerCommand(runtime, prompt, options = {}) {
   const harness = getHarness(runtime.harness);
   const command = harness.command(runtime, prompt, options);
+  if (options.env) command.env = { ...command.env, ...options.env };
   if (command.promptTransport === "argv") {
     const limit = runtime.maxArgvPromptBytes ?? harness.capabilities.maxArgvPromptBytes;
     if (typeof limit === "number" && Number.isFinite(limit) && Buffer.byteLength(prompt, "utf8") > limit) {

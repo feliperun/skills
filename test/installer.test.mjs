@@ -30,12 +30,13 @@ test("installs the catalog into .claude/skills by default", () => {
   const cwd = mkdtempSync(join(tmpdir(), "skills-install-"));
   const result = run([], cwd);
   assert.equal(result.status, 0, result.stderr);
-  for (const name of ["intent-factory", "init-agentkit"]) {
+  for (const name of ["intent-factory", "init-agentkit", "bulk-read"]) {
     assert.ok(existsSync(join(cwd, ".claude", "skills", name, "SKILL.md")), `${name} missing`);
   }
   assert.match(result.stdout, /installed intent-factory/);
   assert.match(result.stdout, /installed init-agentkit/);
-  assert.match(result.stdout, /2 installed, 0 skipped/);
+  assert.match(result.stdout, /installed bulk-read/);
+  assert.match(result.stdout, /3 installed, 0 skipped/);
 });
 
 test("installs only named skills", () => {

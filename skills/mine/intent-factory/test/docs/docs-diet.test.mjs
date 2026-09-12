@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const SKILL_BYTE_CEILING = 6144;
 const CONTRACT_BYTE_CEILING = 20480;
 const OPERATIONS_BYTE_CEILING = 10240;
+const BULK_READ_SKILL_BYTE_CEILING = 500;
 
 const skillPath = fileURLToPath(new URL('../../SKILL.md', import.meta.url));
 const referencesDir = fileURLToPath(new URL('../../references', import.meta.url));
@@ -17,6 +18,16 @@ test('SKILL.md stays within the router byte ceiling', () => {
     bytes <= SKILL_BYTE_CEILING,
     `SKILL.md is ${bytes} bytes; the router ceiling is ${SKILL_BYTE_CEILING} bytes. ` +
       'Move detail into skills/mine/intent-factory/references/ and link it from the router.',
+  );
+});
+
+test('skills/mine/bulk-read/SKILL.md stays within the bulk-read byte ceiling', () => {
+  const bytes = statSync(fileURLToPath(new URL('../../../bulk-read/SKILL.md', import.meta.url))).size;
+  assert.ok(bytes > 0, 'skills/mine/bulk-read/SKILL.md must not be empty');
+  assert.ok(
+    bytes <= BULK_READ_SKILL_BYTE_CEILING,
+    `skills/mine/bulk-read/SKILL.md is ${bytes} bytes; the bulk-read ceiling is ${BULK_READ_SKILL_BYTE_CEILING} bytes. ` +
+      'The skill is a command and two sentences, not a manual.',
   );
 });
 
