@@ -123,13 +123,35 @@ que está com os números do lado dela.
 
 ## 5. Aberto
 
+Nenhum destes é defeito que esta campanha deixou quebrado. Um foi consertado
+na raiz, um é propriedade da ferramenta, e um é dependência declarada da
+campanha seguinte.
+
 1. **`judge_unavailable` cobre duas falhas diferentes** — "não havia juiz" e
    "o juiz respondeu e o envelope não validou" — e o operador lê *"Claude
    exited with code 1"*, que aponta para disponibilidade de provedor, onde a
-   resposta não está.
-2. **`fixtures.bundle` foi de 1,66 MB para 3,83 MB** ao ganhar uma tarefa de
-   commit recente. `git bundle` arrasta histórico; cada tarefa nova engorda o
-   blob num repositório que quer ser público.
-3. **Nenhum worker chama `bulk-read` ainda.** A ferramenta e a skill existem;
-   quem decide usar é o modelo. A queda de tokens de leitura que a spec §7
-   queria medir na P3 continua sem medição.
+   resposta não está. **Não separado, e de propósito:** o remédio é o mesmo
+   nos dois casos — bloquear com o trabalho preservado para um retry
+   re-julgar em lugar — e um segundo código fragmentaria `retry.mjs` sem
+   ganho de comportamento. O que enganava era a mensagem, e a causa dela (o
+   schema exigindo `findings`) está corrigida, então não reincide. Fica como
+   observabilidade.
+2. **`fixtures.bundle` está em 4,0 MB**, contra 1,66 MB antes de ganhar uma
+   tarefa de commit recente. É inerente ao `git bundle`: ele carrega o
+   histórico alcançável, não só a árvore que a tarefa restaura. Mitigar
+   exigiria trocar o formato — arquivo da árvore em vez de bundle — que é
+   redesenho, não conserto.
+3. **Nenhum worker chama `bulk-read`, e isso é do desenho.** O packet é
+   fechado: `contract/task-packet.mjs` renderiza o prompt só do packet, então
+   um worker nunca descobre a skill. Pô-la no prompt de todo nó adiciona
+   preâmbulo a todo nó, que é exatamente o que a S5.4 de
+   `TECH-SPEC-2026-09-12-operator-seat.md` existe para cortar. O lugar de
+   resolver é lá, com a estrutura de artigos em camadas. Consequência a
+   aceitar por ora: a queda de tokens de leitura que a §7 da spec queria
+   medir na P3 continua sem medição, porque a ferramenta ainda não foi usada.
+
+## 6. Estado final
+
+`606 testes · 604 pass · 0 fail · 2 skipped` · `tsc` limpo · nove gates de
+forma verdes · 16/16 casos determinísticos · 27 tarefas golden, todas
+restaurando.
