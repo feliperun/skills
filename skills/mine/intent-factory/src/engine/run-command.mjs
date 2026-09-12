@@ -14,6 +14,7 @@ import { Buffer } from "node:buffer";
 import { VERIFICATION_LIMITS, compactVerification, resolveVerificationCwd, validateVerificationCommands } from "../contract/verification.mjs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { runMutation } from "./mutation.mjs";
 import { spawn } from "node:child_process";
 /** @typedef {import("../contract/verification.mjs").VerificationOptions} VerificationOptions */
 
@@ -72,13 +73,9 @@ export async function runVerification(commands, baseCwd, options = {}) {
   /** @type {VerificationCommandResult[]} */
   const results = [];
   for (const [commandIndex, command] of validated.entries()) {
-    /** @type {VerificationAttemptResult[]} */
-    const attempts = [];
-    const repeat = command.repeat ?? 1;
-    for (let attempt = 1; attempt <= repeat; attempt += 1) {
-      attempts.push(await runCommand(command, baseCwd, command.cwd ?? ".", attempt, options.signal, options, commandIndex));
-    }
-    const result = { ...command, cwd: resolveVerificationCwd(baseCwd, command.cwd ?? "."), passed: attempts.every((item) => item.passed), attempts };
+    const result = command.mutation
+      ? await runMutationCommand(command, baseCwd, commandIndex, options)
+      : await runRepeatedCommand(command, baseCwd, commandIndex, options);
     results.push(result);
     if (options.logDir) {
       mkdirSync(options.logDir, { recursive: true });
@@ -86,6 +83,42 @@ export async function runVerification(commands, baseCwd, options = {}) {
     }
   }
   return { passed: results.every((result) => result.passed), commands: results };
+}
+/**
+ * The ordinary case: run the argv `repeat` times and pass when every attempt does.
+ *
+ * @param {VerificationCommand} command
+ * @param {string} baseCwd
+ * @param {number} commandIndex
+ * @param {VerificationOptions} options
+ * @returns {Promise<VerificationCommandResult>}
+ */
+async function runRepeatedCommand(command, baseCwd, commandIndex, options) {
+  /** @type {VerificationAttemptResult[]} */
+  const attempts = [];
+  const repeat = command.repeat ?? 1;
+  for (let attempt = 1; attempt <= repeat; attempt += 1) {
+    attempts.push(await runCommand(command, baseCwd, command.cwd ?? ".", attempt, options.signal, options, commandIndex));
+  }
+  return { ...command, cwd: resolveVerificationCwd(baseCwd, command.cwd ?? "."), passed: attempts.every((item) => item.passed), attempts };
+}
+/**
+ * The mutation case: the entry passes on the mutant-kill fraction, and every
+ * attempt is a real run of the same argv against one broken file.
+ *
+ * @param {VerificationCommand} command
+ * @param {string} baseCwd
+ * @param {number} commandIndex
+ * @param {VerificationOptions} options
+ * @returns {Promise<VerificationCommandResult>}
+ */
+async function runMutationCommand(command, baseCwd, commandIndex, options) {
+  const commandCwd = command.cwd ?? ".";
+  const outcome = await runMutation(command, baseCwd, {
+    writeFiles: options.writeFiles ?? [],
+    run: (attempt) => runCommand(command, baseCwd, commandCwd, attempt, options.signal, options, commandIndex),
+  });
+  return { ...command, cwd: resolveVerificationCwd(baseCwd, commandCwd), passed: outcome.passed, attempts: outcome.attempts };
 }
 /**
  * @param {VerificationCommand} command
