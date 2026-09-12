@@ -14,31 +14,43 @@ nó. Toda afirmação aqui saiu de um comando; onde não saiu, está dito.
 
 ## 1. Delta medido contra `evals/baseline.json`
 
+Os dois lados desta tabela foram recalculados com a mesma definição, depois
+de duas correções que a própria campanha provocou (§1.1).
+
 | Indicador | Antes | Depois | Melhora é |
 |---|---|---|---|
-| `costPerClosedCheckpoint` | 6,1839 (n=7) | **0,7377** (n=5) | ↓ |
-| `wallClockPerClosedCheckpoint` | 1851,1 s (n=7) | **1008,5 s** (n=5) | ↓ |
-| `revisionsPerDone` | 0,2857 | **0,2** | ↓ |
-| `firstPassGateRate` | 3/8 | **3/6** | ↑ |
-| `blockedContextRate` | 0 (n=7) | **0,1667** (n=6) | ↓ — **regrediu** |
+| `costPerClosedCheckpoint` | 5,5908 (n=9) | **1,2295** (n=3) | ↓ |
+| `wallClockPerClosedCheckpoint` | 1688,2 s (n=9) | **1008,5 s** (n=5) | ↓ |
+| `revisionsPerDone` | 0,3333 (n=9) | **0,2** (n=5) | ↓ |
+| `firstPassGateRate` | 3/9 | **3/6** | ↑ |
+| `blockedContextRate` | 0 (n=9) | **0,1667** (n=6) | ↓ — **regrediu** |
 | `judgeInvocationRate` | 1 | 1 | ↑ |
-| `protocolFailureRate` | 0 (n=19) | 0 (n=19) | ↓ |
+| `protocolFailureRate` | 0 (n=23) | 0 (n=19) | ↓ |
 | `providerFailoverRate` | 0 | 0 | ↓ |
 
-**A queda de custo é parcialmente falsa, e isso importa mais que a queda.**
-`evals/metrics.mjs` soma no numerador só os registros com
-`costProvenance != unknown`, e divide por *todo* checkpoint fechado. `dsh`,
-`zcode` e `codex` com conta ChatGPT não reportam custo: 15 dos 19 registros
-desta campanha entraram como zero. O indicador ainda publica `count` =
-checkpoints fechados, não registros custeados, então o leitor não tem como
-perceber. **O indicador premia rotear gasto para quem não reporta.** É a
-mesma classe de erro que a §1 da spec já tinha identificado: somar bytes de
-arquivo não mede contexto.
-
-O número honesto é o da campanha: `usageCostUsd` 3,69 · **15 unknown**.
+O `n=3` do custo é a informação nova: a campanha fechou seis checkpoints e só
+três tiveram custo reportado por um provedor. `usageCostUsd` da campanha:
+**3,69 · 15 unknown**.
 
 `blockedContextRate` regrediu por um nó, `bulk-read`, e as duas causas estão
 na §3.
+
+### 1.1 Duas correções na própria medição
+
+**`costPerClosedCheckpoint` premiava o silêncio.** O numerador somava só
+registros com `costProvenance != unknown`; o denominador era *todo* checkpoint
+fechado. `dsh`, `zcode` e `codex` com conta ChatGPT não reportam custo, então
+qualquer movimento de trabalho na direção deles fazia o indicador cair sem
+economia nenhuma provada. Sob a definição velha esta campanha reportaria
+**0,7377**, que era a conta de uma fase dividida por três. Agora divide pelos
+checkpoints efetivamente medidos, e publica esse número como `count`.
+
+**O baseline tinha sido tirado antes da própria campanha terminar.** Os cinco
+run dirs de `intent-factory-measurement-20260910` guardam nove checkpoints
+fechados; o arquivo gravava sete, e não trazia o nó `golden-set`. Toda
+comparação feita contra ele desde 2026-09-10 media contra uma campanha
+parcial. Recalculado dos mesmos cinco run dirs, com o motivo no
+`provenance.note`.
 
 ## 2. O que fechou
 
@@ -111,16 +123,13 @@ que está com os números do lado dela.
 
 ## 5. Aberto
 
-1. **`costPerClosedCheckpoint` mede errado.** Publicar o `count` custeado, ou
-   carregar `unknownCostRecords` ao lado, para a comparação não premiar em
-   silêncio mover gasto para quem não reporta.
-2. **`judge_unavailable` cobre duas falhas diferentes** — "não havia juiz" e
+1. **`judge_unavailable` cobre duas falhas diferentes** — "não havia juiz" e
    "o juiz respondeu e o envelope não validou" — e o operador lê *"Claude
    exited with code 1"*, que aponta para disponibilidade de provedor, onde a
    resposta não está.
-3. **`fixtures.bundle` foi de 1,66 MB para 3,83 MB** ao ganhar uma tarefa de
+2. **`fixtures.bundle` foi de 1,66 MB para 3,83 MB** ao ganhar uma tarefa de
    commit recente. `git bundle` arrasta histórico; cada tarefa nova engorda o
    blob num repositório que quer ser público.
-4. **Nenhum worker chama `bulk-read` ainda.** A ferramenta e a skill existem;
+3. **Nenhum worker chama `bulk-read` ainda.** A ferramenta e a skill existem;
    quem decide usar é o modelo. A queda de tokens de leitura que a spec §7
    queria medir na P3 continua sem medição.

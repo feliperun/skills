@@ -64,6 +64,8 @@ export function projectEvalIndicators({ events = [], usageRecords = [] } = {}) {
   const closedCheckpoints = new Set([...terminalByNode].filter(([, event]) => EVAL_DONE_STATUSES.has(/** @type {string} */ (event.to))).map(([node]) => node));
 
   const cost = evalUsageCostOf(usageList);
+  // Only the closed checkpoints whose cost a provider actually reported.
+  const costedCheckpoints = new Set([...closedCheckpoints].filter((node) => cost.nodeIds.has(node)));
   const gates = evalFirstPassGateRateOf(byNode);
   const judgedNodes = evalJudgeInvocationNodeIdsOf(usageList);
   const judgedClosed = [...closedCheckpoints].filter((node) => judgedNodes.has(node)).length;
@@ -75,7 +77,7 @@ export function projectEvalIndicators({ events = [], usageRecords = [] } = {}) {
   const protocolFailures = eventList.filter((event) => event.error === PROTOCOL_FAILURE_ERROR).length;
 
   return {
-    costPerClosedCheckpoint: evalMeasured("down", closedCheckpoints.size, closedCheckpoints.size === 0 || cost.count === 0 ? null : cost.total / closedCheckpoints.size),
+    costPerClosedCheckpoint: evalMeasured("down", costedCheckpoints.size, costedCheckpoints.size === 0 ? null : cost.total / costedCheckpoints.size),
     firstPassGateRate: evalGrouped("up", gates.count, gates.value),
     judgeInvocationRate: evalMeasured("up", closedCheckpoints.size, closedCheckpoints.size === 0 ? null : judgedClosed / closedCheckpoints.size),
     revisionsPerDone: evalMeasured("down", closedCheckpoints.size, closedCheckpoints.size === 0 ? null : revisionsSum / closedCheckpoints.size),
@@ -164,21 +166,34 @@ function evalRevisionsOf(terminalEvent) {
 /**
  * Total cost across every usage record whose provenance is not `unknown`
  * (`appendUsageRecord` sets `unknown` exactly when the provider reported no
- * cost); every other record's invocation happened but contributes no cost.
+ * cost), plus the node ids those costed records belong to.
+ *
+ * The node set is the point. Dividing this total by *every* closed checkpoint
+ * treats a node that ran on a provider reporting no cost as a free node, so
+ * the indicator falls whenever work moves to `dsh`, `zcode`, or `codex` on a
+ * ChatGPT account -- it rewards routing spend to whoever stays quiet about
+ * it. In `interception-and-backlog-20260912`, 15 of 19 records were unknown
+ * and the reported 0.7377 was really one phase's bill spread over three.
+ * Divide by the checkpoints that were actually measured instead, and publish
+ * that as the `count` so the reader can see how much of the campaign the
+ * number covers.
  *
  * @param {JsonObject[]} usageRecords
- * @returns {{total: number, count: number}}
+ * @returns {{total: number, count: number, nodeIds: Set<string>}}
  */
 function evalUsageCostOf(usageRecords) {
   let total = 0;
   let count = 0;
+  /** @type {Set<string>} */
+  const nodeIds = new Set();
   for (const record of usageRecords) {
     if (typeof record.costUsd === "number" && Number.isFinite(record.costUsd) && record.costProvenance !== EVAL_UNKNOWN_COST_PROVENANCE) {
       total += record.costUsd;
       count += 1;
+      if (typeof record.nodeId === "string" && record.nodeId) nodeIds.add(record.nodeId);
     }
   }
-  return { total, count };
+  return { total, count, nodeIds };
 }
 
 /**

@@ -59,6 +59,26 @@ test("evals costPerClosedCheckpoint divides known-provenance cost by closed chec
   assert.deepEqual(report.costPerClosedCheckpoint, { value: 4, direction: "down", count: 1 });
 });
 
+test("evals costPerClosedCheckpoint ignores a checkpoint whose provider reported no cost", () => {
+  // Two checkpoints close; only one runs on a provider that reports cost.
+  // Dividing by both would publish 2 and call the free-looking node a saving,
+  // which is how any move toward dsh, zcode, or codex-on-ChatGPT used to make
+  // the indicator fall without a dollar changing hands. The measured answer
+  // is 4 over the one checkpoint that was measured, and `count` says so.
+  const events = [
+    { node: "build", from: "pending", to: "running", phase: "worker", runtime: "sonnet", at: at(0) },
+    { node: "build", from: "running", to: "done", phase: "complete", runtime: "sonnet", at: at(1) },
+    { node: "ship", from: "pending", to: "running", phase: "worker", runtime: "deepseek", at: at(1) },
+    { node: "ship", from: "running", to: "done", phase: "complete", runtime: "deepseek", at: at(2) },
+  ];
+  const usageRecords = [
+    { nodeId: "build", role: "worker", runtimeId: "sonnet", costUsd: 4, costProvenance: "provider" },
+    { nodeId: "ship", role: "worker", runtimeId: "deepseek", costUsd: 0, costProvenance: "unknown" },
+  ];
+  const report = projectEvalIndicators({ events, usageRecords });
+  assert.deepEqual(report.costPerClosedCheckpoint, { value: 4, direction: "down", count: 1 });
+});
+
 test("evals firstPassGateRate groups by taskKind (the node id) and keys off the first recorded verdict", () => {
   const events = [
     { node: "build", from: "pending", to: "running", phase: "worker", runtime: "sonnet", at: at(0) },
