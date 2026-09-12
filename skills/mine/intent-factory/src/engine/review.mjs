@@ -21,14 +21,13 @@ import {
 } from "../contract/review-modes.mjs";
 import { verificationFailureWithScope } from "../contract/scope-findings.mjs";
 import {
-  appendTransitionEvent,
   raiseNodeAttention,
   settleDone,
   startJudge,
   startWorker,
-  transition,
 } from "./node.mjs";
 import { errorMessage, excerpt } from "../util.mjs";
+import { appendTransitionEvent, transition } from "./state.mjs";
 
 /** @typedef {import("../contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("../contract/index.mjs").ValidatedNode} ValidatedNode */

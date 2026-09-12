@@ -9,13 +9,12 @@ import { renderFindings, renderReport, renderStatus, validateContract } from "..
 import { INTENT_FACTORY_VERSION } from "../src/contract/index.mjs";
 import { renderStatusJson } from "../src/report/render.mjs";
 import { runContract, resumeRun } from "../src/cli.mjs";
-import { invocationAlive } from "../src/engine/node.mjs";
+
 import { processStartToken } from "../src/run/lock.mjs";
 import { bootstrapAckPath, bootstrapAttemptPath, bootstrapPath, cleanupBootstrapAttempts, writeJsonAtomic } from "../src/run/store.mjs";
 import { delay, fakeCodex, fixture, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withAdvisoryGateCodex, withBrokenGateCodex, RUNNER_CLI } from "./runner-helpers.mjs";
-
-
+import { invocationAlive } from "../src/engine/process.mjs";
 
 test("runs the CLI through an installed symlink", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-symlink-"));
@@ -31,7 +30,6 @@ test("runs the CLI through an installed symlink", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "valid\n");
 });
-
 
 test("doctor checks repository prerequisites without mutating anything", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-"));
@@ -55,7 +53,6 @@ test("doctor checks repository prerequisites without mutating anything", () => {
   assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
 });
 
-
 test("doctor reports an unborn repository as a failing git check", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-unborn-"));
   execFileSync("git", ["init", "-q", directory]);
@@ -70,7 +67,6 @@ test("doctor reports an unborn repository as a failing git check", () => {
   assert.match(gitCheck.detail, /at least one commit/u);
   assert.equal(readdirSync(directory).sort().join(","), ".git,.gitignore", "doctor creates no run state");
 });
-
 
 test("doctor does not fail a harness resolved through an explicit executable", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-doctor-override-"));
@@ -104,7 +100,6 @@ test("doctor does not fail a harness resolved through an explicit executable", (
   assert.match(binaryCheck.detail, /override/u);
 });
 
-
 test("status --json and report --json emit stable machine-readable output", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-json-status-"));
   const path = writeContract(directory, fixture({
@@ -129,7 +124,6 @@ test("status --json and report --json emit stable machine-readable output", asyn
   assert.equal(reportPayload.nodes[0].revisions, 0);
 });
 
-
 test("incident freeze rejects resume mutations while status and report remain readable", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-incident-freeze-"));
   const path = writeContract(directory, fixture({ id: "incident-freeze-run", pollIntervalMs: 10 }));
@@ -147,7 +141,6 @@ test("incident freeze rejects resume mutations while status and report remain re
   }
 });
 
-
 test("cancel subcommand terminates a stale running node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-cancel-cli-"));
   const path = writeContract(directory, fixture({
@@ -164,7 +157,6 @@ test("cancel subcommand terminates a stale running node", async () => {
   assert.equal(node.status, "canceled");
   assert.equal(readFileSync(join(runDir, "cancel.request.json"), "utf8").length > 0, true);
 });
-
 
 test("run --detach leaves a controller that outlives the invoker and completes the run", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-detach-"));
@@ -209,7 +201,6 @@ test("run --detach leaves a controller that outlives the invoker and completes t
   }
 });
 
-
 test("resume --detach restarts a failed node through a detached controller", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-detach-resume-"));
   const contractPath = writeContract(directory, fixture({
@@ -231,7 +222,6 @@ test("resume --detach restarts a failed node through a detached controller", asy
   assert.equal(await waitForValue(() => (readStatus(nodePath) === "done" ? "done" : null), 20_000), "done");
 });
 
-
 test("status separates a live running node from an orphaned one", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-orphan-"));
   const path = writeContract(directory, fixture({ id: "orphan-run", pollIntervalMs: 10 }));
@@ -250,7 +240,6 @@ test("status separates a live running node from an orphaned one", async () => {
   assert.match(renderStatus(runDir), /build still claims to be running/u);
 });
 
-
 test("status --json flags an orphaned running node with controller state none", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-orphan-json-"));
   const path = writeContract(directory, fixture({ id: "orphan-json-run", pollIntervalMs: 10 }));
@@ -261,7 +250,6 @@ test("status --json flags an orphaned running node with controller state none", 
   assert.equal(payload.controller.state, "none", "a missing controller lock while a node claims running must be machine-readable");
   assert.equal(payload.nodes.find((node) => node.id === "build")?.status, "running");
 });
-
 
 test("status and resume reject unknown persisted protocol fields", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-persisted-validation-"));
@@ -286,7 +274,6 @@ test("status and resume reject unknown persisted protocol fields", async () => {
   await assert.rejects(() => resumeRun(runDir), /run metadata has unexpected field typo/u);
 });
 
-
 test("report aggregates per-node status, attempts, revisions, and tokens", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-report-"));
   const path = writeContract(directory, fixture({
@@ -301,7 +288,6 @@ test("report aggregates per-node status, attempts, revisions, and tokens", async
   assert.match(report, /build\s+done\s+1\s+0\s+codex\/gpt-5\.6-sol/u);
   assert.match(report, /totals · in 20 · out 4 · cache -/u);
 });
-
 
 test("events record attempt, runtime, and gate verdict", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-events-"));
@@ -327,7 +313,6 @@ test("events record attempt, runtime, and gate verdict", async () => {
   assert.equal(rejected.error, "revision_cap");
   assert.equal(rejected.phase, "judge");
 });
-
 
 test("runner notifies node.terminal and run.terminal only, never a running node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-progress-emission-"));
@@ -360,7 +345,6 @@ test("runner notifies node.terminal and run.terminal only, never a running node"
   assert.equal(receipts[1].summary, "run progress-emission-run done · 1/1 nodes");
   assert.deepEqual([receipts[1].done, receipts[1].total], [1, 1]);
 });
-
 
 test("idle polls emit no notification, and resume never re-notifies an already-terminal node", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-progress-idle-"));
@@ -401,7 +385,6 @@ test("idle polls emit no notification, and resume never re-notifies an already-t
   }
 });
 
-
 test("a finished run prints the token report", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-auto-report-"));
   const path = writeContract(directory, fixture({ pollIntervalMs: 10 }));
@@ -411,7 +394,6 @@ test("a finished run prints the token report", async () => {
   assert.match(result.stdout, /totals · in 10/u, "auto-report table");
   assert.match(result.stdout, /worker complete/u, "node note surfaces the worker summary");
 });
-
 
 test("ordinary runs deliver bounded node and run terminal notifications", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-run-notifications-"));
@@ -449,7 +431,6 @@ test("run warns when a node id is already done in another run", async () => {
   assert.match(result.stdout, /\[warn\] node build is already done in run first-run/u);
 });
 
-
 test("run warnings ignore an unrelated historical run with an obsolete contract", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-rerun-obsolete-"));
   const currentPath = writeContract(directory, fixture({ id: "current-run", pollIntervalMs: 10 }));
@@ -465,7 +446,6 @@ test("run warnings ignore an unrelated historical run with an obsolete contract"
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /obsolete-run/u);
 });
-
 
 test("run warnings ignore a historical snapshot from an older capability schema", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-rerun-old-snapshot-"));
@@ -485,8 +465,6 @@ test("run warnings ignore a historical snapshot from an older capability schema"
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /old-run/u);
 });
-
-
 
 test("detached resume surfaces bootstrap failure before reporting success", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-bootstrap-failure-"));
@@ -511,7 +489,6 @@ test("detached resume surfaces bootstrap failure before reporting success", asyn
   assert.deepEqual(readdirSync(runDir).filter((name) => name.startsWith("bootstrap.json.")), [], "failed detached attempts are cleaned up");
 });
 
-
 test("bootstrap attempt cleanup leaves concurrent failure temp writes intact", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-bootstrap-cleanup-race-"));
   const path = writeContract(directory, fixture({ id: "bootstrap-cleanup-race-run", pollIntervalMs: 10 }));
@@ -526,7 +503,6 @@ test("bootstrap attempt cleanup leaves concurrent failure temp writes intact", a
   renameSync(temporary, bootstrapPath(runDir));
   assert.equal(JSON.parse(readFileSync(bootstrapPath(runDir), "utf8")).status, "failed");
 });
-
 
 test("detached ACK timeout and parse errors clean only their nonce attempt and ACK", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-bootstrap-ack-cleanup-"));
@@ -553,7 +529,6 @@ test("detached ACK timeout and parse errors clean only their nonce attempt and A
   assert.equal(existsSync(join(runDir, `bootstrap.json.${timeoutNonce}`)), false);
   assert.equal(existsSync(bootstrapAckPath(runDir, timeoutNonce)), false);
 });
-
 
 test("a single-node contract validates without warning and contract prune is gone", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-single-node-"));

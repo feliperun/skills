@@ -6,13 +6,12 @@ import { basename, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cancelRun, runContract, resumeRun } from "../src/cli.mjs";
-import { invocationAlive } from "../src/engine/node.mjs";
+
 import { processStartToken } from "../src/run/lock.mjs";
 import { captureWorkspaceSnapshot } from "../src/contract/verification.mjs";
 import { closeResult, ensureAttemptWorktree, fakeCodex, fixture, initializeGit, orphan, packet, readStatus, waitForValue, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, childPid, withCitedGateCodex, withAdvisoryGateCodex } from "./runner-helpers.mjs";
-
-
+import { invocationAlive } from "../src/engine/process.mjs";
 
 test("resume adopts an orphaned worker result instead of repeating the work", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-"));
@@ -29,7 +28,6 @@ test("resume adopts an orphaned worker result instead of repeating the work", as
   assert.equal(nodeState(resumed).attempt, 1);
 });
 
-
 test("resume refuses a harness that was known but is now unavailable", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-harness-drift-"));
   const path = writeContract(directory, fixture({ id: "resume-harness-drift-run", pollIntervalMs: 10 }));
@@ -40,7 +38,6 @@ test("resume refuses a harness that was known but is now unavailable", async () 
     /harness probe unavailable for luna; resume refused/u,
   );
 });
-
 
 test("resume permits worker edits only to packet write files", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-write-boundary-"));
@@ -59,7 +56,6 @@ test("resume permits worker edits only to packet write files", async () => {
   const resumed = await withFakeCodex(directory, "worker-fail", () => resumeRun(runDir));
   assert.equal(nodeState(resumed).status, "done");
 });
-
 
 test("resume accepts allowed changes reached through an autonomous symlink root", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-symlink-root-"));
@@ -82,7 +78,6 @@ test("resume accepts allowed changes reached through an autonomous symlink root"
   assert.equal(nodeState(resumed).status, "done");
   assert.equal(nodeState(resumed).attempt, 1);
 });
-
 
 test("resume source identity uses the pre-execution symlink boundary", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-scope-boundary-"));
@@ -126,7 +121,6 @@ test("resume source identity uses the pre-execution symlink boundary", async () 
   assert.equal(resumed.ok, false, "the orphaned attempt still fails instead of passing silently");
 });
 
-
 test("resume fails closed when the persisted scope boundary is missing", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-missing-scope-boundary-"));
   const path = writeContract(directory, fixture({ id: "resume-missing-scope-boundary-run", pollIntervalMs: 10 }));
@@ -140,7 +134,6 @@ test("resume fails closed when the persisted scope boundary is missing", async (
     /persisted worker scope boundary|scope boundary/u,
   );
 });
-
 
 test("resume refuses a head that is not a descendant of the recorded one", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-unexpected-drift-"));
@@ -167,7 +160,6 @@ test("resume refuses a head that is not a descendant of the recorded one", async
   );
 });
 
-
 test("resume adopts a completed orphan judge without running it twice", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-gate-"));
   const path = writeContract(directory, fixture({
@@ -186,7 +178,6 @@ test("resume adopts a completed orphan judge without running it twice", async ()
   assert.equal(state.gate.summary, "minor advisory");
   assert.equal(existsSync(join(runDir, "logs", "build.1.judge.r2.jsonl")), false, "a completed judge must be adopted once");
 });
-
 
 test("invalid orphan judge output is rejudged without charging worker usage twice", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-invalid-judge-"));
@@ -218,7 +209,6 @@ test("invalid orphan judge output is rejudged without charging worker usage twic
   assert.equal(finalAgain.usage.inputTokens, 30, "a second resume does not charge the orphan judge again");
 });
 
-
 test("resume restarts a node with no usable worker output", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-restart-"));
   const path = writeContract(directory, fixture({ id: "resume-restart-run", pollIntervalMs: 10 }));
@@ -228,7 +218,6 @@ test("resume restarts a node with no usable worker output", async () => {
   assert.equal(nodeState(resumed).status, "done");
   assert.equal(nodeState(resumed).attempt, 2);
 });
-
 
 test("simultaneous resumes allow one controller and reject the other", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-concurrent-resume-"));
@@ -273,7 +262,6 @@ test("simultaneous resumes allow one controller and reject the other", async () 
     try { first.kill("SIGKILL"); } catch {}
   }
 });
-
 
 test("cancelRun confirms controller death and terminates every recorded provider", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-cancel-confirmation-"));
@@ -364,7 +352,6 @@ test("cancelRun confirms controller death and terminates every recorded provider
   }
 });
 
-
 test("resume adopts a still-live orphan invocation after its stream completes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-live-orphan-"));
   const path = writeContract(directory, fixture({ id: "live-orphan-run", pollIntervalMs: 10 }));
@@ -437,7 +424,6 @@ test("resume adopts a still-live orphan invocation after its stream completes", 
   }
 });
 
-
 test("resume terminates an interrupted verification attempt and re-runs the phase", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-verification-resume-"));
   const path = writeContract(directory, fixture({ id: "verification-resume-run", pollIntervalMs: 10 }));
@@ -487,7 +473,6 @@ test("resume terminates an interrupted verification attempt and re-runs the phas
   }
 });
 
-
 test("verification output beyond the snapshot budget does not crash the controller", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-verification-large-"));
   const path = writeContract(directory, fixture({
@@ -511,7 +496,6 @@ test("verification output beyond the snapshot budget does not crash the controll
   assert.ok(Buffer.byteLength(boundedAttempt.result.stdout, "utf8") <= 2 * 1024);
   assert.ok(Buffer.byteLength(boundedAttempt.result.stderr, "utf8") <= 2 * 1024);
 });
-
 
 test("resume rejects a dead completion whose persisted close time is past the absolute deadline", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-deadline-"));
@@ -541,7 +525,6 @@ test("resume rejects a dead completion whose persisted close time is past the ab
   assert.equal(final.status, "done");
   assert.equal(final.attempt, 2, "an overdue completion is restarted rather than adopted");
 });
-
 
 test("resume adopts a dead completion closed before its deadline after downtime", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-downtime-"));
@@ -575,7 +558,6 @@ test("resume adopts a dead completion closed before its deadline after downtime"
   assert.equal(final.usage.inputTokens, 10);
 });
 
-
 test("resume preserves a durable pending judge phase instead of resetting to worker", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-pending-judge-"));
   const path = writeContract(directory, fixture({
@@ -602,7 +584,6 @@ test("resume preserves a durable pending judge phase instead of resetting to wor
   assert.equal(final.attempt, 1, "the pending judge does not repeat the worker attempt");
 });
 
-
 test("resume gives a never-started pending node zero usage", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-never-started-"));
   const path = writeContract(directory, fixture({ id: "resume-never-started-run", pollIntervalMs: 10 }));
@@ -627,7 +608,6 @@ test("resume gives a never-started pending node zero usage", async () => {
   assert.deepEqual(nodeState(resumed).usage, { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0 });
 });
 
-
 test("resume does not re-enable a disabled gate from the stored contract", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-no-gate-"));
   const path = writeContract(directory, fixture({ id: "resume-no-gate-run", pollIntervalMs: 10 }));
@@ -639,7 +619,6 @@ test("resume does not re-enable a disabled gate from the stored contract", async
   const logs = readdirSync(join(runDir, "logs"));
   assert.ok(!logs.some((name) => name.includes("judge")), "a disabled gate must not run a judge after resume");
 });
-
 
 test("gate revisions are not consumed by attempts burned in restarts", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-revisions-"));

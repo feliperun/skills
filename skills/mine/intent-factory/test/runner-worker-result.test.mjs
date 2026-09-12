@@ -4,11 +4,10 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runContract, resumeRun } from "../src/cli.mjs";
-import { invocationResult } from "../src/engine/node.mjs";
+
 import { fakeCodex, fixture, orphan, packet, withFakeCodex, writeContract } from "./helpers.mjs";
 import { nodeState, notifications, withResultFileCodex, withAdvisoryGateCodex } from "./runner-helpers.mjs";
-
-
+import { invocationResult } from "../src/engine/process.mjs";
 
 test("runs a worker and treats minor judge findings as advisory", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-run-"));
@@ -28,7 +27,6 @@ test("runs a worker and treats minor judge findings as advisory", async () => {
   assert.equal(nodeState(result).status, "done");
   assert.match(readFileSync(join(result.runDir, "STATUS.md"), "utf8"), /minor advisory/u);
 });
-
 
 test("runs a full contract through the generic exec-jsonl harness end to end", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-jsonl-run-"));
@@ -86,7 +84,6 @@ process.stdin.on("end", () => {
   assert.equal(existsSync(join(result.runDir, "logs", "build.1.judge.jsonl")), true, "judge protocol events are persisted");
 });
 
-
 test("blocks a structured blocked_context worker result without invoking a judge", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-blocked-context-"));
   const path = writeContract(directory, fixture({
@@ -104,7 +101,6 @@ test("blocks a structured blocked_context worker result without invoking a judge
   assert.equal(artifact.nodes[0].error.code, "context_missing");
   assert.deepEqual(artifact.nodes[0].missingContext, ["missing.txt"]);
 });
-
 
 test("discovery blocked_context maps to the blocked terminal state, not an invalid-result retry", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-discovery-blocked-context-"));
@@ -129,7 +125,6 @@ test("discovery blocked_context maps to the blocked terminal state, not an inval
   assert.ok(!readdirSync(join(result.runDir, "logs")).some((name) => name.includes("judge")));
 });
 
-
 test("resume preserves a terminal blocked_context node without re-running or judging it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-blocked-context-"));
   const path = writeContract(directory, fixture({
@@ -150,7 +145,6 @@ test("resume preserves a terminal blocked_context node without re-running or jud
   assert.ok(!readdirSync(join(resumed.runDir, "logs")).some((name) => name.includes("judge")));
 });
 
-
 test("worker result with prose before the JSON still parses", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-prose-json-"));
   const path = writeContract(directory, fixture({
@@ -169,7 +163,6 @@ test("worker result with prose before the JSON still parses", async () => {
   );
 });
 
-
 test("canonical worker result file wins over the redundant provider message", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-result-file-first-"));
   const path = writeContract(directory, fixture({
@@ -182,7 +175,6 @@ test("canonical worker result file wins over the redundant provider message", as
   assert.equal(state.status, "done");
   assert.equal(/** @type {{summary: string}} */ (state.result).summary, "from file", "the run-owned file is authoritative over the final message");
 });
-
 
 test("result-only materialization rejects workspace mutation outside its authority", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-result-mutates-"));
@@ -198,7 +190,6 @@ test("result-only materialization rejects workspace mutation outside its authori
   assert.match(state.error?.message ?? "", /result materialization changed workspace paths/u);
   assert.equal((state.invocations ?? []).length, 2, "exactly one result-only continuation ran");
 });
-
 
 test("resume adoption treats the canonical result file as primary evidence", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-file-first-"));
@@ -222,7 +213,6 @@ test("resume adoption treats the canonical result file as primary evidence", asy
   assert.equal(/** @type {{summary: string}} */ (nodeState(resumed).result).summary, "from canonical file");
   assert.equal(nodeState(resumed).attempt, 1);
 });
-
 
 test("resume adoption follows the canonical file when the provider stream is gone", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-file-only-"));
@@ -249,7 +239,6 @@ test("resume adoption follows the canonical file when the provider stream is gon
   assert.equal(nodeState(resumed).attempt, 1);
 });
 
-
 test("resume judge recovery surfaces an invalid canonical result file", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-judge-invalid-file-"));
   const path = writeContract(directory, fixture({
@@ -272,7 +261,6 @@ test("resume judge recovery surfaces an invalid canonical result file", async ()
   assert.equal((state.invocations ?? []).length, 3, "the revision retried the worker exactly once");
 });
 
-
 test("resume of an interrupted result materialization adopts the file with strict scope", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-"));
   const path = writeContract(directory, fixture({
@@ -293,7 +281,6 @@ test("resume of an interrupted result materialization adopts the file with stric
   assert.equal((state.invocations ?? []).length, 2, "recovery schedules no fresh worker");
   assert.equal(state.attempt, 1);
 });
-
 
 test("resume of an interrupted result materialization rejects declared-path mutation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-mutation-"));
@@ -318,7 +305,6 @@ test("resume of an interrupted result materialization rejects declared-path muta
   assert.match(state.error?.message ?? "", /result materialization changed workspace paths/u);
 });
 
-
 test("resume of a resultless materialization turn fails terminally instead of rerunning the worker", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-resume-materialized-noop-"));
   const path = writeContract(directory, fixture({
@@ -341,7 +327,6 @@ test("resume of a resultless materialization turn fails terminally instead of re
   assert.equal(state.attempt, 1);
 });
 
-
 test("a gate revision clears the stale canonical result file", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-result-regrind-"));
   const path = writeContract(directory, fixture({
@@ -360,7 +345,6 @@ test("a gate revision clears the stale canonical result file", async () => {
   );
 });
 
-
 test("invalid worker result consumes a bounded revision before failing terminally", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-invalid-result-"));
   const path = writeContract(directory, fixture({
@@ -374,7 +358,6 @@ test("invalid worker result consumes a bounded revision before failing terminall
   assert.equal(state.revisions, 1);
   assert.equal(state.attempt, 2);
 });
-
 
 test("a spent repair blocks on protocol_failure and raises attention when no failover edge remains", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-invalid-result-terminal-"));
@@ -394,7 +377,6 @@ test("a spent repair blocks on protocol_failure and raises attention when no fai
   assert.equal(state.routing?.history?.length ?? 0, 0, "a blocked protocol failure records no route");
   assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "protocol_failure"));
 });
-
 
 test("a second unparseable worker result takes the failover edge before it blocks with attention", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-protocol-failover-"));
@@ -426,7 +408,6 @@ test("a second unparseable worker result takes the failover edge before it block
   assert.ok(notifications(result.runDir).some((event) => event.type === "attention" && event.errorCode === "protocol_failure"));
 });
 
-
 test("provider diagnostics stay bounded and recovery consumes only a bounded tail", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-raw-bounded-"));
   const path = writeContract(directory, fixture({ id: "raw-bounded-run", pollIntervalMs: 10 }));
@@ -444,7 +425,6 @@ test("provider diagnostics stay bounded and recovery consumes only a bounded tai
   assert.ok(recovered, "recovery returns an envelope");
   assert.equal(recovered.status, "done");
 });
-
 
 test("a continuation attempt adopts an existing canonical worker result instead of deleting it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-continuation-adopts-"));

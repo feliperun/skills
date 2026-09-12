@@ -50,12 +50,11 @@ import { campaignCli } from "./cli/campaign.mjs";
 import { contractCli, validateContractFile } from "./cli/contract.mjs";
 import { METRICS_OPTIONS, renderCampaignMetrics } from "./campaign/metrics.mjs";
 import { cancelRun, readRunNodes, resumeRun, runContract } from "./engine/scheduler.mjs";
-import {
-  emptyUsage,
-  render,
-} from "./engine/node.mjs";
+
 import { delay, errorCode, errorMessage } from "./util.mjs";
 import { bootstrapNonceForProcess, cleanupBootstrapNonce, waitForBootstrapAcknowledgement } from "./engine/detach.mjs";
+import { render } from "./report/final.mjs";
+import { emptyUsage } from "./run/usage.mjs";
 
 /** @typedef {import("./contract/index.mjs").ValidatedContract} ValidatedContract */
 /** @typedef {import("./contract/index.mjs").ValidatedNode} ValidatedNode */
@@ -469,7 +468,6 @@ function writeBootstrapAcknowledgement(runDir, bootstrap, expectedProcessStartTo
     at: new Date().toISOString(),
   });
 }
-
 
 /**
  * @param {string} runDir
