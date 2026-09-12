@@ -34,10 +34,11 @@ These fail `npm test`. `test/repo/source-shape.test.mjs` is where they live.
 - **No file over 800 lines.** Counted on every `.mjs` under this skill. A file
   that grows past it is doing more than one job; find the second job and give it
   a module. Raising the ceiling is not a fix.
-- **No runtime import cycle in `src/`.** One is currently allowed by name
-  (`engine/lifecycle.mjs` ↔ `engine/review.mjs`) and that allowance shrinks to
-  zero, never grows. JSDoc `import("…")` type references do not count — they are
-  erased at runtime.
+- **No runtime import cycle in `src/`.** The allowlist is empty and asserted
+  empty. The entry that used to be there (`engine/lifecycle.mjs` ↔
+  `engine/review.mjs`) was settlement living in the wrong module; extracting
+  `engine/settle.mjs` removed it. JSDoc `import("…")` type references do not
+  count — they are erased at runtime.
 - **No top-level body defined twice in `src/`.** Compared by body with the
   declaration's *name stripped*, because a copy that was renamed is still a
   copy — a name-keyed version of this gate let a byte-identical `compactCost`
@@ -52,11 +53,19 @@ These fail `npm test`. `test/repo/source-shape.test.mjs` is where they live.
 - **No barrel modules.** A module that only re-exports gives every symbol two
   homes and makes "where does this come from" unanswerable. `lib.mjs` was one;
   it is gone.
-- **Empty `catch {}` blocks never increase**, asserted at the measured count
-  (28) rather than a ceiling above it. A swallowed error either gets a body or
-  a comment saying why the failure is genuinely uninteresting. Target is zero.
+- **No empty `catch {}` block in `src/`.** Asserted at the measured count,
+  which is now zero: a swallowed error gets either a body or a comment naming
+  the failure it expects and why ignoring it is correct. A comment is a
+  legitimate answer — the rule is against silence, not against ignoring a
+  failure.
 - **Every module header stays**, ratcheted the same way: the count of `src/`
   modules with no leading block comment (30 of 84) only falls.
+- **No test bounds a measured duration from above.** `assert.ok(elapsed < 500)`
+  asserts how fast this machine is, and a loaded laptop falsifies it; this repo
+  has had that bug. A *lower* bound is fine — it proves a delay happened, and a
+  slower machine only makes it more true. Blocking waits of a second or more
+  are ratcheted rather than banned: `run/lock.test.mjs` waits out a real lock
+  TTL, and there is no honest way to prove expiry without letting time pass.
 - **No unused declaration anywhere.** `noUnusedLocals` is on, so `npm run
   typecheck` is the gate. Turning it on after the splits found 392 dead
   imports, typedefs and helpers, most of them left behind by the splits

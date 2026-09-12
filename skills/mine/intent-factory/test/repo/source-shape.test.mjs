@@ -53,6 +53,7 @@ const FILES = walk(SKILL_DIR).map((path) => ({
   text: readFileSync(path, "utf8"),
 }));
 const SRC_FILES = FILES.filter((file) => file.path.startsWith(SRC_DIR + sep));
+const TEST_FILES = FILES.filter((file) => file.path.startsWith(join(SKILL_DIR, "test") + sep));
 
 test(`no file in the skill exceeds ${LINE_CEILING} lines`, () => {
   const oversized = FILES
@@ -289,5 +290,59 @@ test(`src/ modules without a header never exceed ${HEADERLESS_CEILING}`, () => {
     headerless.length,
     HEADERLESS_CEILING,
     `the count fell to ${headerless.length}; lower HEADERLESS_CEILING to match so it cannot drift back up.`,
+  );
+});
+
+/**
+ * Wall-clock tolerance in tests, the class that only fails on someone else's
+ * machine. Two shapes, and they are not equally dangerous.
+ *
+ * An *upper* bound on a measured duration -- `assert.ok(elapsed < 500)` -- is
+ * a claim about how fast the machine is, and a loaded laptop or a cold CI box
+ * falsifies it. This repo has had that bug (heartbeat tolerance) and has none
+ * of it now, so the count is asserted at zero with equality: the first one to
+ * come back fails here rather than in someone's CI.
+ *
+ * A *blocking wait* is weaker: `await new Promise(r => setTimeout(r, 1100))`
+ * is correct on any machine, it just costs 1.1s of suite every run. It is
+ * ratcheted, not banned -- `run/lock.test.mjs` waits out a real lock TTL, and
+ * there is no honest way to prove expiry without letting time pass.
+ *
+ * A lower bound (`assert.ok(elapsed >= 180)`) is deliberately not counted: it
+ * proves a delay happened, and a slower machine only makes it more true.
+ *
+ * Comment lines are skipped, which this file learned the hard way: the first
+ * run of this gate failed on the example two paragraphs above.
+ */
+const WALL_CLOCK_UPPER_BOUND = /assert\b[^\n]*?(?:elapsed|duration|took|Date\.now\(\)\s*-|performance\.now\(\)\s*-)[^\n]*?<=?\s*\d{2,}/iu;
+const BLOCKING_WAIT = /(?:setTimeout\(\s*(?:resolve|res)\b[^,\n]*,\s*|await\s+(?:delay|sleep)\(\s*)(\d{4,})\b/gu;
+const BLOCKING_WAIT_CEILING = 1;
+
+test("no test bounds a measured duration from above", () => {
+  const offenders = TEST_FILES.flatMap((file) =>
+    file.text.split("\n")
+      .map((line, index) => ({ label: file.label, line: index + 1, text: line.trim() }))
+      .filter((line) => !line.text.startsWith("*") && !line.text.startsWith("//") && WALL_CLOCK_UPPER_BOUND.test(line.text)),
+  );
+  assert.deepEqual(
+    offenders.map((o) => `${o.label}:${o.line}  ${o.text}`),
+    [],
+    "an upper bound on a measured duration asserts how fast this machine is, not what the code does",
+  );
+});
+
+test(`tests blocking on wall-clock time never exceed ${BLOCKING_WAIT_CEILING}`, () => {
+  const waits = TEST_FILES.flatMap((file) =>
+    [...file.text.matchAll(BLOCKING_WAIT)].map((match) => `${file.label}  ${match[0]}`),
+  );
+  assert.ok(
+    waits.length <= BLOCKING_WAIT_CEILING,
+    `${waits.length} blocking wait(s) of 1s or more, ceiling ${BLOCKING_WAIT_CEILING}:\n` +
+      waits.map((wait) => `  ${wait}`).join("\n"),
+  );
+  assert.equal(
+    waits.length,
+    BLOCKING_WAIT_CEILING,
+    `the count fell to ${waits.length}; lower BLOCKING_WAIT_CEILING to match so it cannot drift back up.`,
   );
 });
