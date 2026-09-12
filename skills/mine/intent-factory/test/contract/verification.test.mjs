@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTENT_FACTORY_VERSION, PROTOCOL_SCHEMA_VERSION, validateContract } from "../../src/contract/index.mjs";
-import { parseJudge, retryPrompt } from "../../src/engine/prompts.mjs";
+import { JUDGE_SCHEMA, parseJudge, retryPrompt } from "../../src/engine/prompts.mjs";
 import { JUDGE_ENVELOPE_REASON, JUDGE_FINDING_ENVELOPE_REASON, JUDGE_LIMITS } from "../../src/contract/judge-envelope.mjs";
 import { judgeReaskInstruction } from "../../src/contract/review-modes.mjs";
 import { mechanicalVerdict } from "../../src/engine/judge-gate.mjs";
@@ -132,6 +132,20 @@ test("a verdict rejected by its envelope is re-asked with the size rule", () => 
     assert.match(instruction, /re-issue the same verdict/u);
     assert.doesNotMatch(instruction, /did not carry exactly one usable verdict/u);
   }
+});
+
+test("a clean pass may omit findings entirely", () => {
+  // Requiring `findings` turned a real `pass` verdict into provider exit 1,
+  // which the run then recorded as `judge_unavailable` for a judge that had
+  // answered (if-p3-delegation-mutation-20260912, bulk-read). Absent and `[]`
+  // are the same claim: nothing to report.
+  const clean = parseJudge(JSON.stringify({ verdict: "pass", maxSeverity: "none", summary: "all items hold" }));
+  assert.equal(clean.verdict, "pass");
+  assert.deepEqual(clean.findings, []);
+  assert.equal(JUDGE_SCHEMA.required.includes("findings"), false, "the schema must not ask for what a clean pass has none of");
+  assert.throws(() => parseJudge(JSON.stringify({
+    verdict: "pass", maxSeverity: "none", summary: "s", findings: "none",
+  })), /judge findings must be an array/u);
 });
 
 test("judge results are bounded, consistent, and require concrete evidence", () => {

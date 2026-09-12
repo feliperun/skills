@@ -36,7 +36,12 @@ export const JUDGE_SCHEMA = {
       },
     },
   },
-  required: ["verdict", "maxSeverity", "summary", "findings"],
+  // `findings` is deliberately not required. A clean pass has nothing to
+  // report, and a model that omits the empty array is answering correctly --
+  // requiring it turned a `pass` verdict into a provider exit code 1, which
+  // the run then recorded as `judge_unavailable` for a judge that had in fact
+  // answered. Absent and `[]` mean the same thing; `parseJudge` reads both.
+  required: ["verdict", "maxSeverity", "summary"],
 };
 
 /**
@@ -59,10 +64,11 @@ export function parseJudge(result) {
   const maxSeverity = verdict.maxSeverity;
   if (typeof judgeVerdict !== "string" || !JUDGE_SCHEMA.properties.verdict.enum.includes(judgeVerdict)) throw new Error("judge verdict must be pass or fail");
   if (typeof maxSeverity !== "string" || !JUDGE_SCHEMA.properties.maxSeverity.enum.includes(maxSeverity)) throw new Error("judge maxSeverity is invalid");
-  if (typeof verdict.summary !== "string" || !Array.isArray(verdict.findings)) throw new Error("judge result is missing summary or findings");
-  if (Buffer.byteLength(verdict.summary, "utf8") > JUDGE_LIMITS.summaryBytes || verdict.findings.length > JUDGE_LIMITS.findings) throw new Error(JUDGE_ENVELOPE_REASON);
+  if (typeof verdict.summary !== "string") throw new Error("judge result is missing summary");
+  if (verdict.findings !== undefined && !Array.isArray(verdict.findings)) throw new Error("judge findings must be an array");
+  const rawFindings = /** @type {unknown[]} */ (verdict.findings ?? []);
+  if (Buffer.byteLength(verdict.summary, "utf8") > JUDGE_LIMITS.summaryBytes || rawFindings.length > JUDGE_LIMITS.findings) throw new Error(JUDGE_ENVELOPE_REASON);
   const severityRank = { none: 0, minor: 1, major: 2, critical: 3 };
-  const rawFindings = /** @type {unknown[]} */ (verdict.findings);
   const findings = rawFindings.map((finding) => {
     if (!finding || typeof finding !== "object" || Array.isArray(finding)) throw new Error("judge finding is invalid");
     const record = /** @type {Record<string, unknown>} */ (finding);
