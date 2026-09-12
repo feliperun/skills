@@ -1,0 +1,19 @@
+{
+  "source": "diff",
+  "commands": [
+    {
+      "argv": [
+        "node",
+        "--check",
+        "skills/mine/intent-factory/src/host/tool-policy-decisions.mjs"
+      ]
+    },
+    {
+      "argv": [
+        "node",
+        "--test",
+        "skills/mine/intent-factory/test/host/tool-policy.test.mjs"
+      ]
+    }
+  ]
+}

@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
  * Builds `evals/golden/` from this repository's own git history — one task
  * directory per real commit, never a hand-written scenario — plus the
  * single shared `evals/golden/fixtures.bundle` every task's `meta.json`
- * points into. Regenerate with `node evals/build-golden.mjs`; the task list
+ * points into. Regenerate with `node evals/build-golden.mjs`, which writes
+ * only the tasks it can derive and refuses to touch the rest: a task on disk
+ * that the pool no longer produces is reported and left alone unless
+ * `--prune` says otherwise. The task list
  * and bundle it produces are a function of the repository's history and the
  * curated list below, not of anything typed by hand into `evals/golden/`
  * itself.
@@ -18,6 +21,16 @@ const EVALS_ROOT = fileURLToPath(new URL(".", import.meta.url));
 // `evals/` moved inside the skill (2026-09-12), so the git work tree and `.runs/`
 // are four levels up, not one.
 const REPO_ROOT = resolve(EVALS_ROOT, "..", "..", "..", "..");
+const SKILL_ROOT = resolve(EVALS_ROOT, "..");
+/**
+ * Repository-relative prefixes of the skill's source and test trees, derived
+ * from where this file actually sits. They were hardcoded as `src/` and
+ * `test/` and went stale the moment the skill gained its own directory:
+ * discovery then matched nothing and silently built only the curated list,
+ * which is exactly the kind of quiet death a hardcoded path dies.
+ */
+const SOURCE_PREFIX = `${relative(REPO_ROOT, join(SKILL_ROOT, "src"))}/`;
+const TEST_PREFIX = `${relative(REPO_ROOT, join(SKILL_ROOT, "test"))}/`;
 const GOLDEN_ROOT = join(EVALS_ROOT, "golden");
 const BUNDLE_PATH = join(GOLDEN_ROOT, "fixtures.bundle");
 
@@ -75,8 +88,8 @@ function discoverFixShas() {
     const parent = `${sha}^`;
     if (!gitRevExists(parent)) continue; // a root commit has no parent to diff against
     const files = diffNameStatus(parent, sha).map((entry) => entry.path);
-    const touchesScripts = files.some((path) => path.startsWith("src/"));
-    const touchesTest = files.some((path) => path.startsWith("test/"));
+    const touchesScripts = files.some((path) => path.startsWith(SOURCE_PREFIX));
+    const touchesTest = files.some((path) => path.startsWith(TEST_PREFIX));
     if (touchesScripts && touchesTest) picked.push(sha);
   }
   return picked;
@@ -284,6 +297,46 @@ function buildTask(sha) {
   };
 }
 
+/**
+ * Task directories present on disk that this build will not write. Deleting
+ * them used to be the first thing `main` did -- `rmSync` of the whole root --
+ * so a run of the builder destroyed every task the curated pool no longer
+ * produced. Most of `evals/golden/` is in that position, and the loss was
+ * silent and total.
+ *
+ * @param {Set<string>} buildable
+ * @returns {string[]}
+ */
+function orphanedTaskIds(buildable) {
+  if (!existsSync(GOLDEN_ROOT)) return [];
+  return readdirSync(GOLDEN_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !buildable.has(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
+ * Parent commits of the tasks this build keeps but does not write. The bundle
+ * is shared by every task, so building additively without these would leave
+ * the kept tasks pointing at fixture commits the bundle no longer carries --
+ * the tasks would survive on disk and fail to restore, which is worse than
+ * deleting them outright.
+ *
+ * @param {string[]} taskIds
+ * @returns {string[]}
+ */
+function orphanParentShas(taskIds) {
+  /** @type {string[]} */
+  const parents = [];
+  for (const id of taskIds) {
+    const metaPath = join(GOLDEN_ROOT, id, "meta.json");
+    if (!existsSync(metaPath)) continue;
+    const parent = JSON.parse(readFileSync(metaPath, "utf8")).parentSha;
+    if (typeof parent === "string" && parent) parents.push(parent);
+  }
+  return parents;
+}
+
 function main() {
   const shas = [...FACTORY_SHAS, ...discoverFixShas()];
   const fullShas = shas.map((sha) => runGit(["rev-parse", sha]));
@@ -297,8 +350,19 @@ function main() {
     seenIds.add(task.taskId);
   }
 
-  rmSync(GOLDEN_ROOT, { recursive: true, force: true });
+  const orphans = orphanedTaskIds(new Set(tasks.map((task) => task.taskId)));
+  const prune = process.argv.slice(2).includes("--prune");
+  if (orphans.length && !prune) {
+    process.stderr.write(
+      `${orphans.length} golden task(s) on disk are not in the selected pool and are left untouched:\n` +
+        orphans.map((id) => `  ${id}\n`).join("") +
+        "Pass --prune to delete them. Their parent commits stay in the bundle either way.\n",
+    );
+  }
   mkdirSync(GOLDEN_ROOT, { recursive: true });
+  for (const id of prune ? orphans : []) rmSync(join(GOLDEN_ROOT, id), { recursive: true, force: true });
+  for (const task of tasks) rmSync(join(GOLDEN_ROOT, task.taskId), { recursive: true, force: true });
+  const keptParents = prune ? [] : orphanParentShas(orphans);
   for (const task of tasks) {
     const taskDir = join(GOLDEN_ROOT, task.taskId);
     mkdirSync(taskDir, { recursive: true });
@@ -310,7 +374,7 @@ function main() {
     );
   }
 
-  buildBundle(tasks.map((task) => task.parentSha));
+  buildBundle([...tasks.map((task) => task.parentSha), ...keptParents]);
 
   process.stdout.write(`built ${tasks.length} golden tasks under ${GOLDEN_ROOT}\n`);
   for (const task of tasks) process.stdout.write(`  ${task.taskId} <- ${task.commitSha.slice(0, 7)} (parent ${task.parentSha.slice(0, 7)}, ${task.verify.source})\n`);
